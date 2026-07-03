@@ -15,6 +15,15 @@ MD.Page {
     title: 'Settings'
     scrolling: !m_flick.atYBeginning
 
+    actions: [
+        MD.Action {
+            icon.name: MD.Token.icon.refresh
+            text: qsTr("Reset")
+            enabled: Object.keys(getQ.global).length > 0
+            onTriggered: root.resetSettings()
+        }
+    ]
+
     component FieldLabel: MD.Text {
         typescale: MD.Token.typescale.label_large
         color: MD.Token.color.on_surface
@@ -162,6 +171,30 @@ MD.Page {
             sessionLocked: WC.AutoAction.AUTO_ACTION_STOP,
             sessionInactive: WC.AutoAction.AUTO_ACTION_STOP
         };
+    }
+
+    function _defaultGlobalPageSettings() {
+        return {
+            autoReplay: root._defaultAutoReplay(),
+            queueMode: "sequential",
+            rotationSecs: 0,
+            audioFadeMs: 500
+        };
+    }
+
+    function resetSettings() {
+        if (Object.keys(getQ.global).length === 0)
+            return;
+
+        const nextGlobal = Object.assign({}, getQ.global, root._defaultGlobalPageSettings());
+        m_flush.stop();
+        m_pending.nextGlobal = null;
+        m_pending.submittedGlobal = nextGlobal;
+        W.Global.sidebarAutoExpand = true;
+        root.autoReplayRevision += 1;
+        setQ.global = nextGlobal;
+        setQ.plugins = getQ.plugins;
+        setQ.reload();
     }
 
     function _globalPageKey(g) {
