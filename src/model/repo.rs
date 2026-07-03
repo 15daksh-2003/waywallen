@@ -95,14 +95,34 @@ pub async fn remove_plugin(db: &DatabaseConnection, id: i64) -> Result<u64> {
 // ---------------------------------------------------------------------------
 // library
 
+pub fn expand_home_path(path: &str) -> String {
+    let Some(rest) = path.strip_prefix('~') else {
+        return path.to_owned();
+    };
+    if !rest.is_empty() && !rest.starts_with('/') {
+        return path.to_owned();
+    }
+    let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) else {
+        return path.to_owned();
+    };
+    let mut expanded = std::path::PathBuf::from(home);
+    if let Some(rest) = rest.strip_prefix('/') {
+        if !rest.is_empty() {
+            expanded.push(rest);
+        }
+    }
+    expanded.to_string_lossy().into_owned()
+}
+
 pub async fn add_library(
     db: &DatabaseConnection,
     plugin_id: i64,
     path: &str,
 ) -> Result<library::Model> {
+    let path = expand_home_path(path);
     let am = library::ActiveModel {
         plugin_id: Set(plugin_id),
-        path: Set(path.to_owned()),
+        path: Set(path.clone()),
         ..Default::default()
     };
     am.insert(db)
@@ -115,9 +135,10 @@ pub async fn find_library(
     plugin_id: i64,
     path: &str,
 ) -> Result<Option<library::Model>> {
+    let path = expand_home_path(path);
     library::Entity::find()
         .filter(library::Column::PluginId.eq(plugin_id))
-        .filter(library::Column::Path.eq(path))
+        .filter(library::Column::Path.eq(path.as_str()))
         .one(db)
         .await
         .with_context(|| format!("select library plugin={plugin_id} path={path}"))
@@ -1131,6 +1152,32 @@ pub async fn list_tags_for_items(
 mod tests {
     use super::*;
     use crate::model::connect_url;
+    use std::ffi::OsString;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct HomeGuard {
+        old: Option<OsString>,
+    }
+
+    impl HomeGuard {
+        fn set(home: &str) -> Self {
+            let old = std::env::var_os("HOME");
+            std::env::set_var("HOME", home);
+            Self { old }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            if let Some(old) = &self.old {
+                std::env::set_var("HOME", old);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
 
     async fn mem_db() -> DatabaseConnection {
         connect_url("sqlite::memory:").await.unwrap()
@@ -1175,6 +1222,25 @@ mod tests {
         add_library(&db, a.id, "/shared").await.unwrap();
         add_library(&db, b.id, "/shared").await.unwrap();
         assert!(add_library(&db, a.id, "/shared").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn add_library_expands_home_prefix() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _home = HomeGuard::set("/tmp/waywallen-home");
+        let db = mem_db().await;
+        let p = upsert_plugin(&db, "p", "").await.unwrap();
+
+        let root = add_library(&db, p.id, "~").await.unwrap();
+        let pictures = add_library(&db, p.id, "~/Pictures").await.unwrap();
+
+        assert_eq!(root.path, "/tmp/waywallen-home");
+        assert_eq!(pictures.path, "/tmp/waywallen-home/Pictures");
+        assert!(find_library(&db, p.id, "~/Pictures")
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(expand_home_path("~other/Pictures"), "~other/Pictures");
     }
 
     #[tokio::test]
