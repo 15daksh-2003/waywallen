@@ -78,6 +78,7 @@ message Request {
     WallpaperLayoutSetRequest wallpaper_layout_set = 59;
     PluginDeleteRequest       plugin_delete = 60;
     WallpaperRemoveRequest    wallpaper_remove = 61;
+    PluginInspectRequest      plugin_inspect = 62;
   }
 }
 
@@ -143,6 +144,7 @@ message Response {
     WallpaperLayoutSetResponse wallpaper_layout_set = 59;
     PluginDeleteResponse       plugin_delete = 60;
     WallpaperRemoveResponse    wallpaper_remove = 61;
+    PluginInspectResponse      plugin_inspect = 62;
   }
 }
 
@@ -1179,15 +1181,30 @@ message GpuListResponse {
 }
 
 // Install an installable plugin from a local .zip into the user plugin dir
-// ($XDG_DATA_HOME/waywallen/plugins/). The archive must contain a top-level
-// directory holding plugin.toml. Renderer components only take effect after a
-// daemon restart (the registry is built at startup), hence `needs_restart`.
+// ($XDG_DATA_HOME/waywallen/plugins/). The archive root must contain
+// plugin.toml. A successful install refreshes the daemon plugin runtime;
+// `needs_restart` is reserved for cases the daemon cannot hot-apply.
 message PluginInstallRequest {
   string zip_path = 1;
 }
 message PluginInstallResponse {
   string plugin_id = 1;
   bool needs_restart = 2;
+}
+
+message PluginInspectRequest {
+  string zip_path = 1;
+}
+message PluginInspectResponse {
+  string plugin_id = 1;
+  string name = 2;
+  string version = 3;
+  bool has_source = 4;
+  repeated string renderers = 5;
+  bool overwrite = 6;
+  string existing_version = 7;
+  string existing_name = 8;
+  bool existing_system = 9;
 }
 
 message PluginDeleteRequest {

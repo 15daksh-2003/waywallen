@@ -97,7 +97,7 @@ impl PluginScan {
 
 /// Installable-plugin (package) summary, retained in `AppState` so the UI
 /// can present a plugin-centric view independent of the component registry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginPackageMeta {
     pub id: String,
     pub name: String,
@@ -473,6 +473,7 @@ fn toml_default_to_string(value: &toml::Value, ty: SettingType) -> Option<String
 // ---------------------------------------------------------------------------
 // Registry
 
+#[derive(Clone, Default)]
 pub struct RendererRegistry {
     /// type → list of RendererDef sorted by descending priority.
     by_type: HashMap<WallpaperType, Vec<RendererDef>>,

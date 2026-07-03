@@ -226,6 +226,13 @@ impl SourceManager {
         self.db = Some(db);
     }
 
+    pub fn clear_plugins(&mut self) {
+        self.plugins.clear();
+        self.plugin_infos.clear();
+        self.entries.clear();
+        self.by_type.clear();
+    }
+
     fn plugin_lua_env(&self, root: &Path) -> Result<LuaTable> {
         let root = root
             .canonicalize()

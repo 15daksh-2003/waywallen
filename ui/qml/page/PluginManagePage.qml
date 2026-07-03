@@ -29,7 +29,7 @@ MD.Page {
         MD.Action {
             icon.name: MD.Token.icon.add
             text: qsTr("Install from .zip")
-            enabled: !installQuery.querying
+            enabled: !installQuery.querying && !inspectQuery.querying
             onTriggered: zipDialog.open()
         }
     ]
@@ -40,6 +40,10 @@ MD.Page {
 
     W.PluginInstallQuery {
         id: installQuery
+    }
+
+    W.PluginInspectQuery {
+        id: inspectQuery
     }
 
     W.PluginDeleteQuery {
@@ -70,6 +74,29 @@ MD.Page {
                 ? qsTr("Installed \"%1\" — restart waywallen to load it").arg(pluginId)
                 : qsTr("Installed \"%1\"").arg(pluginId));
             pluginListQuery.reload();
+        }
+        function onStatusChanged(status) {
+            if (status !== 3)
+                return;
+            const message = installQuery.error && installQuery.error.length > 0
+                ? installQuery.error
+                : qsTr("Plugin install failed");
+            W.Action.toast(message, 6000, 1, null);
+        }
+    }
+
+    Connections {
+        target: inspectQuery
+        function onInspected() {
+            installDialog.open();
+        }
+        function onStatusChanged(status) {
+            if (status !== 3)
+                return;
+            const message = inspectQuery.error && inspectQuery.error.length > 0
+                ? inspectQuery.error
+                : qsTr("Plugin package inspect failed");
+            W.Action.toast(message, 6000, 1, null);
         }
     }
 
@@ -163,7 +190,108 @@ MD.Page {
         fileMode: MD.FileDialog.OpenFile
         nameFilters: ["Plugin package (*.zip)", "All files (*)"]
         onAccepted: {
-            installQuery.zipPath = selectedFile.toString().replace(/^file:\/\//, "");
+            inspectQuery.zipPath = selectedFile.toString().replace(/^file:\/\//, "");
+            inspectQuery.reload();
+        }
+    }
+
+    MD.Dialog {
+        id: installDialog
+        title: inspectQuery.overwrite ? qsTr("Update plugin?") : qsTr("Install plugin?")
+        parent: T.Overlay.overlay
+        horizontalPadding: 16
+        implicitWidth: Math.min(440, parent ? parent.width - 48 : 440)
+        standardButtons: T.Dialog.Cancel | T.Dialog.Ok
+
+        contentItem: ColumnLayout {
+            spacing: 12
+
+            GridLayout {
+                Layout.fillWidth: true
+                columns: 2
+                columnSpacing: 12
+                rowSpacing: 8
+
+                MD.Text {
+                    text: qsTr("Name")
+                    typescale: MD.Token.typescale.body_medium
+                    color: MD.Token.color.on_surface_variant
+                }
+                MD.Text {
+                    Layout.fillWidth: true
+                    text: inspectQuery.name || inspectQuery.pluginId
+                    typescale: MD.Token.typescale.body_medium
+                    color: MD.Token.color.on_surface
+                    wrapMode: Text.WordWrap
+                }
+
+                MD.Text {
+                    text: qsTr("Id")
+                    typescale: MD.Token.typescale.body_medium
+                    color: MD.Token.color.on_surface_variant
+                }
+                MD.Text {
+                    Layout.fillWidth: true
+                    text: inspectQuery.pluginId
+                    typescale: MD.Token.typescale.body_medium
+                    color: MD.Token.color.on_surface
+                    wrapMode: Text.WrapAnywhere
+                }
+
+                MD.Text {
+                    text: qsTr("Version")
+                    typescale: MD.Token.typescale.body_medium
+                    color: MD.Token.color.on_surface_variant
+                }
+                MD.Text {
+                    Layout.fillWidth: true
+                    text: inspectQuery.overwrite
+                        ? qsTr("%1 -> %2").arg(inspectQuery.existingVersion || qsTr("unknown")).arg(inspectQuery.version || qsTr("unknown"))
+                        : ("v" + (inspectQuery.version || "0.0.0"))
+                    typescale: MD.Token.typescale.body_medium
+                    color: inspectQuery.overwrite ? MD.Token.color.primary : MD.Token.color.on_surface
+                    wrapMode: Text.WordWrap
+                }
+
+                MD.Text {
+                    text: qsTr("Source")
+                    typescale: MD.Token.typescale.body_medium
+                    color: MD.Token.color.on_surface_variant
+                }
+                MD.Text {
+                    Layout.fillWidth: true
+                    text: inspectQuery.hasSource ? qsTr("Yes") : qsTr("No")
+                    typescale: MD.Token.typescale.body_medium
+                    color: MD.Token.color.on_surface
+                }
+            }
+
+            Flow {
+                Layout.fillWidth: true
+                spacing: 6
+                visible: inspectQuery.renderers && inspectQuery.renderers.length > 0
+
+                Repeater {
+                    model: inspectQuery.renderers
+                    delegate: W.Tag {
+                        required property var modelData
+                        text: modelData
+                    }
+                }
+            }
+
+            MD.Text {
+                Layout.fillWidth: true
+                visible: !inspectQuery.overwrite && inspectQuery.existingSystem && inspectQuery.existingVersion.length > 0
+                text: qsTr("A system plugin with the same id is active. Installing this package may replace it with the user plugin version %1.").arg(inspectQuery.version || qsTr("unknown"))
+                typescale: MD.Token.typescale.body_medium
+                color: MD.Token.color.on_surface_variant
+                wrapMode: Text.WordWrap
+            }
+        }
+
+        onAccepted: {
+            installQuery.zipPath = inspectQuery.zipPath;
             installQuery.reload();
         }
     }

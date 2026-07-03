@@ -1,7 +1,15 @@
 use crate::error::{Error, Result};
-use std::collections::BTreeSet;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+
+#[derive(Debug, Clone)]
+pub struct PluginArchiveInfo {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub has_source: bool,
+    pub renderers: Vec<String>,
+}
 
 fn install_fail(msg: impl Into<String>) -> Error {
     Error::PluginInstallFailed(msg.into())
@@ -35,8 +43,96 @@ fn read_plugin_id(manifest: &Path) -> std::result::Result<String, String> {
     Ok(m.plugin.id)
 }
 
+fn read_plugin_info_from_text(text: &str) -> std::result::Result<PluginArchiveInfo, String> {
+    let manifest: crate::plugin::renderer_registry::PluginManifest =
+        toml::from_str(text).map_err(|e| format!("parse plugin.toml: {e}"))?;
+    let mut renderers: Vec<_> = manifest.renderers.keys().cloned().collect();
+    renderers.sort();
+    Ok(PluginArchiveInfo {
+        id: manifest.plugin.id,
+        name: manifest.plugin.name,
+        version: manifest.plugin.version,
+        has_source: manifest.plugin.entry.is_some(),
+        renderers,
+    })
+}
+
+fn read_plugin_info(manifest: &Path) -> std::result::Result<PluginArchiveInfo, String> {
+    let text = std::fs::read_to_string(manifest).map_err(|e| e.to_string())?;
+    read_plugin_info_from_text(&text)
+}
+
+fn validate_plugin_dir_name(id: &str) -> Result<()> {
+    if id.is_empty() {
+        return Err(install_fail("plugin id is empty"));
+    }
+    let mut components = Path::new(id).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) if !id.contains(['/', '\\']) => Ok(()),
+        _ => Err(install_fail(format!("unsafe plugin id '{id}'"))),
+    }
+}
+
+fn apply_zip_mode(entry: &zip::read::ZipFile<'_>, path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(mode) = entry.unix_mode() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+                .map_err(|e| install_fail(format!("chmod {}: {e}", path.display())))?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (entry, path);
+    }
+    Ok(())
+}
+
+fn remove_existing(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(path)
+            .map_err(|e| install_fail(format!("delete {}: {e}", path.display()))),
+        Ok(_) => std::fs::remove_file(path)
+            .map_err(|e| install_fail(format!("delete {}: {e}", path.display()))),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(install_fail(format!("stat {}: {e}", path.display()))),
+    }
+}
+
+pub fn inspect_zip(zip_path: &str) -> Result<PluginArchiveInfo> {
+    let file =
+        std::fs::File::open(zip_path).map_err(|e| install_fail(format!("open {zip_path}: {e}")))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| install_fail(format!("read zip: {e}")))?;
+    let mut manifest = archive
+        .by_name("plugin.toml")
+        .map_err(|_| install_fail("archive must contain plugin.toml at root"))?;
+    let mut text = String::new();
+    use std::io::Read;
+    manifest
+        .read_to_string(&mut text)
+        .map_err(|e| install_fail(format!("read plugin.toml: {e}")))?;
+    let info = read_plugin_info_from_text(&text).map_err(install_fail)?;
+    validate_plugin_dir_name(&info.id)?;
+    Ok(info)
+}
+
+pub fn inspect_user_plugin(plugin_id: &str) -> Result<Option<PluginArchiveInfo>> {
+    validate_plugin_dir_name(plugin_id)?;
+    let Some(dest_root) = user_plugins_dir_path() else {
+        return Ok(None);
+    };
+    let manifest = dest_root.join(plugin_id).join("plugin.toml");
+    if !manifest.is_file() {
+        return Ok(None);
+    }
+    let info = read_plugin_info(&manifest).map_err(install_fail)?;
+    Ok(Some(info))
+}
+
 /// Extract a plugin `.zip` into the user plugin directory and return the
-/// installed plugin id. The archive must contain a top-level directory
+/// installed plugin id.
 pub fn install_zip(zip_path: &str) -> Result<String> {
     let file =
         std::fs::File::open(zip_path).map_err(|e| install_fail(format!("open {zip_path}: {e}")))?;
@@ -47,52 +143,72 @@ pub fn install_zip(zip_path: &str) -> Result<String> {
     std::fs::create_dir_all(&dest_root)
         .map_err(|e| install_fail(format!("mkdir {}: {e}", dest_root.display())))?;
 
-    let mut top_dirs: BTreeSet<String> = BTreeSet::new();
+    let staging_root = dest_root.join(".install-tmp");
+    std::fs::create_dir_all(&staging_root)
+        .map_err(|e| install_fail(format!("mkdir {}: {e}", staging_root.display())))?;
+    let staging = staging_root.join(uuid::Uuid::new_v4().to_string());
+    let extract_root = staging.join("archive");
+    std::fs::create_dir_all(&extract_root)
+        .map_err(|e| install_fail(format!("mkdir {}: {e}", extract_root.display())))?;
 
-    for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|e| install_fail(e.to_string()))?;
-        // `enclosed_name` rejects absolute paths and `..` traversal.
-        let rel = match entry.enclosed_name() {
-            Some(p) => p.to_path_buf(),
-            None => {
-                return Err(install_fail(format!(
-                    "unsafe path in archive: {}",
-                    entry.name()
-                )))
+    let result = (|| {
+        for i in 0..archive.len() {
+            let mut entry = archive
+                .by_index(i)
+                .map_err(|e| install_fail(e.to_string()))?;
+            // `enclosed_name` rejects absolute paths and `..` traversal.
+            let rel = match entry.enclosed_name() {
+                Some(p) => p.to_path_buf(),
+                None => {
+                    return Err(install_fail(format!(
+                        "unsafe path in archive: {}",
+                        entry.name()
+                    )))
+                }
+            };
+            if rel.as_os_str().is_empty() {
+                continue;
             }
-        };
-        if let Some(std::path::Component::Normal(first)) = rel.components().next() {
-            top_dirs.insert(first.to_string_lossy().into_owned());
+            let out = extract_root.join(&rel);
+            if entry.is_dir() {
+                std::fs::create_dir_all(&out).map_err(|e| install_fail(e.to_string()))?;
+                apply_zip_mode(&entry, &out)?;
+            } else {
+                if let Some(parent) = out.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| install_fail(e.to_string()))?;
+                }
+                let mut f = std::fs::File::create(&out).map_err(|e| install_fail(e.to_string()))?;
+                std::io::copy(&mut entry, &mut f).map_err(|e| install_fail(e.to_string()))?;
+                apply_zip_mode(&entry, &out)?;
+            }
         }
-        let out = dest_root.join(&rel);
-        if entry.is_dir() {
-            std::fs::create_dir_all(&out).map_err(|e| install_fail(e.to_string()))?;
-        } else {
-            if let Some(parent) = out.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| install_fail(e.to_string()))?;
-            }
-            let mut f = std::fs::File::create(&out).map_err(|e| install_fail(e.to_string()))?;
-            std::io::copy(&mut entry, &mut f).map_err(|e| install_fail(e.to_string()))?;
+
+        let manifest = extract_root.join("plugin.toml");
+        if !manifest.is_file() {
+            return Err(install_fail("archive must contain plugin.toml at root"));
+        }
+        let id = read_plugin_id(&manifest).map_err(install_fail)?;
+        validate_plugin_dir_name(&id)?;
+        let target = dest_root.join(&id);
+        remove_existing(&target)?;
+        std::fs::rename(&extract_root, &target).map_err(|e| {
+            install_fail(format!(
+                "install {} to {}: {e}",
+                extract_root.display(),
+                target.display()
+            ))
+        })?;
+        log::info!("installed plugin '{id}' into {}", target.display());
+        Ok(id)
+    })();
+
+    if let Err(e) = std::fs::remove_dir_all(&staging) {
+        if e.kind() != ErrorKind::NotFound {
+            log::warn!("cleanup {} failed: {e}", staging.display());
         }
     }
 
-    for d in &top_dirs {
-        let manifest = dest_root.join(d).join("plugin.toml");
-        if manifest.is_file() {
-            let id = read_plugin_id(&manifest).map_err(|e| install_fail(e))?;
-            log::info!(
-                "installed plugin '{id}' into {}",
-                dest_root.join(d).display()
-            );
-            return Ok(id);
-        }
-    }
-
-    Err(install_fail(
-        "archive must contain a top-level directory with plugin.toml",
-    ))
+    result
 }
 
 pub fn delete_user_plugin(plugin_id: &str) -> Result<String> {
@@ -156,4 +272,187 @@ pub fn delete_user_plugin(plugin_id: &str) -> Result<String> {
     }
 
     Err(delete_fail(format!("user plugin '{plugin_id}' not found")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct XdgDataHomeGuard {
+        old: Option<OsString>,
+    }
+
+    impl XdgDataHomeGuard {
+        fn set(path: &Path) -> Self {
+            let old = std::env::var_os("XDG_DATA_HOME");
+            std::env::set_var("XDG_DATA_HOME", path);
+            Self { old }
+        }
+    }
+
+    impl Drop for XdgDataHomeGuard {
+        fn drop(&mut self) {
+            if let Some(old) = &self.old {
+                std::env::set_var("XDG_DATA_HOME", old);
+            } else {
+                std::env::remove_var("XDG_DATA_HOME");
+            }
+        }
+    }
+
+    fn with_xdg_data_home<T>(path: &Path, f: impl FnOnce() -> T) -> T {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = XdgDataHomeGuard::set(path);
+        f()
+    }
+
+    fn write_zip(path: &Path, files: &[(&str, &str)]) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .unix_permissions(0o644);
+        for (name, body) in files {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    fn manifest(id: &str) -> String {
+        format!(
+            r#"[plugin]
+id = "{id}"
+name = "Test"
+version = "1.0.0"
+"#
+        )
+    }
+
+    #[test]
+    fn install_zip_accepts_plugin_root_archive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("plugin.zip");
+        write_zip(
+            &zip_path,
+            &[
+                ("plugin.toml", &manifest("org.example.root")),
+                ("files.txt", "plugin.toml\nfiles.txt\nmain.lua\n"),
+                ("main.lua", "return {}\n"),
+            ],
+        );
+
+        with_xdg_data_home(tmp.path(), || {
+            let id = install_zip(zip_path.to_str().unwrap()).unwrap();
+            assert_eq!(id, "org.example.root");
+            let plugin_dir = tmp.path().join("waywallen/plugins/org.example.root");
+            assert!(plugin_dir.join("plugin.toml").is_file());
+            assert!(plugin_dir.join("files.txt").is_file());
+            assert!(plugin_dir.join("main.lua").is_file());
+            assert!(!tmp.path().join("waywallen/plugins/plugin.toml").exists());
+        });
+    }
+
+    #[test]
+    fn inspect_zip_reads_plugin_root_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("plugin.zip");
+        write_zip(
+            &zip_path,
+            &[
+                (
+                    "plugin.toml",
+                    r#"[plugin]
+id = "org.example.inspect"
+name = "Inspect"
+version = "2.1.0"
+entry = "main.lua"
+entry_version = 2
+
+[renderers.scene]
+bin = "bin/renderer"
+types = ["scene"]
+"#,
+                ),
+                ("files.txt", "plugin.toml\nfiles.txt\nmain.lua\n"),
+                ("main.lua", "return {}\n"),
+            ],
+        );
+
+        let info = inspect_zip(zip_path.to_str().unwrap()).unwrap();
+        assert_eq!(info.id, "org.example.inspect");
+        assert_eq!(info.name, "Inspect");
+        assert_eq!(info.version, "2.1.0");
+        assert!(info.has_source);
+        assert_eq!(info.renderers, vec!["scene".to_string()]);
+    }
+
+    #[test]
+    fn install_zip_overwrites_existing_plugin_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first_zip = tmp.path().join("first.zip");
+        let second_zip = tmp.path().join("second.zip");
+        write_zip(
+            &first_zip,
+            &[
+                ("plugin.toml", &manifest("org.example.overwrite")),
+                ("files.txt", "plugin.toml\nfiles.txt\nold.lua\n"),
+                ("old.lua", "return 'old'\n"),
+            ],
+        );
+        write_zip(
+            &second_zip,
+            &[
+                ("plugin.toml", &manifest("org.example.overwrite")),
+                ("files.txt", "plugin.toml\nfiles.txt\nnew.lua\n"),
+                ("new.lua", "return 'new'\n"),
+            ],
+        );
+
+        with_xdg_data_home(tmp.path(), || {
+            let id = install_zip(first_zip.to_str().unwrap()).unwrap();
+            assert_eq!(id, "org.example.overwrite");
+            let id = install_zip(second_zip.to_str().unwrap()).unwrap();
+            assert_eq!(id, "org.example.overwrite");
+
+            let plugin_dir = tmp.path().join("waywallen/plugins/org.example.overwrite");
+            assert!(plugin_dir.join("new.lua").is_file());
+            assert!(!plugin_dir.join("old.lua").exists());
+            assert_eq!(
+                std::fs::read_to_string(plugin_dir.join("new.lua")).unwrap(),
+                "return 'new'\n"
+            );
+        });
+    }
+
+    #[test]
+    fn install_zip_rejects_top_level_plugin_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("plugin.zip");
+        write_zip(
+            &zip_path,
+            &[
+                ("bundle/plugin.toml", &manifest("org.example.top")),
+                ("bundle/files.txt", "plugin.toml\nfiles.txt\nmain.lua\n"),
+                ("bundle/main.lua", "return {}\n"),
+            ],
+        );
+
+        with_xdg_data_home(tmp.path(), || {
+            let err = install_zip(zip_path.to_str().unwrap()).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "plugin install failed: archive must contain plugin.toml at root"
+            );
+            assert!(!tmp
+                .path()
+                .join("waywallen/plugins/org.example.top")
+                .exists());
+        });
+    }
 }

@@ -1302,10 +1302,10 @@ async fn dispatch_inner(
         }
 
         Req::RendererPluginList(_) => {
-            let registry = state.renderer_manager.registry();
+            let registry = state.renderer_manager.registry_snapshot();
             // Renderer version = owning plugin's version, by plugin_id.
-            let plugin_versions: std::collections::HashMap<&str, &str> = state
-                .plugins
+            let plugins = state.plugins.read().await;
+            let plugin_versions: std::collections::HashMap<&str, &str> = plugins
                 .iter()
                 .map(|p| (p.id.as_str(), p.version.as_str()))
                 .collect();
@@ -1377,6 +1377,50 @@ async fn dispatch_inner(
             Res::PluginDelete(pb::PluginDeleteResponse {
                 plugin_id,
                 needs_restart: true,
+            })
+        }
+
+        Req::PluginInspect(r) => {
+            let zip_path = r.zip_path.clone();
+            let (info, existing_user) = tokio::task::spawn_blocking(move || {
+                let info = crate::plugin::installer::inspect_zip(&zip_path)?;
+                let existing = crate::plugin::installer::inspect_user_plugin(&info.id)?;
+                Ok::<_, Error>((info, existing))
+            })
+            .await
+            .map_err(|e| Error::Internal(anyhow::anyhow!("plugin inspect join: {e}")))??;
+
+            let active_existing = {
+                let plugins = state.plugins.read().await;
+                plugins.iter().find(|p| p.id == info.id).cloned()
+            };
+            let overwrite = existing_user.is_some();
+            let existing_version = existing_user
+                .as_ref()
+                .map(|p| p.version.clone())
+                .or_else(|| active_existing.as_ref().map(|p| p.version.clone()))
+                .unwrap_or_default();
+            let existing_name = existing_user
+                .as_ref()
+                .map(|p| p.name.clone())
+                .or_else(|| active_existing.as_ref().map(|p| p.name.clone()))
+                .unwrap_or_default();
+            let existing_system = if existing_user.is_some() {
+                false
+            } else {
+                active_existing.as_ref().is_some_and(|p| p.system)
+            };
+
+            Res::PluginInspect(pb::PluginInspectResponse {
+                plugin_id: info.id,
+                name: info.name,
+                version: info.version,
+                has_source: info.has_source,
+                renderers: info.renderers,
+                overwrite,
+                existing_version,
+                existing_name,
+                existing_system,
             })
         }
 
@@ -1816,17 +1860,10 @@ async fn dispatch_inner(
         }
 
         Req::PluginInstall(r) => {
-            // Extraction is blocking filesystem work; keep it off the async
-            // dispatch worker. Renderer components load on next daemon start.
-            let zip_path = r.zip_path.clone();
-            let plugin_id = tokio::task::spawn_blocking(move || {
-                crate::plugin::installer::install_zip(&zip_path)
-            })
-            .await
-            .map_err(|e| Error::Internal(anyhow::anyhow!("install join: {e}")))??;
+            let result = crate::control::install_plugin_archive(state, r.zip_path.clone()).await?;
             Res::PluginInstall(pb::PluginInstallResponse {
-                plugin_id,
-                needs_restart: true,
+                plugin_id: result.plugin_id,
+                needs_restart: result.needs_restart,
             })
         }
 
@@ -2139,7 +2176,7 @@ async fn dispatch_inner(
             }
             // Empty renderer_name uses priority resolve; explicit names must
             // resolve to a renderer that supports this wallpaper type.
-            let registry = state.renderer_manager.registry();
+            let registry = state.renderer_manager.registry_snapshot();
             let plugin_name: String = if r.renderer_name.is_empty() {
                 registry
                     .resolve(&entry.wp_type)
@@ -2341,7 +2378,7 @@ async fn dispatch_inner(
             // Schema validation up-front. Reject the entire RPC if any
             // declared key fails type, bounds, or choices.
             {
-                let registry = state.renderer_manager.registry();
+                let registry = state.renderer_manager.registry_snapshot();
                 for (plugin_name, kv) in new_plugins.iter_mut() {
                     let Some(def) = registry
                         .all_renderers()
@@ -2464,7 +2501,7 @@ async fn dispatch_inner(
             for plugin_name in plugin_names_changed {
                 let def = state
                     .renderer_manager
-                    .registry()
+                    .registry_snapshot()
                     .all_renderers()
                     .into_iter()
                     .find(|d| d.name == plugin_name)

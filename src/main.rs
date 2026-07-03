@@ -41,14 +41,15 @@ pub struct AppState {
     pub renderer_manager: Arc<renderer_manager::RendererManager>,
     pub source_manager: Arc<tokio::sync::Mutex<plugin::source_manager::SourceManager>>,
     /// Active installable-plugin metadata from the startup scan.
-    pub plugins: Arc<Vec<plugin::renderer_registry::PluginPackageMeta>>,
-    pub inactive_system: Arc<Vec<String>>,
-    pub inactive_user: Arc<Vec<String>>,
+    pub plugins: Arc<tokio::sync::RwLock<Vec<plugin::renderer_registry::PluginPackageMeta>>>,
+    pub inactive_system: Arc<tokio::sync::RwLock<Vec<String>>>,
+    pub inactive_user: Arc<tokio::sync::RwLock<Vec<String>>>,
     /// Plugin directories used by `PluginListRequest`.
     pub plugin_roots: Arc<Vec<PathBuf>>,
     /// The installed source plugins (types/labels/hints). The only
     /// scan-derived state outside the DB for the Add-Library UI.
     pub source_plugins: Arc<tokio::sync::RwLock<Vec<plugin::source_manager::SourcePluginInfo>>>,
+    pub plugin_mutation: tokio::sync::Mutex<()>,
     pub router: Arc<routing::Router>,
     pub settings: Arc<settings::SettingsStore>,
     /// Snapshot of `/dev/dri` taken at startup. Read-only after construction;
@@ -231,9 +232,11 @@ async fn async_main() -> anyhow::Result<()> {
     let mut plugin_scan = plugin::renderer_registry::scan_plugin_roots(&plugin_roots);
     // Installable-plugin (package) list for the UI's plugin-centric view.
     // Computed before `entries` is taken so entry presence is accurate.
-    let plugin_packages = Arc::new(plugin_scan.packages());
-    let inactive_system = Arc::new(plugin_scan.inactive_system.clone());
-    let inactive_user = Arc::new(plugin_scan.inactive_user.clone());
+    let plugin_packages = Arc::new(tokio::sync::RwLock::new(plugin_scan.packages()));
+    let inactive_system = Arc::new(tokio::sync::RwLock::new(
+        plugin_scan.inactive_system.clone(),
+    ));
+    let inactive_user = Arc::new(tokio::sync::RwLock::new(plugin_scan.inactive_user.clone()));
     let plugin_roots = Arc::new(plugin_roots);
     let entry_refs = std::mem::take(&mut plugin_scan.entries);
 
@@ -260,7 +263,8 @@ async fn async_main() -> anyhow::Result<()> {
     let settings_store =
         settings::SettingsStore::load_or_default(settings::default_config_path()).await;
     router.attach_settings(settings_store.clone());
-    settings_store.reconcile(renderer_mgr.registry());
+    let registry_snapshot = renderer_mgr.registry_snapshot();
+    settings_store.reconcile(&registry_snapshot);
 
     let gpus = Arc::new(gpu::enumerate());
     renderer_mgr.attach_gpus(gpus.clone());
@@ -330,6 +334,7 @@ async fn async_main() -> anyhow::Result<()> {
         inactive_user,
         plugin_roots,
         source_plugins,
+        plugin_mutation: tokio::sync::Mutex::new(()),
         router: router.clone(),
         settings: settings_store,
         gpus,

@@ -4,7 +4,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak as StdWeak};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock as StdRwLock, Weak as StdWeak};
 use std::thread;
 use std::time::Duration;
 use tokio::process::{Child, Command};
@@ -143,6 +143,8 @@ pub struct RendererHandle {
     /// Renderer plugin name from the resolved `RendererDef` (e.g.
     /// `"wescene"`). Surfaced to the UI as the renderer name.
     pub name: String,
+    /// Domain id of the installable plugin that supplied this renderer.
+    pub plugin_id: String,
     /// OS pid of the renderer child captured right after `spawn()`.
     /// `None` only if Tokio could not return a child pid.
     pub pid: Option<u32>,
@@ -340,7 +342,7 @@ impl RendererHandle {
 pub struct RendererManager {
     inner: TokioMutex<Inner>,
     /// Plugin registry mapping wallpaper types to renderer binaries.
-    registry: RendererRegistry,
+    registry: StdRwLock<RendererRegistry>,
     /// Back-reference to the router, installed after construction via
     /// `attach_router`. Held weak to avoid a cycle with `Router::mgr`.
     router: OnceLock<StdWeak<Router>>,
@@ -364,7 +366,7 @@ impl RendererManager {
             inner: TokioMutex::new(Inner {
                 renderers: HashMap::new(),
             }),
-            registry,
+            registry: StdRwLock::new(registry),
             router: OnceLock::new(),
             gpus: OnceLock::new(),
             reap_tx,
@@ -422,9 +424,17 @@ impl RendererManager {
         Self::new(registry)
     }
 
-    /// Access the renderer registry (for HTTP introspection endpoints).
-    pub fn registry(&self) -> &RendererRegistry {
-        &self.registry
+    pub fn with_registry<T>(&self, f: impl FnOnce(&RendererRegistry) -> T) -> T {
+        let registry = self.registry.read().expect("renderer registry poisoned");
+        f(&registry)
+    }
+
+    pub fn registry_snapshot(&self) -> RendererRegistry {
+        self.with_registry(Clone::clone)
+    }
+
+    pub fn replace_registry(&self, registry: RendererRegistry) {
+        *self.registry.write().expect("renderer registry poisoned") = registry;
     }
 
     /// Spawn a fresh renderer-host subprocess, wait for its `Ready`
@@ -445,15 +455,11 @@ impl RendererManager {
 
         let renderer_def = match req.renderer_name.as_deref() {
             Some(name) => self
-                .registry
-                .resolve_by_name(name)
-                .ok_or_else(|| Error::RendererNotFound(name.to_string()))?
-                .clone(),
+                .with_registry(|registry| registry.resolve_by_name(name).cloned())
+                .ok_or_else(|| Error::RendererNotFound(name.to_string()))?,
             None => self
-                .registry
-                .resolve(&req.wp_type)
-                .ok_or_else(|| Error::NoRendererForType(req.wp_type.clone()))?
-                .clone(),
+                .with_registry(|registry| registry.resolve(&req.wp_type).cloned())
+                .ok_or_else(|| Error::NoRendererForType(req.wp_type.clone()))?,
         };
 
         // Translate the user's GPU choice into a render-node path before
@@ -602,6 +608,7 @@ impl RendererManager {
             wp_type: req.wp_type.clone(),
             extras: req.extras.clone(),
             name: renderer_def.name.clone(),
+            plugin_id: renderer_def.plugin_id.clone(),
             pid: child_pid,
             gpu,
             sock,
@@ -644,8 +651,8 @@ impl RendererManager {
     /// `req`, ignoring runtime-tunable plugin settings.
     pub async fn find_reusable(&self, req: &SpawnRequest) -> Option<RendererId> {
         let def = match req.renderer_name.as_deref() {
-            Some(name) => self.registry.resolve_by_name(name)?.clone(),
-            None => self.registry.resolve(&req.wp_type)?.clone(),
+            Some(name) => self.with_registry(|registry| registry.resolve_by_name(name).cloned())?,
+            None => self.with_registry(|registry| registry.resolve(&req.wp_type).cloned())?,
         };
 
         let inner = self.inner.lock().await;
@@ -678,6 +685,15 @@ impl RendererManager {
     pub async fn list(&self) -> Vec<RendererId> {
         let inner = self.inner.lock().await;
         inner.renderers.keys().cloned().collect()
+    }
+
+    pub async fn live_renderer_ids_by_plugin_id(&self, plugin_id: &str) -> Vec<RendererId> {
+        let inner = self.inner.lock().await;
+        inner
+            .renderers
+            .iter()
+            .filter_map(|(id, handle)| (handle.plugin_id == plugin_id).then(|| id.clone()))
+            .collect()
     }
 
     pub async fn wait_for_first_frame(&self, id: &str, timeout: Duration) -> Result<()> {
@@ -1508,6 +1524,7 @@ impl RendererHandle {
             wp_type: wp_type.into(),
             extras: HashMap::new(),
             name: "test-stub".into(),
+            plugin_id: "test.plugin".into(),
             pid: None,
             gpu: DrmNode::UNKNOWN,
             sock: Arc::new(StdMutex::new(a)),
@@ -1742,6 +1759,7 @@ mod reuse_tests {
             wp_type: "video".into(),
             extras,
             name: "waywallen-mpv".into(),
+            plugin_id: "test.plugin".into(),
             pid: None,
             gpu: DrmNode::UNKNOWN,
             sock: Arc::new(StdMutex::new(a)),
@@ -1825,6 +1843,7 @@ mod reuse_tests {
             wp_type: "video".into(),
             extras: HashMap::new(),
             name: "waywallen-mpv".into(),
+            plugin_id: "test.plugin".into(),
             pid: None,
             gpu: DrmNode::UNKNOWN,
             sock: Arc::new(StdMutex::new(daemon_side)),

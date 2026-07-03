@@ -160,6 +160,62 @@ void PluginInstallQuery::reload() {
     });
 }
 
+PluginInspectQuery::PluginInspectQuery(QObject* parent): Query(parent) {}
+
+auto PluginInspectQuery::zipPath() const -> const QString& { return m_zip_path; }
+void PluginInspectQuery::setZipPath(const QString& v) {
+    if (m_zip_path == v) return;
+    m_zip_path = v;
+    Q_EMIT zipPathChanged();
+}
+auto PluginInspectQuery::pluginId() const -> const QString& { return m_plugin_id; }
+auto PluginInspectQuery::name() const -> const QString& { return m_name; }
+auto PluginInspectQuery::version() const -> const QString& { return m_version; }
+auto PluginInspectQuery::hasSource() const -> bool { return m_has_source; }
+auto PluginInspectQuery::renderers() const -> const QStringList& { return m_renderers; }
+auto PluginInspectQuery::overwrite() const -> bool { return m_overwrite; }
+auto PluginInspectQuery::existingVersion() const -> const QString& { return m_existing_version; }
+auto PluginInspectQuery::existingName() const -> const QString& { return m_existing_name; }
+auto PluginInspectQuery::existingSystem() const -> bool { return m_existing_system; }
+
+void PluginInspectQuery::reload() {
+    if (m_zip_path.isEmpty()) return;
+    setStatus(Status::Querying);
+    auto backend = App::instance()->backend();
+
+    auto req   = proto::Request {};
+    auto inner = proto::PluginInspectRequest {};
+    inner.setZipPath(m_zip_path);
+    req.setPluginInspect(std::move(inner));
+
+    auto self = QWatcher { this };
+    spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
+        auto result = co_await backend->send(std::move(req));
+        co_await asio::post(asio::bind_executor(QAsyncResult::get_executor(), use_task));
+        if (! self) co_return;
+
+        self->inspect_set(result, [self](const proto::Response& rsp) {
+            const auto& r            = rsp.pluginInspect();
+            self->m_plugin_id        = r.pluginId();
+            self->m_name             = r.name();
+            self->m_version          = r.version();
+            self->m_has_source       = r.hasSource();
+            self->m_overwrite        = r.overwrite();
+            self->m_existing_version = r.existingVersion();
+            self->m_existing_name    = r.existingName();
+            self->m_existing_system  = r.existingSystem();
+            QStringList renderers;
+            for (const auto& name : r.renderers()) {
+                renderers.append(name);
+            }
+            self->m_renderers = std::move(renderers);
+            Q_EMIT self->resultChanged();
+            Q_EMIT self->inspected();
+        });
+        co_return;
+    });
+}
+
 PluginDeleteQuery::PluginDeleteQuery(QObject* parent): Query(parent) {}
 
 auto PluginDeleteQuery::pluginId() const -> const QString& { return m_plugin_id; }
