@@ -29,6 +29,7 @@ MD.Dialog {
     implicitWidth: Math.min(440, parent ? parent.width - 48 : 440)
     standardButtons: T.Dialog.Close
     property var filterTagDialog: null
+    readonly property var popupParent: root.Window.window ? root.Window.window : root.parent
 
     // Tag names for the tag-filter picker; refreshed each time the
     // dialog opens so newly-scanned tags show up.
@@ -38,6 +39,24 @@ MD.Dialog {
     W.ContentRatingListQuery {
         id: ratingListQuery
     }
+
+    Component {
+        id: filterTagDialogComponent
+
+        W.TagPickerDialog {
+            id: dynamicFilterTagDialog
+            allTags: tagListQuery.tags
+            selected: root.filterTags
+            onCommit: function (tags) {
+                root.applyFilterTags(tags);
+            }
+            onClosed: {
+                if (root.filterTagDialog === dynamicFilterTagDialog)
+                    root.filterTagDialog = null;
+            }
+        }
+    }
+
     onAboutToShow: {
         tagListQuery.reload();
         ratingListQuery.reload();
@@ -46,7 +65,7 @@ MD.Dialog {
     function openFilterTagDialog() {
         if (filterTagDialog && (filterTagDialog.opened || filterTagDialog.entering || filterTagDialog.closing))
             return;
-        filterTagDialog = MD.Util.showPopup(filterTagDialogComponent, {}, root);
+        filterTagDialog = MD.Util.showPopup(filterTagDialogComponent, {}, root.popupParent);
     }
 
     contentItem: MD.VerticalListView {
@@ -121,22 +140,6 @@ MD.Dialog {
                     }
                 }
 
-                Component {
-                    id: filterTagDialogComponent
-
-                    W.TagPickerDialog {
-                        id: dynamicFilterTagDialog
-                        allTags: tagListQuery.tags
-                        selected: root.filterTags
-                        onCommit: function (tags) {
-                            root.applyFilterTags(tags);
-                        }
-                        onClosed: {
-                            if (root.filterTagDialog === dynamicFilterTagDialog)
-                                root.filterTagDialog = null;
-                        }
-                    }
-                }
             }
 
             ColumnLayout {

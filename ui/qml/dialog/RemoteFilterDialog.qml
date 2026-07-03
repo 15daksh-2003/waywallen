@@ -15,6 +15,7 @@ MD.Dialog {
     property var availableTags: []
     property var selectedTags: []
     property var filterTagDialog: null
+    readonly property var popupParent: root.Window.window ? root.Window.window : root.parent
 
     signal apply(var tags)
 
@@ -75,13 +76,30 @@ MD.Dialog {
     function openFilterTagDialog() {
         if (filterTagDialog && (filterTagDialog.opened || filterTagDialog.entering || filterTagDialog.closing))
             return;
-        filterTagDialog = MD.Util.showPopup(filterTagDialogComponent, {}, root);
+        filterTagDialog = MD.Util.showPopup(filterTagDialogComponent, {}, root.popupParent);
     }
     function applyFilterTags(tags) {
         root.apply(collect(tags, has("Mature")));
     }
     function setMature(on) {
         root.apply(collect(selectedFilterTags, on));
+    }
+
+    Component {
+        id: filterTagDialogComponent
+
+        W.TagPickerDialog {
+            id: dynamicFilterTagDialog
+            allTags: root.filterTags
+            selected: root.selectedFilterTags
+            onCommit: function (tags) {
+                root.applyFilterTags(tags);
+            }
+            onClosed: {
+                if (root.filterTagDialog === dynamicFilterTagDialog)
+                    root.filterTagDialog = null;
+            }
+        }
     }
 
     contentItem: ColumnLayout {
@@ -119,22 +137,6 @@ MD.Dialog {
                 }
             }
 
-            Component {
-                id: filterTagDialogComponent
-
-                W.TagPickerDialog {
-                    id: dynamicFilterTagDialog
-                    allTags: root.filterTags
-                    selected: root.selectedFilterTags
-                    onCommit: function (tags) {
-                        root.applyFilterTags(tags);
-                    }
-                    onClosed: {
-                        if (root.filterTagDialog === dynamicFilterTagDialog)
-                            root.filterTagDialog = null;
-                    }
-                }
-            }
         }
 
         MD.Divider {
