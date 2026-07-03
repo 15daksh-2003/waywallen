@@ -47,6 +47,7 @@ Waywallen 是一个为 Linux 桌面打造的动态壁纸方案
 - 图片插件
 - 视频插件
   - 硬解：vulkan、vaapi
+- wallhaven 插件
 
 ### 第三方插件
 - [open-wallpaper-engine](https://github.com/waywallen/open-wallpaper-engine)

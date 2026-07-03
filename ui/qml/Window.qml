@@ -19,9 +19,9 @@ MD.ApplicationWindow {
     MD.MProp.textColor: MD.MProp.color.getOn(MD.MProp.backgroundColor)
 
     color: MD.MProp.backgroundColor
-    height: 600
     visible: true
-    width: 900
+    height: 632
+    width: 948
     title: "waywallen"
 
     // Persist the window size across runs. Wayland doesn't let clients
@@ -197,10 +197,10 @@ MD.ApplicationWindow {
                                 width: parent.width
                                 expand: m_rail.useLarge
                                 checked: false
-                                icon.name: MD.Token.icon.settings
-                                text: "Settings"
+                                icon.name: MD.Token.icon.extension
+                                text: "Plugins"
                                 onClicked: MD.Util.showPopup('waywallen.ui/PagePopup', {
-                                    source: 'waywallen.ui/SettingsPage'
+                                    source: 'waywallen.ui/PluginManagePage'
                                 }, win)
                             }
 
@@ -208,10 +208,10 @@ MD.ApplicationWindow {
                                 width: parent.width
                                 expand: m_rail.useLarge
                                 checked: false
-                                icon.name: MD.Token.icon.extension
-                                text: "Plugins"
+                                icon.name: MD.Token.icon.settings
+                                text: "Settings"
                                 onClicked: MD.Util.showPopup('waywallen.ui/PagePopup', {
-                                    source: 'waywallen.ui/PluginManagePage'
+                                    source: 'waywallen.ui/SettingsPage'
                                 }, win)
                             }
 

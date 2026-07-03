@@ -47,6 +47,7 @@ It started life as a Wallpaper Engine plugin for KDE.
 - image plugin
 - video plugin
   - hwdec by vulkan,vaapi
+- wallhaven plugin
 
 ### Third plugins
 - [open-wallpaper-engine](https://github.com/waywallen/open-wallpaper-engine)
