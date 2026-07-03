@@ -2,6 +2,7 @@ module;
 #include "waywallen/query/renderer_query.moc.h"
 #undef assert
 #include <rstd/macro.hpp>
+#include <algorithm>
 
 module waywallen;
 import :query.renderer;
@@ -14,6 +15,19 @@ using namespace qextra::prelude;
 
 namespace waywallen
 {
+
+static auto renderer_map_name(const QVariant& item) -> QString {
+    return item.toMap().value(u"name"_s).toString();
+}
+
+static void sort_renderer_maps(QVariantList& items) {
+    std::sort(items.begin(), items.end(), [](const QVariant& a, const QVariant& b) {
+        const auto an  = renderer_map_name(a);
+        const auto bn  = renderer_map_name(b);
+        const auto cmp = QString::compare(an, bn, Qt::CaseInsensitive);
+        return cmp == 0 ? QString::compare(an, bn, Qt::CaseSensitive) < 0 : cmp < 0;
+    });
+}
 
 // ---------------------------------------------------------------------------
 // RendererListQuery
@@ -142,6 +156,7 @@ void RendererPluginListQuery::reload() {
                 m[u"settings"_s] = settings;
                 items.append(m);
             }
+            sort_renderer_maps(items);
             self->m_renderers = std::move(items);
             Q_EMIT self->renderersChanged();
 
