@@ -81,6 +81,7 @@ void PluginListQuery::reload() {
                 m[u"id"_s]        = p.id_proto();
                 m[u"name"_s]      = p.name();
                 m[u"version"_s]   = p.version();
+                m[u"update"_s]    = p.update();
                 m[u"hasSource"_s] = p.hasSource();
                 m[u"system"_s]    = p.system();
                 m[u"section"_s]   = p.system() ? u"system"_s : u"user"_s;
@@ -171,6 +172,7 @@ void PluginInspectQuery::setZipPath(const QString& v) {
 auto PluginInspectQuery::pluginId() const -> const QString& { return m_plugin_id; }
 auto PluginInspectQuery::name() const -> const QString& { return m_name; }
 auto PluginInspectQuery::version() const -> const QString& { return m_version; }
+auto PluginInspectQuery::update() const -> const QString& { return m_update; }
 auto PluginInspectQuery::hasSource() const -> bool { return m_has_source; }
 auto PluginInspectQuery::renderers() const -> const QStringList& { return m_renderers; }
 auto PluginInspectQuery::overwrite() const -> bool { return m_overwrite; }
@@ -199,6 +201,7 @@ void PluginInspectQuery::reload() {
             self->m_plugin_id        = r.pluginId();
             self->m_name             = r.name();
             self->m_version          = r.version();
+            self->m_update           = r.update();
             self->m_has_source       = r.hasSource();
             self->m_overwrite        = r.overwrite();
             self->m_existing_version = r.existingVersion();

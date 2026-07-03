@@ -21,7 +21,7 @@ set -euo pipefail
     exit 1
 }
 
-FFMPEG_VERSION="${FFMPEG_VERSION:-n8.1}"
+FFMPEG_VERSION="${FFMPEG_VERSION:-n7.1.5}"
 FFMPEG_SRC="$CONDA_PREFIX/.ffmpeg-src"
 PKG_STAMP="$CONDA_PREFIX/lib/pkgconfig/libavcodec.pc"
 

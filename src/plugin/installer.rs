@@ -7,6 +7,7 @@ pub struct PluginArchiveInfo {
     pub id: String,
     pub name: String,
     pub version: String,
+    pub update: Option<String>,
     pub has_source: bool,
     pub renderers: Vec<String>,
 }
@@ -52,6 +53,7 @@ fn read_plugin_info_from_text(text: &str) -> std::result::Result<PluginArchiveIn
         id: manifest.plugin.id,
         name: manifest.plugin.name,
         version: manifest.plugin.version,
+        update: manifest.plugin.update,
         has_source: manifest.plugin.entry.is_some(),
         renderers,
     })
@@ -371,6 +373,7 @@ version = "1.0.0"
 id = "org.example.inspect"
 name = "Inspect"
 version = "2.1.0"
+update = "https://example.org/inspect/update.json"
 entry = "main.lua"
 entry_version = 2
 
@@ -388,6 +391,10 @@ types = ["scene"]
         assert_eq!(info.id, "org.example.inspect");
         assert_eq!(info.name, "Inspect");
         assert_eq!(info.version, "2.1.0");
+        assert_eq!(
+            info.update.as_deref(),
+            Some("https://example.org/inspect/update.json")
+        );
         assert!(info.has_source);
         assert_eq!(info.renderers, vec!["scene".to_string()]);
     }

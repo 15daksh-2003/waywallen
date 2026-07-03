@@ -1357,6 +1357,7 @@ async fn dispatch_inner(
                         has_source: pkg.has_entry,
                         renderers,
                         system: pkg.system,
+                        update: pkg.update.clone().unwrap_or_default(),
                     }
                 })
                 .collect();
@@ -1421,6 +1422,7 @@ async fn dispatch_inner(
                 existing_version,
                 existing_name,
                 existing_system,
+                update: info.update.unwrap_or_default(),
             })
         }
 

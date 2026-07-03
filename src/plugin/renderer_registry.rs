@@ -27,6 +27,9 @@ pub struct PluginMeta {
     pub name: String,
     #[serde(default = "default_version")]
     pub version: String,
+    /// URL of a remote JSON update manifest for this plugin package.
+    #[serde(default)]
+    pub update: Option<String>,
     /// Lua entry file path, relative to the plugin directory.
     #[serde(default)]
     pub entry: Option<PathBuf>,
@@ -88,6 +91,7 @@ impl PluginScan {
                 id: m.id.clone(),
                 name: m.name.clone(),
                 version: m.version.clone(),
+                update: m.update.clone(),
                 has_entry: self.entries.iter().any(|s| s.plugin_id == m.id),
                 system: m.system,
             })
@@ -102,6 +106,7 @@ pub struct PluginPackageMeta {
     pub id: String,
     pub name: String,
     pub version: String,
+    pub update: Option<String>,
     pub has_entry: bool,
     /// Not installed under `$XDG_DATA_HOME` (bundled / system / explicit root).
     pub system: bool,
@@ -791,6 +796,7 @@ mod schema_tests {
             id: id.to_string(),
             name: id.to_string(),
             version: version.to_string(),
+            update: None,
             entry: None,
             entry_version: None,
             files: Vec::new(),
@@ -836,6 +842,7 @@ mod schema_tests {
             [plugin]
             id = "org.waywallen.wallpaper-engine"
             name = "Wallpaper Engine"
+            update = "https://example.org/owe/update.json"
 
             [renderers.wescene-renderer]
             bin = "bin/waywallen-wescene-renderer"
@@ -843,6 +850,10 @@ mod schema_tests {
             events = ["pointer", "mpris"]
         "#;
         let m: PluginManifest = toml::from_str(src).expect("parses");
+        assert_eq!(
+            m.plugin.update.as_deref(),
+            Some("https://example.org/owe/update.json")
+        );
         let r = &m.renderers["wescene-renderer"];
         assert_eq!(r.events, vec!["pointer".to_string(), "mpris".to_string()]);
     }

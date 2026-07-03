@@ -1205,6 +1205,7 @@ message PluginInspectResponse {
   string existing_version = 7;
   string existing_name = 8;
   bool existing_system = 9;
+  string update = 10;
 }
 
 message PluginDeleteRequest {
@@ -1225,6 +1226,7 @@ message PluginInfo {
   bool has_source = 4;
   repeated RendererPluginInfo renderers = 5;
   bool system = 6;
+  string update = 7;
 }
 
 message PluginListRequest {}

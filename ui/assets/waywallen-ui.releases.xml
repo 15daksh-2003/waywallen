@@ -1,16 +1,24 @@
-<release version="0.2.3" date="2026-07-02">
+<release version="0.2.3" date="2026-07-03">
   <description>
     <p>Added:</p>
     <ul>
       <li>Discover filters and wallpaper detail controls.</li>
       <li>MPRIS media event forwarding.</li>
       <li>Network cache.</li>
+      <li>User plugin management with inactive plugin warnings.</li>
+      <li>Hot plugin install, overwrite, and install preview support.</li>
+      <li>Wallpaper item removal for sources that support deletion.</li>
+      <li>Settings reset action.</li>
+      <li>Home path expansion when adding source libraries.</li>
     </ul>
     <p>Fixes:</p>
     <ul>
       <li>Discover and wallpaper detail tag/type display.</li>
       <li>Last-modified sorting now falls back to create_at.</li>
       <li>WebSocket protobuf requests no longer block each other.</li>
+      <li>Filter dialog creation and parenting errors.</li>
+      <li>Status components are sorted alphabetically.</li>
+      <li>Display page spacing and responsive headers.</li>
     </ul>
     <p>Security:</p>
     <ul>

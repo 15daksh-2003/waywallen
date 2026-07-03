@@ -77,6 +77,7 @@ export class PluginInspectQuery : public Query,
     Q_PROPERTY(QString pluginId READ pluginId NOTIFY resultChanged FINAL)
     Q_PROPERTY(QString name READ name NOTIFY resultChanged FINAL)
     Q_PROPERTY(QString version READ version NOTIFY resultChanged FINAL)
+    Q_PROPERTY(QString update READ update NOTIFY resultChanged FINAL)
     Q_PROPERTY(bool hasSource READ hasSource NOTIFY resultChanged FINAL)
     Q_PROPERTY(QStringList renderers READ renderers NOTIFY resultChanged FINAL)
     Q_PROPERTY(bool overwrite READ overwrite NOTIFY resultChanged FINAL)
@@ -92,6 +93,7 @@ public:
     auto pluginId() const -> const QString&;
     auto name() const -> const QString&;
     auto version() const -> const QString&;
+    auto update() const -> const QString&;
     auto hasSource() const -> bool;
     auto renderers() const -> const QStringList&;
     auto overwrite() const -> bool;
@@ -110,6 +112,7 @@ private:
     QString     m_plugin_id;
     QString     m_name;
     QString     m_version;
+    QString     m_update;
     bool        m_has_source = false;
     QStringList m_renderers;
     bool        m_overwrite = false;
