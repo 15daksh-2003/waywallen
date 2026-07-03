@@ -318,6 +318,55 @@ void WallpaperGetQuery::reload() {
 }
 
 // ---------------------------------------------------------------------------
+// WallpaperRemoveQuery
+// ---------------------------------------------------------------------------
+
+WallpaperRemoveQuery::WallpaperRemoveQuery(QObject* parent): Query(parent) {}
+
+auto WallpaperRemoveQuery::wallpaperId() const -> const QString& { return m_wallpaper_id; }
+void WallpaperRemoveQuery::setWallpaperId(const QString& v) {
+    if (m_wallpaper_id != v) {
+        m_wallpaper_id = v;
+        Q_EMIT wallpaperIdChanged();
+    }
+}
+
+void WallpaperRemoveQuery::reload() { remove(QStringList { m_wallpaper_id }); }
+
+void WallpaperRemoveQuery::remove(const QStringList& wallpaperIds) {
+    QStringList ids;
+    ids.reserve(wallpaperIds.size());
+    for (const auto& id : wallpaperIds) {
+        if (! id.isEmpty()) ids.append(id);
+    }
+    if (ids.isEmpty()) return;
+
+    setStatus(Status::Querying);
+    auto backend = App::instance()->backend();
+
+    auto req   = proto::Request {};
+    auto inner = proto::WallpaperRemoveRequest {};
+    if (ids.size() == 1)
+        inner.setWallpaperId(ids.first());
+    else
+        inner.setWallpaperIds(ids);
+    req.setWallpaperRemove(std::move(inner));
+
+    auto self = QWatcher { this };
+    spawn([self, backend, req = std::move(req), ids = std::move(ids)]() mutable -> task<void> {
+        auto result = co_await backend->send(std::move(req));
+        co_await asio::post(asio::bind_executor(QAsyncResult::get_executor(), use_task));
+        if (! self) co_return;
+        self->inspect_set(result, [self, ids](const proto::Response& rsp) {
+            const auto removedCount = rsp.wallpaperRemove().removedCount();
+            if (ids.size() == 1) Q_EMIT self->removed(ids.first());
+            Q_EMIT self->removedMany(ids, removedCount);
+        });
+        co_return;
+    });
+}
+
+// ---------------------------------------------------------------------------
 // WallpaperPropertySetQuery
 // ---------------------------------------------------------------------------
 

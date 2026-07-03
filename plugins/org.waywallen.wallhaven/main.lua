@@ -1,5 +1,6 @@
 local discover = import("wallhaven.discover")
 local api = import("wallhaven.api")
+local source = import("wallhaven.source")
 local wallpaper = import("wallhaven.wallpaper")
 
 local M = {}
@@ -27,6 +28,7 @@ function M.info()
 end
 
 M.discover = discover
+M.source = source
 M.wallpaper = wallpaper
 
 return M

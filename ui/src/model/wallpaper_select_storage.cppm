@@ -1,13 +1,16 @@
 module;
 #include "QExtra/macro_qt.hpp"
+#include <QtCore/QStringList>
 #include <QtCore/QVariant>
 #include <QtCore/QVariantList>
+#include <QtCore/qtypes.h>
 
 #ifdef Q_MOC_RUN
 #    include "waywallen/model/wallpaper_select_storage.moc"
 #endif
 
 export module waywallen:model.wallpaper_select_storage;
+export import :msg.backend_msg;
 export import qextra;
 
 namespace waywallen::model
@@ -21,6 +24,8 @@ export class WallpaperSelectStorage : public SelectStorage {
                    NOTIFY playlistEditTargetChanged FINAL)
     Q_PROPERTY(qint64 playlistEditTargetId READ playlistEditTargetId NOTIFY
                    playlistEditTargetChanged FINAL)
+    Q_PROPERTY(qint32 removableSelectedCount READ removableSelectedCount NOTIFY
+                   selectedRemovableCountChanged FINAL)
 
 public:
     WallpaperSelectStorage(QObject* parent = nullptr);
@@ -34,9 +39,13 @@ public:
     Q_INVOKABLE bool         isEditingPlaylist(const QVariant& playlist) const;
     Q_INVOKABLE void         editPlaylistSelection(const QVariant& playlist);
     Q_INVOKABLE QVariantList selectedWallpaperIds() const;
+    Q_INVOKABLE QStringList  removableSelectedWallpaperIds() const;
     Q_INVOKABLE void         clear() override;
 
     Q_SIGNAL void playlistEditTargetChanged();
+    Q_SIGNAL void selectedRemovableCountChanged();
+
+    auto removableSelectedCount() const -> qint32;
 
 protected:
     auto keepActiveWithoutSelection() const -> bool override;

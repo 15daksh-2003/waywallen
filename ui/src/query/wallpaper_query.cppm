@@ -1,5 +1,6 @@
 module;
 #include "QExtra/macro_qt.hpp"
+#include <QtCore/QStringList>
 
 #ifdef Q_MOC_RUN
 #    include "waywallen/query/wallpaper_query.moc"
@@ -143,6 +144,31 @@ public:
 private:
     QString          m_wallpaper_id;
     model::Wallpaper m_wallpaper;
+};
+
+export class WallpaperRemoveQuery : public Query,
+                                    public QueryExtra<control::v1::Response, WallpaperRemoveQuery> {
+    Q_OBJECT
+    QML_ELEMENT
+
+    Q_PROPERTY(
+        QString wallpaperId READ wallpaperId WRITE setWallpaperId NOTIFY wallpaperIdChanged FINAL)
+
+public:
+    WallpaperRemoveQuery(QObject* parent = nullptr);
+
+    auto wallpaperId() const -> const QString&;
+    void setWallpaperId(const QString&);
+
+    void             reload() override;
+    Q_INVOKABLE void remove(const QStringList& wallpaperIds);
+
+    Q_SIGNAL void wallpaperIdChanged();
+    Q_SIGNAL void removed(const QString& wallpaperId);
+    Q_SIGNAL void removedMany(const QStringList& wallpaperIds, quint32 removedCount);
+
+private:
+    QString m_wallpaper_id;
 };
 
 export class WallpaperPropertySetQuery

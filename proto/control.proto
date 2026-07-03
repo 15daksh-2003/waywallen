@@ -77,6 +77,7 @@ message Request {
     PlaylistJumpToRequest     playlist_jump_to = 58;
     WallpaperLayoutSetRequest wallpaper_layout_set = 59;
     PluginDeleteRequest       plugin_delete = 60;
+    WallpaperRemoveRequest    wallpaper_remove = 61;
   }
 }
 
@@ -141,6 +142,7 @@ message Response {
     Empty                      playlist_jump_to = 58;
     WallpaperLayoutSetResponse wallpaper_layout_set = 59;
     PluginDeleteResponse       plugin_delete = 60;
+    WallpaperRemoveResponse    wallpaper_remove = 61;
   }
 }
 
@@ -186,6 +188,8 @@ enum ErrorCode {
   ERROR_CODE_PORTAL_CALL_FAILED = 205;
   ERROR_CODE_PLUGIN_INSTALL_FAILED = 206;
   ERROR_CODE_PLUGIN_DELETE_FAILED = 207;
+  ERROR_CODE_SOURCE_ITEM_REMOVE_UNSUPPORTED = 208;
+  ERROR_CODE_SOURCE_ITEM_REMOVE_FAILED = 209;
 
   // Settings
   ERROR_CODE_SETTINGS_VALIDATION_FAILED = 300;
@@ -358,6 +362,9 @@ message WallpaperEntry {
   // wins over the display's own layout while the wallpaper is active.
   LayoutPrefs wallpaper_layout_override = 16;
   bool wallpaper_layout_override_set = 17;
+  // True when the source plugin can remove this item from its backing
+  // storage. The daemon still owns the DB row deletion after plugin success.
+  bool supports_item_remove = 18;
 }
 
 message WallpaperListRequest {
@@ -425,6 +432,14 @@ message WallpaperLayoutSetRequest {
 }
 message WallpaperLayoutSetResponse {
   WallpaperEntry entry = 1;
+}
+
+message WallpaperRemoveRequest {
+  string wallpaper_id = 1;
+  repeated string wallpaper_ids = 2;
+}
+message WallpaperRemoveResponse {
+  uint32 removed_count = 1;
 }
 
 message WallpaperScanRequest {}

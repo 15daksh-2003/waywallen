@@ -7,7 +7,16 @@ import :model.wallpaper_select_storage;
 namespace waywallen::model
 {
 
-WallpaperSelectStorage::WallpaperSelectStorage(QObject* parent): SelectStorage(parent) {}
+WallpaperSelectStorage::WallpaperSelectStorage(QObject* parent): SelectStorage(parent) {
+    connect(this,
+            &SelectStorage::selectedCountChanged,
+            this,
+            &WallpaperSelectStorage::selectedRemovableCountChanged);
+    connect(this,
+            &SelectStorage::modelChanged,
+            this,
+            &WallpaperSelectStorage::selectedRemovableCountChanged);
+}
 
 WallpaperSelectStorage::~WallpaperSelectStorage() = default;
 
@@ -51,6 +60,23 @@ auto WallpaperSelectStorage::selectedWallpaperIds() const -> QVariantList {
     out.reserve(keys.size());
     for (const auto& key : keys) out.append(key);
     return out;
+}
+
+auto WallpaperSelectStorage::removableSelectedWallpaperIds() const -> QStringList {
+    QStringList out;
+    const auto  items = selectedItems();
+    out.reserve(items.size());
+    for (const auto& item : items) {
+        if (! item.canConvert<model::Wallpaper>()) continue;
+        const auto wallpaper = item.value<model::Wallpaper>();
+        const auto id        = wallpaper.id_proto();
+        if (wallpaper.supportsItemRemove() && ! id.isEmpty()) out.append(id);
+    }
+    return out;
+}
+
+auto WallpaperSelectStorage::removableSelectedCount() const -> qint32 {
+    return static_cast<qint32>(removableSelectedWallpaperIds().size());
 }
 
 void WallpaperSelectStorage::clear() {

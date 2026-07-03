@@ -43,6 +43,7 @@ if(WAYWALLEN_INSTALL_WALLHAVEN_PLUGIN)
         ${CMAKE_CURRENT_SOURCE_DIR}/org.waywallen.wallhaven/wallhaven/api.lua
         ${CMAKE_CURRENT_SOURCE_DIR}/org.waywallen.wallhaven/wallhaven/discover.lua
         ${CMAKE_CURRENT_SOURCE_DIR}/org.waywallen.wallhaven/wallhaven/map.lua
+        ${CMAKE_CURRENT_SOURCE_DIR}/org.waywallen.wallhaven/wallhaven/source.lua
         ${CMAKE_CURRENT_SOURCE_DIR}/org.waywallen.wallhaven/wallhaven/wallpaper.lua
         DESTINATION ${_WALLHAVEN_PLUGIN_DIR}/wallhaven
     )

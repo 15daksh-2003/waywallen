@@ -18,7 +18,7 @@ MD.Page {
     W.WallpaperSelectStorage {
         id: userWallpaperSelect
         model: wallpaperQuery.data
-        property list<MD.Action> actions: [createPlaylistFromSelectionAction, addToPlaylistAction]
+        property list<MD.Action> actions: [removeSelectionAction, createPlaylistFromSelectionAction, addToPlaylistAction]
     }
 
     W.WallpaperSelectStorage {
@@ -29,6 +29,23 @@ MD.Page {
 
     W.WallpaperScanQuery {
         id: scanQuery
+    }
+
+    W.WallpaperRemoveQuery {
+        id: selectionRemoveQuery
+        onRemovedMany: function (wallpaperIds, removedCount) {
+            wallpaperQuery.reload();
+            root.clearWallpaperSelection();
+            W.Action.toast(qsTr("Removed %1").arg(removedCount));
+        }
+        onStatusChanged: {
+            if (selectionRemoveQuery.status === 3) {
+                const message = selectionRemoveQuery.error && selectionRemoveQuery.error.length > 0
+                    ? selectionRemoveQuery.error
+                    : qsTr("Remove failed");
+                W.Action.toast(message, 6000, 1, null);
+            }
+        }
     }
 
     W.PlaylistListQuery {
@@ -222,6 +239,15 @@ MD.Page {
         busy: playlistMutation.querying
         enabled: playlistWallpaperSelect.playlistEditTargetId > 0 && !playlistMutation.querying
         onTriggered: root.applyPlaylistSelection()
+    }
+
+    MD.Action {
+        id: removeSelectionAction
+        text: qsTr("Remove %1").arg(root.removableSelectedWallpaperCount)
+        icon.name: MD.Token.icon.delete
+        busy: selectionRemoveQuery.querying
+        enabled: root.removableSelectedWallpaperCount > 0 && !selectionRemoveQuery.querying
+        onTriggered: root.removeSelectedWallpapers()
     }
 
     MD.Action {
@@ -472,6 +498,7 @@ MD.Page {
     property var playlistListSheet: null
     readonly property int selectionSheetReserve: wallpaperSelectSheetRelay.currentComponent ? 360 : 160
     readonly property int selectedWallpaperCount: root.currentWallpaperSelect ? root.currentWallpaperSelect.selectedCount : 0
+    readonly property int removableSelectedWallpaperCount: root.currentWallpaperSelect ? root.currentWallpaperSelect.removableSelectedCount : 0
     readonly property bool selectionActive: root.currentWallpaperSelect ? root.currentWallpaperSelect.active : false
     readonly property bool selectionActionSheetActive: root.selectionActive && root.currentWallpaperSelect && (root.currentWallpaperSelect.actions || []).length > 0
 
@@ -846,6 +873,18 @@ MD.Page {
         }
         root.playlistMutationSuccessMessage = qsTr("Added to playlist");
         playlistMutation.setItems(playlist.id, merged);
+    }
+
+    function removeSelectedWallpapers() {
+        const select = root.currentWallpaperSelect;
+        if (!select || selectionRemoveQuery.querying)
+            return;
+
+        const ids = select.removableSelectedWallpaperIds();
+        if (ids.length === 0)
+            return;
+
+        selectionRemoveQuery.remove(ids);
     }
 
     function deletePlaylist(playlist) {

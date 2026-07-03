@@ -101,6 +101,14 @@ pub enum Error {
     #[error("source_plugin '{plugin}'.extras() failed: {message}")]
     SourceExtrasFailed { plugin: String, message: String },
 
+    /// Source plugin does not export `source.remove(ctx, item)`.
+    #[error("source plugin '{0}' does not support item remove")]
+    SourceItemRemoveUnsupported(String),
+
+    /// Source plugin's `source.remove(ctx, item)` Lua callback raised.
+    #[error("source_plugin '{plugin}'.remove() failed: {message}")]
+    SourceItemRemoveFailed { plugin: String, message: String },
+
     /// Installing a plugin `.zip` failed (bad path, unreadable archive,
     /// unsafe entry, or no `plugin.toml`).
     #[error("plugin install failed: {0}")]
@@ -201,6 +209,8 @@ impl Error {
             Self::RendererFrameFailed(_) => E::RendererFrameFailed,
             Self::SourcePluginNotFound(_) => E::SourcePluginNotFound,
             Self::SourceExtrasFailed { .. } => E::SourceExtrasFailed,
+            Self::SourceItemRemoveUnsupported(_) => E::SourceItemRemoveUnsupported,
+            Self::SourceItemRemoveFailed { .. } => E::SourceItemRemoveFailed,
             Self::PluginInstallFailed(_) => E::PluginInstallFailed,
             Self::PluginDeleteFailed(_) => E::PluginDeleteFailed,
             // Discover types map onto generic codes; the discover request
@@ -232,7 +242,9 @@ impl Error {
             | E::SettingsValidationFailed
             | E::WallpaperTypeNotSupported
             | E::PlaylistInvalid => S::InvalidArgument,
-            E::FailedPrecondition | E::NoDisplayRegistered => S::FailedPrecondition,
+            E::FailedPrecondition | E::NoDisplayRegistered | E::SourceItemRemoveUnsupported => {
+                S::FailedPrecondition
+            }
             E::WallpaperNotFound
             | E::RendererNotFound
             | E::SourcePluginNotFound
@@ -244,6 +256,7 @@ impl Error {
             | E::RendererControlFailed
             | E::RendererFrameFailed
             | E::SourceExtrasFailed
+            | E::SourceItemRemoveFailed
             | E::PluginInstallFailed
             | E::PluginDeleteFailed
             | E::SettingsApplyFailed

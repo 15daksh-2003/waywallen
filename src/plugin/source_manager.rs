@@ -161,6 +161,7 @@ struct WallpaperCapability {
 #[derive(Debug, Clone, Default)]
 struct PluginCapabilities {
     source: Option<SourceCapability>,
+    source_item_remove: bool,
     discover: Option<DiscoverCapability>,
     wallpaper: WallpaperCapability,
 }
@@ -407,6 +408,19 @@ impl SourceManager {
         let caps_tbl: LuaTable = info_table
             .get("capabilities")
             .map_err(|e| Error::Internal(anyhow!("info().capabilities required: {e}")))?;
+        let source_api = Self::optional_table(module, "source", "module")?;
+        let source_item_remove = match &source_api {
+            Some(source_api) => match source_api.get::<LuaValue>("remove")? {
+                LuaValue::Nil => false,
+                LuaValue::Function(_) => true,
+                _ => {
+                    return Err(Error::Internal(anyhow!(
+                        "module.source.remove must be a function when present"
+                    )));
+                }
+            },
+            None => false,
+        };
 
         let source = match Self::optional_table(&caps_tbl, "source", "info().capabilities")? {
             Some(source_tbl) => {
@@ -415,7 +429,11 @@ impl SourceManager {
                         "info().capabilities.source.scan must be true"
                     )));
                 }
-                let source_api = Self::require_module_table(module, "source")?;
+                let source_api = source_api.clone().ok_or_else(|| {
+                    Error::Internal(anyhow!(
+                        "module.source table required for source capability"
+                    ))
+                })?;
                 Self::require_table_function(&source_api, "scan", "module.source")?;
                 let auto_detect = Self::optional_bool(
                     &source_tbl,
@@ -534,6 +552,7 @@ impl SourceManager {
             version: plugin_version.to_owned(),
             capabilities: PluginCapabilities {
                 source,
+                source_item_remove,
                 discover,
                 wallpaper,
             },
@@ -793,6 +812,16 @@ impl SourceManager {
         })?;
         ctx.set("file_size", file_size_fn)?;
 
+        // ctx.remove_file(path) -> bool
+        let remove_file_fn =
+            self.lua
+                .create_function(|_, path: String| match std::fs::remove_file(&path) {
+                    Ok(()) => Ok(true),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                    Err(e) => Err(mlua::Error::external(e)),
+                })?;
+        ctx.set("remove_file", remove_file_fn)?;
+
         // ctx.probe(path) -> table|nil
         // Returns present file/media fields, or nil if nothing was found.
         let probe_arc = Arc::clone(&self.probe);
@@ -908,6 +937,53 @@ impl SourceManager {
         Ok(ctx)
     }
 
+    fn wallpaper_entry_table(&self, entry: &WallpaperEntry) -> Result<LuaTable> {
+        let entry_tbl = self.lua.create_table()?;
+        entry_tbl.set("id", entry.item_id.to_string())?;
+        entry_tbl.set("item_id", entry.item_id)?;
+        entry_tbl.set("name", entry.name.clone())?;
+        entry_tbl.set("wp_type", entry.wp_type.clone())?;
+        entry_tbl.set("path", entry.resource.clone())?;
+        entry_tbl.set("resource", entry.resource.clone())?;
+        if let Some(p) = &entry.preview {
+            entry_tbl.set("preview", p.clone())?;
+        }
+        if !entry.library_root.is_empty() {
+            entry_tbl.set("library_root", entry.library_root.clone())?;
+            if let Some(rel) =
+                crate::model::sync::relative_under_root(&entry.library_root, &entry.resource)
+            {
+                entry_tbl.set("relative_path", rel)?;
+            }
+        }
+        if let Some(d) = &entry.description {
+            entry_tbl.set("description", d.clone())?;
+        }
+        if !entry.tags.is_empty() {
+            let tags = self.lua.create_table()?;
+            for (idx, tag) in entry.tags.iter().enumerate() {
+                tags.set(idx + 1, tag.clone())?;
+            }
+            entry_tbl.set("tags", tags)?;
+        }
+        if let Some(eid) = &entry.external_id {
+            entry_tbl.set("external_id", eid.clone())?;
+        }
+        if let Some(size) = entry.size {
+            entry_tbl.set("size", size)?;
+        }
+        if let Some(width) = entry.width {
+            entry_tbl.set("width", width)?;
+        }
+        if let Some(height) = entry.height {
+            entry_tbl.set("height", height)?;
+        }
+        if let Some(content_rating) = &entry.content_rating {
+            entry_tbl.set("content_rating", content_rating.clone())?;
+        }
+        Ok(entry_tbl)
+    }
+
     // -----------------------------------------------------------------------
     // Query API
 
@@ -950,25 +1026,9 @@ impl SourceManager {
             let module: LuaTable = self.lua.registry_value(key)?;
             let wallpaper_api: LuaTable = module.get("wallpaper")?;
             let extras_fn: LuaFunction = wallpaper_api.get("extras")?;
-            let entry_tbl = self.lua.create_table()?;
-            entry_tbl.set("item_id", entry.item_id)?;
-            entry_tbl.set("name", entry.name.clone())?;
-            entry_tbl.set("wp_type", entry.wp_type.clone())?;
-            entry_tbl.set("resource", entry.resource.clone())?;
-            if let Some(p) = &entry.preview {
-                entry_tbl.set("preview", p.clone())?;
-            }
-            if let Some(d) = &entry.description {
-                entry_tbl.set("description", d.clone())?;
-            }
-            // These identify where the item came from, so extras() can map
-            // DB entries back to plugin-owned resources.
-            if !entry.library_root.is_empty() {
-                entry_tbl.set("library_root", entry.library_root.clone())?;
-            }
-            if let Some(eid) = &entry.external_id {
-                entry_tbl.set("external_id", eid.clone())?;
-            }
+            let entry_tbl = self
+                .wallpaper_entry_table(entry)
+                .map_err(mlua::Error::external)?;
             // Build the same ctx scan(ctx) sees; extras runs per item, so
             // the libraries list is intentionally empty.
             let ctx = self
@@ -1009,17 +1069,7 @@ impl SourceManager {
         let module: LuaTable = self.lua.registry_value(key)?;
         let wallpaper_api: LuaTable = module.get("wallpaper")?;
         let props_fn: LuaFunction = wallpaper_api.get("properties")?;
-        let entry_tbl = self.lua.create_table()?;
-        entry_tbl.set("item_id", entry.item_id)?;
-        entry_tbl.set("name", entry.name.clone())?;
-        entry_tbl.set("wp_type", entry.wp_type.clone())?;
-        entry_tbl.set("resource", entry.resource.clone())?;
-        if !entry.library_root.is_empty() {
-            entry_tbl.set("library_root", entry.library_root.clone())?;
-        }
-        if let Some(eid) = &entry.external_id {
-            entry_tbl.set("external_id", eid.clone())?;
-        }
+        let entry_tbl = self.wallpaper_entry_table(entry)?;
         let ctx = self.build_ctx(Some(plugin_name), &[])?;
         let result: mlua::Value = props_fn
             .call_async((entry_tbl, ctx))
@@ -1314,6 +1364,48 @@ impl SourceManager {
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
+    }
+
+    pub fn supports_item_remove(&self, plugin_name: &str) -> bool {
+        self.plugin_infos
+            .get(plugin_name)
+            .map(|info| info.capabilities.source_item_remove)
+            .unwrap_or(false)
+    }
+
+    pub async fn remove_item(
+        &self,
+        plugin_name: &str,
+        entry: &WallpaperEntry,
+        libraries: &[String],
+    ) -> Result<()> {
+        let key = self
+            .plugins
+            .get(plugin_name)
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+        let Some(info) = self.plugin_infos.get(plugin_name) else {
+            return Err(Error::SourcePluginNotFound(plugin_name.to_string()));
+        };
+        if !info.capabilities.source_item_remove {
+            return Err(Error::SourceItemRemoveUnsupported(plugin_name.to_string()));
+        }
+
+        let module: LuaTable = self.lua.registry_value(key)?;
+        let source_api: LuaTable = module
+            .get("source")
+            .map_err(|_| Error::SourceItemRemoveUnsupported(plugin_name.to_string()))?;
+        let remove_fn: LuaFunction = source_api
+            .get("remove")
+            .map_err(|_| Error::SourceItemRemoveUnsupported(plugin_name.to_string()))?;
+        let ctx = self.build_ctx(Some(plugin_name), libraries)?;
+        let entry_tbl = self.wallpaper_entry_table(entry)?;
+        remove_fn
+            .call_async::<()>((ctx, entry_tbl))
+            .await
+            .map_err(|e| Error::SourceItemRemoveFailed {
+                plugin: plugin_name.to_string(),
+                message: e.to_string(),
+            })
     }
 
     pub fn plugin_version(&self, plugin_name: &str) -> Option<String> {
@@ -1674,6 +1766,116 @@ return M
         let detail = block_value(async { mgr.call_details("imported", "abc").await.unwrap() });
         assert_eq!(detail.width, Some(10));
         assert_eq!(detail.height, Some(20));
+    }
+
+    #[test]
+    fn source_item_remove_works_without_scan_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let item_path = dir.path().join("wallpaper.png");
+        std::fs::write(&item_path, b"image").unwrap();
+        let plugin_path = dir.path().join("remove.lua");
+        std::fs::write(
+            &plugin_path,
+            r#"
+local M = {}
+function M.info()
+    return {
+        name = "remove_only",
+        capabilities = {},
+    }
+end
+M.source = {}
+function M.source.remove(ctx, item)
+    if item.path ~= item.resource then error("path/resource mismatch") end
+    if item.relative_path ~= "wallpaper.png" then error("wrong relative path") end
+    if item.external_id ~= "ext-1" then error("missing external id") end
+    ctx.remove_file(item.path)
+end
+return M
+"#,
+        )
+        .unwrap();
+
+        let mut mgr = SourceManager::new().unwrap();
+        let name = mgr
+            .load_plugin(&plugin_path, "test.plugin", "1.0", ENTRY_VERSION)
+            .unwrap();
+        assert_eq!(name, "remove_only");
+        assert!(mgr.supports_item_remove("remove_only"));
+
+        let entry = WallpaperEntry {
+            item_id: 42,
+            name: "Wallpaper".to_string(),
+            wp_type: "image".to_string(),
+            resource: item_path.to_string_lossy().to_string(),
+            preview: None,
+            plugin_name: "remove_only".to_string(),
+            library_root: dir.path().to_string_lossy().to_string(),
+            description: None,
+            tags: vec!["tag".to_string()],
+            external_id: Some("ext-1".to_string()),
+            size: None,
+            width: None,
+            height: None,
+            content_rating: None,
+            modified_at: None,
+            create_at: 0,
+        };
+        let libraries = vec![entry.library_root.clone()];
+        block_value(async { mgr.remove_item("remove_only", &entry, &libraries).await }).unwrap();
+        assert!(!item_path.exists());
+    }
+
+    #[test]
+    fn source_item_remove_rejects_plugins_without_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_path = dir.path().join("no_remove.lua");
+        std::fs::write(
+            &plugin_path,
+            r#"
+local M = {}
+function M.info()
+    return {
+        name = "no_remove",
+        capabilities = {},
+    }
+end
+return M
+"#,
+        )
+        .unwrap();
+
+        let mut mgr = SourceManager::new().unwrap();
+        let name = mgr
+            .load_plugin(&plugin_path, "test.plugin", "1.0", ENTRY_VERSION)
+            .unwrap();
+        assert_eq!(name, "no_remove");
+        assert!(!mgr.supports_item_remove("no_remove"));
+
+        let entry = WallpaperEntry {
+            item_id: 7,
+            name: "Wallpaper".to_string(),
+            wp_type: "image".to_string(),
+            resource: "/tmp/wallpaper.png".to_string(),
+            preview: None,
+            plugin_name: "no_remove".to_string(),
+            library_root: "/tmp".to_string(),
+            description: None,
+            tags: Vec::new(),
+            external_id: None,
+            size: None,
+            width: None,
+            height: None,
+            content_rating: None,
+            modified_at: None,
+            create_at: 0,
+        };
+        let err =
+            block_value(async { mgr.remove_item("no_remove", &entry, &[]).await }).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::SourceItemRemoveUnsupported(plugin) if plugin == "no_remove"
+        ));
     }
 
     #[test]

@@ -1134,6 +1134,34 @@ async fn run_remote_download(state: Arc<AppState>, source_id: String, id: String
     Ok(())
 }
 
+async fn source_libraries_for_plugin(
+    state: &Arc<AppState>,
+    plugin_name: &str,
+) -> Result<Vec<String>> {
+    let plugin = repo::find_plugin_by_name(&state.db, plugin_name)
+        .await?
+        .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+    Ok(repo::list_libraries_by_plugin(&state.db, plugin.id)
+        .await?
+        .into_iter()
+        .map(|lib| lib.path)
+        .collect())
+}
+
+async fn remove_wallpaper_entry_files_and_db(
+    state: &Arc<AppState>,
+    entry: &crate::wallpaper::types::WallpaperEntry,
+) -> Result<()> {
+    let libraries = source_libraries_for_plugin(state, &entry.plugin_name).await?;
+    {
+        let sm = state.source_manager.lock().await;
+        sm.remove_item(&entry.plugin_name, entry, &libraries)
+            .await?;
+    }
+    repo::delete_item(&state.db, entry.item_id).await?;
+    Ok(())
+}
+
 async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
     let rid = req.request_id;
     build_response(rid, dispatch_inner(state, req).await)
@@ -1502,6 +1530,13 @@ async fn dispatch_inner(
             // an N+1 round-trip when paginating large libraries).
             let page_item_ids: Vec<i64> = page_entries.iter().map(|e| e.item_id).collect();
             let tag_map = repo::list_tags_for_items(&state.db, &page_item_ids).await?;
+            let remove_support_by_item = {
+                let sm = state.source_manager.lock().await;
+                page_entries
+                    .iter()
+                    .map(|e| (e.item_id, sm.supports_item_remove(&e.plugin_name)))
+                    .collect::<std::collections::HashMap<_, _>>()
+            };
 
             // WallpaperList skips property schema/overrides; WallpaperGet
             // loads those on demand per item.
@@ -1509,7 +1544,17 @@ async fn dispatch_inner(
                 .into_iter()
                 .map(|e| {
                     let tags = tag_map.get(&e.item_id).cloned().unwrap_or_default();
-                    entry_to_pb(e, tags, String::new(), String::new(), None)
+                    entry_to_pb(
+                        e,
+                        tags,
+                        String::new(),
+                        String::new(),
+                        None,
+                        remove_support_by_item
+                            .get(&e.item_id)
+                            .copied()
+                            .unwrap_or(false),
+                    )
                 })
                 .collect();
 
@@ -1528,16 +1573,17 @@ async fn dispatch_inner(
             let tags = entry.tags.clone();
             // Source plugin owns the property schema; empty string means
             // the plugin exposes no properties for this item.
-            let schema = state
-                .source_manager
-                .lock()
-                .await
-                .call_properties(&entry.plugin_name, &entry)
-                .await
-                .ok()
-                .flatten()
-                .map(|schema| dedupe_predefined_schema(&schema))
-                .unwrap_or_default();
+            let (schema, supports_item_remove) = {
+                let sm = state.source_manager.lock().await;
+                let schema = sm
+                    .call_properties(&entry.plugin_name, &entry)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|schema| dedupe_predefined_schema(&schema))
+                    .unwrap_or_default();
+                (schema, sm.supports_item_remove(&entry.plugin_name))
+            };
             let overrides = repo::get_user_property_overrides_raw(&state.db, entry.item_id)
                 .await?
                 .unwrap_or_default();
@@ -1551,8 +1597,39 @@ async fn dispatch_inner(
                     schema,
                     overrides,
                     layout_override,
+                    supports_item_remove,
                 )),
             })
+        }
+
+        Req::WallpaperRemove(r) => {
+            let mut wallpaper_ids = Vec::new();
+            if !r.wallpaper_id.trim().is_empty() {
+                wallpaper_ids.push(r.wallpaper_id);
+            }
+            wallpaper_ids.extend(
+                r.wallpaper_ids
+                    .into_iter()
+                    .filter(|id| !id.trim().is_empty()),
+            );
+            wallpaper_ids.sort();
+            wallpaper_ids.dedup();
+            if wallpaper_ids.is_empty() {
+                return Err(Error::InvalidArgument("wallpaper_id is required".into()));
+            }
+
+            let mut removed_count = 0;
+            for wallpaper_id in wallpaper_ids {
+                let entry = match wallpaper_id.parse::<i64>() {
+                    Ok(iid) => repo::get_entry(&state.db, iid).await?,
+                    Err(_) => None,
+                };
+                let entry = entry.ok_or_else(|| Error::WallpaperNotFound(wallpaper_id.clone()))?;
+                remove_wallpaper_entry_files_and_db(state, &entry).await?;
+                removed_count += 1;
+            }
+            control::notify_wallpaper_db_changed(state, 0).await;
+            Res::WallpaperRemove(pb::WallpaperRemoveResponse { removed_count })
         }
 
         Req::WallpaperPropertySet(r) => {
@@ -1674,6 +1751,10 @@ async fn dispatch_inner(
             }
 
             let layout_override = layout.map(WallpaperLayoutOverride::from_resolved);
+            let supports_item_remove = {
+                let sm = state.source_manager.lock().await;
+                sm.supports_item_remove(&entry.plugin_name)
+            };
             Res::WallpaperLayoutSet(pb::WallpaperLayoutSetResponse {
                 entry: Some(entry_to_pb(
                     &entry,
@@ -1681,6 +1762,7 @@ async fn dispatch_inner(
                     String::new(),
                     String::new(),
                     layout_override,
+                    supports_item_remove,
                 )),
             })
         }
@@ -1991,19 +2073,13 @@ async fn dispatch_inner(
                 })
             } else {
                 for (item, lib) in rows {
-                    let path = Path::new(&lib.path).join(&item.path);
-                    match tokio::fs::remove_file(&path).await {
-                        Ok(()) => {}
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(e) => return Err(Error::Io(e)),
+                    let Some(mut entry) = repo::get_entry(&state.db, item.id).await? else {
+                        continue;
+                    };
+                    if entry.library_root.is_empty() {
+                        entry.library_root = lib.path;
                     }
-                    let sidecar = sidecar_path(&path);
-                    match tokio::fs::remove_file(&sidecar).await {
-                        Ok(()) => {}
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(e) => return Err(Error::Io(e)),
-                    }
-                    repo::delete_item(&state.db, item.id).await?;
+                    remove_wallpaper_entry_files_and_db(state, &entry).await?;
                 }
                 control::notify_wallpaper_db_changed(state, 0).await;
                 Res::RemoteUninstall(pb::RemoteUninstallResponse {
@@ -2701,6 +2777,7 @@ fn entry_to_pb(
     user_properties_schema: String,
     user_property_overrides: String,
     wallpaper_layout_override: Option<WallpaperLayoutOverride>,
+    supports_item_remove: bool,
 ) -> pb::WallpaperEntry {
     // `e` is reconstructed from the DB (the source of truth), so its
     // fields are already the freshest values — no overlay needed.
@@ -2726,6 +2803,7 @@ fn entry_to_pb(
         wallpaper_layout_override: wallpaper_layout_override
             .map(|layout| layout_prefs_to_pb_resolved(&layout.materialize())),
         wallpaper_layout_override_set,
+        supports_item_remove,
     }
 }
 

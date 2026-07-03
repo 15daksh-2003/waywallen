@@ -26,6 +26,10 @@ function M.auto_detect(ctx)
     return found
 end
 
+function M.remove(ctx, item)
+    ctx.remove_file(item.path or item.resource)
+end
+
 function M.scan(ctx)
     local entries = {}
     local dirs = {}

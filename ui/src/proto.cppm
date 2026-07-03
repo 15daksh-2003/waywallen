@@ -50,6 +50,8 @@ using proto::WallpaperListRequest;
 using proto::WallpaperListResponse;
 using proto::WallpaperPropertySetRequest;
 using proto::WallpaperPropertySetResponse;
+using proto::WallpaperRemoveRequest;
+using proto::WallpaperRemoveResponse;
 using proto::WallpaperScanRequest;
 using proto::WallpaperScanResponse;
 using proto::WallpaperSyncFinished;

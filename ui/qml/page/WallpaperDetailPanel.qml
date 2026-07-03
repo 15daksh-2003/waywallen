@@ -113,6 +113,10 @@ Item {
     W.RendererPluginListQuery { id: pluginQuery }
     W.WallpaperApplyQuery { id: applyQuery }
     W.WallpaperApplyViaPortalQuery { id: portalApplyQuery }
+    W.WallpaperRemoveQuery {
+        id: removeQuery
+        wallpaperId: root.wallpaperId
+    }
 
     Connections {
         target: applyQuery
@@ -135,6 +139,22 @@ Item {
                 W.Action.toast("Portal apply failed");
             else if (portalApplyQuery.status === 2)
                 W.Action.toast("Wallpaper sent to desktop portal");
+        }
+    }
+
+    Connections {
+        target: removeQuery
+        function onRemoved() {
+            W.Action.toast("Wallpaper removed");
+            root.back();
+        }
+        function onStatusChanged() {
+            if (removeQuery.status === 3) {
+                const message = removeQuery.error && removeQuery.error.length > 0
+                    ? removeQuery.error
+                    : qsTr("Remove failed");
+                W.Action.toast(message, 6000, 1, null);
+            }
         }
     }
 
@@ -251,10 +271,28 @@ Item {
         onTriggered: root.openContainerFolder()
     }
 
+    MD.Action {
+        id: removeAction
+        text: "Remove"
+        icon.name: MD.Token.icon.delete
+        busy: removeQuery.querying
+        enabled: (root.wp?.supportsItemRemove ?? false) && (root.wp?.id_proto ?? "") !== ""
+        onTriggered: {
+            if (busy)
+                return;
+            removeQuery.reload();
+        }
+    }
+
     readonly property MD.Action activeApplyAction:
         ((root.wp?.wpType ?? "") === "image"
             && (W.App.displayManager.displays || []).length === 0)
         ? applyViaPortalAction : applyAction
+
+    readonly property list<MD.Action> detailActions:
+        (root.wp?.supportsItemRemove ?? false)
+        ? [removeAction, openContainerFolderAction, infoAction, closeAction]
+        : [openContainerFolderAction, infoAction, closeAction]
 
     ColumnLayout {
         anchors.fill: parent
@@ -312,10 +350,22 @@ Item {
                         maximumLineCount: 1
                     }
 
-                    MD.ActionToolBar {
-                        actions: [openContainerFolderAction, infoAction, closeAction]
-                        iconDelegate: MD.SmallIconButton {
-                            action: MD.ToolBarLayout.action
+                    Item {
+                        id: detailActionBarHost
+                        readonly property real targetWidth: Math.ceil(detailActionToolBar.maximumContentWidth) + 2
+                        Layout.minimumWidth: targetWidth
+                        Layout.preferredWidth: targetWidth
+                        Layout.maximumWidth: targetWidth
+                        Layout.preferredHeight: detailActionToolBar.implicitHeight
+                        Layout.alignment: Qt.AlignVCenter
+
+                        MD.ActionToolBar {
+                            id: detailActionToolBar
+                            anchors.fill: parent
+                            actions: root.detailActions
+                            iconDelegate: MD.SmallIconButton {
+                                action: MD.ToolBarLayout.action
+                            }
                         }
                     }
                 }
