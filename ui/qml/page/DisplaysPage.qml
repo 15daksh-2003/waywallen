@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 pragma ValueTypeBehavior: Assertable
 import QtQuick
 import QtQuick.Layouts
@@ -136,7 +137,8 @@ MD.Page {
             y: root.paneSpacing / 2
             width: parent.width
             height: root.displayPaneHeight
-            padding: 12
+            horizontalPadding: 24
+            verticalPadding: 16
             radius: 16
             backgroundColor: MD.MProp.color.surface
 
@@ -153,10 +155,9 @@ MD.Page {
                 id: canvas
                 implicitHeight: 48
 
-                readonly property real padding: 24
                 readonly property real viewScale: {
-                    const availW = Math.max(1, width - padding * 2);
-                    const availH = Math.max(1, height - padding * 2);
+                    const availW = Math.max(1, width);
+                    const availH = Math.max(1, height);
                     return Math.min(availW / root.boundsW, availH / root.boundsH);
                 }
                 readonly property real offsetX: (width - root.boundsW * viewScale) / 2
