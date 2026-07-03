@@ -408,6 +408,8 @@ impl RendererManager {
             registry.register(RendererDef {
                 name: "test-scene".to_string(),
                 plugin_id: "test.plugin".to_string(),
+                plugin_version: "0.0.0".to_string(),
+                plugin_system: false,
                 bin: PathBuf::from(bin),
                 types: vec!["scene".to_string()],
                 priority: 100,
@@ -1549,6 +1551,8 @@ mod init_handshake_tests {
         RendererDef {
             name: name.to_string(),
             plugin_id: "test.plugin".to_string(),
+            plugin_version: "0.0.0".to_string(),
+            plugin_system: false,
             bin: PathBuf::from("/dev/null"),
             types: vec!["scene".to_string()],
             priority: 100,
@@ -1563,6 +1567,8 @@ mod init_handshake_tests {
         RendererDef {
             name: "wescene-renderer".into(),
             plugin_id: "test.plugin".to_string(),
+            plugin_version: "0.0.0".to_string(),
+            plugin_system: false,
             bin: PathBuf::from("/dev/null"),
             types: vec!["scene".into()],
             priority: 100,
@@ -1586,6 +1592,8 @@ mod init_handshake_tests {
         RendererDef {
             name: "waywallen-mpv".into(),
             plugin_id: "test.plugin".to_string(),
+            plugin_version: "0.0.0".to_string(),
+            plugin_system: false,
             bin: PathBuf::from("/dev/null"),
             types: vec!["video".into()],
             priority: 100,
@@ -1712,6 +1720,8 @@ mod reuse_tests {
         RendererDef {
             name: "waywallen-mpv".into(),
             plugin_id: "test.plugin".to_string(),
+            plugin_version: "0.0.0".to_string(),
+            plugin_system: false,
             bin: PathBuf::from("/dev/null"),
             types: vec!["video".into()],
             priority: 100,

@@ -40,9 +40,12 @@ mod ws_server;
 pub struct AppState {
     pub renderer_manager: Arc<renderer_manager::RendererManager>,
     pub source_manager: Arc<tokio::sync::Mutex<plugin::source_manager::SourceManager>>,
-    /// Installable-plugin (package) list from the startup scan. Read-only;
-    /// surfaced to the UI via `PluginListRequest` for a plugin-centric view.
+    /// Active installable-plugin metadata from the startup scan.
     pub plugins: Arc<Vec<plugin::renderer_registry::PluginPackageMeta>>,
+    pub inactive_system: Arc<Vec<String>>,
+    pub inactive_user: Arc<Vec<String>>,
+    /// Plugin directories used by `PluginListRequest`.
+    pub plugin_roots: Arc<Vec<PathBuf>>,
     /// The installed source plugins (types/labels/hints). The only
     /// scan-derived state outside the DB for the Add-Library UI.
     pub source_plugins: Arc<tokio::sync::RwLock<Vec<plugin::source_manager::SourcePluginInfo>>>,
@@ -221,18 +224,17 @@ async fn async_main() -> anyhow::Result<()> {
     let dbus_conn = dbus_iface::acquire_or_handoff(handoff_ui).await;
     log::info!("DBus name acquired: {}", dbus_iface::BUS_NAME);
 
-    // Scan installable plugins from standard roots plus extra
-    // `--plugin PATH/plugins` dirs.
-    let mut plugin_scan = plugin::renderer_registry::build_default_plugin_scan();
+    let mut plugin_roots = plugin::renderer_registry::standard_plugin_dirs("plugins");
     for plugin_dir in &cli.plugin_dirs {
-        let plugins_dir = plugin_dir.join("plugins");
-        if plugins_dir.is_dir() {
-            plugin_scan.merge(plugin::renderer_registry::scan_plugins(&plugins_dir));
-        }
+        plugin_roots.push(plugin_dir.join("plugins"));
     }
+    let mut plugin_scan = plugin::renderer_registry::scan_plugin_roots(&plugin_roots);
     // Installable-plugin (package) list for the UI's plugin-centric view.
     // Computed before `entries` is taken so entry presence is accurate.
     let plugin_packages = Arc::new(plugin_scan.packages());
+    let inactive_system = Arc::new(plugin_scan.inactive_system.clone());
+    let inactive_user = Arc::new(plugin_scan.inactive_user.clone());
+    let plugin_roots = Arc::new(plugin_roots);
     let entry_refs = std::mem::take(&mut plugin_scan.entries);
 
     let mut registry = plugin::renderer_registry::RendererRegistry::new();
@@ -324,6 +326,9 @@ async fn async_main() -> anyhow::Result<()> {
         renderer_manager: renderer_mgr,
         source_manager: source_mgr.clone(),
         plugins: plugin_packages,
+        inactive_system,
+        inactive_user,
+        plugin_roots,
         source_plugins,
         router: router.clone(),
         settings: settings_store,

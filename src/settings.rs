@@ -1128,6 +1128,8 @@ baz = "7"
         r.register(RendererDef {
             name: "waywallen-video".into(),
             plugin_id: "test.plugin".to_string(),
+            plugin_version: "0.0.0".to_string(),
+            plugin_system: false,
             bin: PathBuf::from("/dev/null"),
             types: vec!["video".into()],
             priority: 100,

@@ -76,6 +76,7 @@ message Request {
     RemoteDetailsRequest      remote_details = 54;
     PlaylistJumpToRequest     playlist_jump_to = 58;
     WallpaperLayoutSetRequest wallpaper_layout_set = 59;
+    PluginDeleteRequest       plugin_delete = 60;
   }
 }
 
@@ -139,6 +140,7 @@ message Response {
     RemoteDetailsResponse      remote_details = 54;
     Empty                      playlist_jump_to = 58;
     WallpaperLayoutSetResponse wallpaper_layout_set = 59;
+    PluginDeleteResponse       plugin_delete = 60;
   }
 }
 
@@ -183,6 +185,7 @@ enum ErrorCode {
   ERROR_CODE_WALLPAPER_TYPE_NOT_SUPPORTED = 204;
   ERROR_CODE_PORTAL_CALL_FAILED = 205;
   ERROR_CODE_PLUGIN_INSTALL_FAILED = 206;
+  ERROR_CODE_PLUGIN_DELETE_FAILED = 207;
 
   // Settings
   ERROR_CODE_SETTINGS_VALIDATION_FAILED = 300;
@@ -1172,6 +1175,14 @@ message PluginInstallResponse {
   bool needs_restart = 2;
 }
 
+message PluginDeleteRequest {
+  string plugin_id = 1;
+}
+message PluginDeleteResponse {
+  string plugin_id = 1;
+  bool needs_restart = 2;
+}
+
 // Installable-plugin (package) view: one entry per `[plugin]`, with the
 // renderer components it provides (carrying their settings schema so a UI
 // can offer per-plugin configuration). Source presence is a flag.
@@ -1187,6 +1198,8 @@ message PluginInfo {
 message PluginListRequest {}
 message PluginListResponse {
   repeated PluginInfo plugins = 1;
+  repeated string inactive_system = 2;
+  repeated string inactive_user = 3;
 }
 
 // All distinct tag names currently in the library DB, for the wallpaper

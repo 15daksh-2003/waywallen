@@ -1,6 +1,7 @@
 module;
 #include "waywallen/query/plugin_query.moc.h"
 #undef assert
+#include <algorithm>
 #include <rstd/macro.hpp>
 
 module waywallen;
@@ -57,6 +58,8 @@ static auto renderer_to_map(const proto::RendererPluginInfo& r) -> QVariantMap {
 PluginListQuery::PluginListQuery(QObject* parent): Query(parent) {}
 
 auto PluginListQuery::plugins() const -> const QVariantList& { return m_plugins; }
+auto PluginListQuery::inactiveSystem() const -> const QStringList& { return m_inactive_system; }
+auto PluginListQuery::inactiveUser() const -> const QStringList& { return m_inactive_user; }
 
 void PluginListQuery::reload() {
     setStatus(Status::Querying);
@@ -80,6 +83,7 @@ void PluginListQuery::reload() {
                 m[u"version"_s]   = p.version();
                 m[u"hasSource"_s] = p.hasSource();
                 m[u"system"_s]    = p.system();
+                m[u"section"_s]   = p.system() ? u"system"_s : u"user"_s;
                 QVariantList renderers;
                 for (const auto& r : p.renderers()) {
                     renderers.append(renderer_to_map(r));
@@ -87,7 +91,31 @@ void PluginListQuery::reload() {
                 m[u"renderers"_s] = renderers;
                 items.append(m);
             }
-            self->m_plugins = std::move(items);
+            std::sort(items.begin(), items.end(), [](const QVariant& a, const QVariant& b) {
+                const auto am      = a.toMap();
+                const auto bm      = b.toMap();
+                const bool aSystem = am.value(u"system"_s).toBool();
+                const bool bSystem = bm.value(u"system"_s).toBool();
+                if (aSystem != bSystem) {
+                    return ! aSystem;
+                }
+                auto an = am.value(u"name"_s).toString();
+                auto bn = bm.value(u"name"_s).toString();
+                if (an.isEmpty()) an = am.value(u"id"_s).toString();
+                if (bn.isEmpty()) bn = bm.value(u"id"_s).toString();
+                return QString::localeAwareCompare(an, bn) < 0;
+            });
+            QStringList inactive_system;
+            for (const auto& id : rsp.pluginList().inactiveSystem()) {
+                inactive_system.append(id);
+            }
+            QStringList inactive_user;
+            for (const auto& id : rsp.pluginList().inactiveUser()) {
+                inactive_user.append(id);
+            }
+            self->m_plugins         = std::move(items);
+            self->m_inactive_system = std::move(inactive_system);
+            self->m_inactive_user   = std::move(inactive_user);
             Q_EMIT self->pluginsChanged();
         });
         co_return;
@@ -127,6 +155,40 @@ void PluginInstallQuery::reload() {
             self->m_needs_restart = r.needsRestart();
             Q_EMIT self->resultChanged();
             Q_EMIT self->installed(self->m_plugin_id, self->m_needs_restart);
+        });
+        co_return;
+    });
+}
+
+PluginDeleteQuery::PluginDeleteQuery(QObject* parent): Query(parent) {}
+
+auto PluginDeleteQuery::pluginId() const -> const QString& { return m_plugin_id; }
+auto PluginDeleteQuery::needsRestart() const -> bool { return m_needs_restart; }
+
+void PluginDeleteQuery::reload() { remove(m_plugin_id); }
+
+void PluginDeleteQuery::remove(const QString& pluginId) {
+    if (pluginId.isEmpty()) return;
+    setStatus(Status::Querying);
+    auto backend = App::instance()->backend();
+
+    auto req   = proto::Request {};
+    auto inner = proto::PluginDeleteRequest {};
+    inner.setPluginId(pluginId);
+    req.setPluginDelete(std::move(inner));
+
+    auto self = QWatcher { this };
+    spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
+        auto result = co_await backend->send(std::move(req));
+        co_await asio::post(asio::bind_executor(QAsyncResult::get_executor(), use_task));
+        if (! self) co_return;
+
+        self->inspect_set(result, [self](const proto::Response& rsp) {
+            const auto& r         = rsp.pluginDelete();
+            self->m_plugin_id     = r.pluginId();
+            self->m_needs_restart = r.needsRestart();
+            Q_EMIT self->resultChanged();
+            Q_EMIT self->deleted(self->m_plugin_id, self->m_needs_restart);
         });
         co_return;
     });

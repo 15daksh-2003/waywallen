@@ -91,6 +91,8 @@ using proto::GpuInfo;
 using proto::GpuListRequest;
 using proto::GpuListResponse;
 
+using proto::PluginDeleteRequest;
+using proto::PluginDeleteResponse;
 using proto::PluginInfo;
 using proto::PluginInstallRequest;
 using proto::PluginInstallResponse;

@@ -1306,15 +1306,18 @@ async fn dispatch_inner(
         }
 
         Req::PluginList(_) => {
-            // Plugin-centric view: each installable plugin package with the
-            // renderer components it provides (looked up by plugin_id).
-            let registry = state.renderer_manager.registry();
-            let all = registry.all_renderers();
-            let plugins = state
-                .plugins
-                .iter()
+            let plugin_roots = state.plugin_roots.clone();
+            let plugin_scan = tokio::task::spawn_blocking(move || {
+                crate::plugin::renderer_registry::scan_plugin_roots(plugin_roots.as_slice())
+            })
+            .await
+            .map_err(|e| Error::Internal(anyhow::anyhow!("plugin list join: {e}")))?;
+            let plugins = plugin_scan
+                .packages()
+                .into_iter()
                 .map(|pkg| {
-                    let renderers = all
+                    let renderers = plugin_scan
+                        .renderers
                         .iter()
                         .filter(|def| def.plugin_id == pkg.id)
                         .map(|def| renderer_def_to_pb(def, &pkg.version))
@@ -1329,7 +1332,24 @@ async fn dispatch_inner(
                     }
                 })
                 .collect();
-            Res::PluginList(pb::PluginListResponse { plugins })
+            Res::PluginList(pb::PluginListResponse {
+                plugins,
+                inactive_system: plugin_scan.inactive_system,
+                inactive_user: plugin_scan.inactive_user,
+            })
+        }
+
+        Req::PluginDelete(r) => {
+            let plugin_id = r.plugin_id.clone();
+            let plugin_id = tokio::task::spawn_blocking(move || {
+                crate::plugin::installer::delete_user_plugin(&plugin_id)
+            })
+            .await
+            .map_err(|e| Error::Internal(anyhow::anyhow!("plugin delete join: {e}")))??;
+            Res::PluginDelete(pb::PluginDeleteResponse {
+                plugin_id,
+                needs_restart: true,
+            })
         }
 
         Req::TagList(_) => {

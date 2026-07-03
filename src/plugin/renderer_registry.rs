@@ -1,5 +1,6 @@
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::wallpaper::types::WallpaperType;
@@ -52,6 +53,7 @@ pub const PLUGIN_FILES_MANIFEST: &str = "files.txt";
 pub struct EntryRef {
     pub plugin_id: String,
     pub plugin_version: String,
+    pub plugin_system: bool,
     pub entry: PathBuf,
     pub entry_version: u32,
 }
@@ -64,6 +66,8 @@ pub struct PluginScan {
     /// Parsed plugin metadata (id/name/version + resolved `files`),
     /// retained for introspection.
     pub plugins: Vec<PluginMeta>,
+    pub inactive_system: Vec<String>,
+    pub inactive_user: Vec<String>,
 }
 
 impl PluginScan {
@@ -71,6 +75,8 @@ impl PluginScan {
         self.renderers.extend(other.renderers);
         self.entries.extend(other.entries);
         self.plugins.extend(other.plugins);
+        self.inactive_system.extend(other.inactive_system);
+        self.inactive_user.extend(other.inactive_user);
     }
 
     /// Installable-plugin view of the scan.
@@ -111,6 +117,10 @@ pub struct RendererDef {
     /// scanning; reported to UIs so they can show a renderer's source.
     #[serde(default)]
     pub plugin_id: String,
+    #[serde(skip)]
+    pub plugin_version: String,
+    #[serde(skip)]
+    pub plugin_system: bool,
     pub bin: PathBuf,
     pub types: Vec<WallpaperType>,
     #[serde(default = "default_priority")]
@@ -575,6 +585,7 @@ pub fn scan_plugins(dir: &Path) -> PluginScan {
                 Some(entry_version) => out.entries.push(EntryRef {
                     plugin_id: meta.id.clone(),
                     plugin_version: meta.version.clone(),
+                    plugin_system: meta.system,
                     entry: resolve_rel(&plugin_dir, entry),
                     entry_version,
                 }),
@@ -593,6 +604,8 @@ pub fn scan_plugins(dir: &Path) -> PluginScan {
         for (name, mut def) in manifest.renderers {
             def.name = name;
             def.plugin_id = meta.id.clone();
+            def.plugin_version = meta.version.clone();
+            def.plugin_system = meta.system;
             def.bin = resolve_rel(&plugin_dir, def.bin);
             // Drop unrecognised event kinds — the gating tables only know
             // a small closed set, so an unknown name is dead config.
@@ -646,16 +659,97 @@ fn resolve_rel(base: &Path, p: PathBuf) -> PathBuf {
     }
 }
 
-/// Scan the two canonical plugin roots:
-/// 1. `<exec>/../share/waywallen/plugins/`  (bundled / system install)
-pub fn build_default_plugin_scan() -> PluginScan {
+pub fn scan_plugin_roots(dirs: &[PathBuf]) -> PluginScan {
     let mut scan = PluginScan::default();
-    for dir in standard_plugin_dirs("plugins") {
+    for dir in dirs {
         if dir.is_dir() {
-            scan.merge(scan_plugins(&dir));
+            scan.merge(scan_plugins(dir));
         }
     }
+    select_active_plugins(scan)
+}
+
+fn select_active_plugins(mut scan: PluginScan) -> PluginScan {
+    let mut selected_by_id: HashMap<String, usize> = HashMap::new();
+    let mut inactive_system = BTreeSet::new();
+    let mut inactive_user = BTreeSet::new();
+
+    for (idx, meta) in scan.plugins.iter().enumerate() {
+        let Some(&current_idx) = selected_by_id.get(&meta.id) else {
+            selected_by_id.insert(meta.id.clone(), idx);
+            continue;
+        };
+        let current = &scan.plugins[current_idx];
+        if plugin_priority(meta, current).is_gt() {
+            record_inactive(current, &mut inactive_system, &mut inactive_user);
+            selected_by_id.insert(meta.id.clone(), idx);
+        } else {
+            record_inactive(meta, &mut inactive_system, &mut inactive_user);
+        }
+    }
+
+    let active_keys: HashSet<(String, String, bool)> = selected_by_id
+        .values()
+        .map(|idx| {
+            let meta = &scan.plugins[*idx];
+            (meta.id.clone(), meta.version.clone(), meta.system)
+        })
+        .collect();
+
+    scan.plugins
+        .retain(|m| active_keys.contains(&(m.id.clone(), m.version.clone(), m.system)));
+    scan.entries.retain(|e| {
+        active_keys.contains(&(
+            e.plugin_id.clone(),
+            e.plugin_version.clone(),
+            e.plugin_system,
+        ))
+    });
+    scan.renderers.retain(|r| {
+        active_keys.contains(&(
+            r.plugin_id.clone(),
+            r.plugin_version.clone(),
+            r.plugin_system,
+        ))
+    });
+    scan.inactive_system = inactive_system.into_iter().collect();
+    scan.inactive_user = inactive_user.into_iter().collect();
     scan
+}
+
+fn record_inactive(
+    meta: &PluginMeta,
+    inactive_system: &mut BTreeSet<String>,
+    inactive_user: &mut BTreeSet<String>,
+) {
+    if meta.system {
+        inactive_system.insert(meta.id.clone());
+    } else {
+        inactive_user.insert(meta.id.clone());
+    }
+}
+
+fn plugin_priority(a: &PluginMeta, b: &PluginMeta) -> Ordering {
+    let version = version_cmp(&a.version, &b.version);
+    if !version.is_eq() {
+        return version;
+    }
+    match (a.system, b.system) {
+        (false, true) => Ordering::Greater,
+        (true, false) => Ordering::Less,
+        _ => Ordering::Equal,
+    }
+}
+
+fn version_cmp(a: &str, b: &str) -> Ordering {
+    match (parse_version(a), parse_version(b)) {
+        (Some(a), Some(b)) => a.cmp(&b),
+        _ => a.cmp(b),
+    }
+}
+
+fn parse_version(v: &str) -> Option<semver::Version> {
+    semver::Version::parse(v.trim().trim_start_matches(['v', 'V'])).ok()
 }
 
 /// Return the two canonical plugin directories (bundled + XDG) for a
@@ -691,6 +785,34 @@ pub fn standard_plugin_dirs(subdir: &str) -> Vec<PathBuf> {
 mod schema_tests {
     use super::*;
 
+    fn plugin_meta(id: &str, version: &str, system: bool) -> PluginMeta {
+        PluginMeta {
+            id: id.to_string(),
+            name: id.to_string(),
+            version: version.to_string(),
+            entry: None,
+            entry_version: None,
+            files: Vec::new(),
+            system,
+        }
+    }
+
+    fn renderer(id: &str, version: &str, system: bool, name: &str) -> RendererDef {
+        RendererDef {
+            name: name.to_string(),
+            plugin_id: id.to_string(),
+            plugin_version: version.to_string(),
+            plugin_system: system,
+            bin: PathBuf::from("/dev/null"),
+            types: vec!["image".to_string()],
+            priority: 100,
+            spawn_version: None,
+            extras: Vec::new(),
+            settings: Default::default(),
+            events: Vec::new(),
+        }
+    }
+
     fn test_setting(ty: SettingType, default: toml::Value, identity: bool) -> SettingDef {
         SettingDef {
             ty,
@@ -722,6 +844,50 @@ mod schema_tests {
         let m: PluginManifest = toml::from_str(src).expect("parses");
         let r = &m.renderers["wescene-renderer"];
         assert_eq!(r.events, vec!["pointer".to_string(), "mpris".to_string()]);
+    }
+
+    #[test]
+    fn user_plugin_wins_equal_version() {
+        let scan = select_active_plugins(PluginScan {
+            plugins: vec![
+                plugin_meta("org.test.plugin", "1.0.0", true),
+                plugin_meta("org.test.plugin", "1.0.0", false),
+            ],
+            renderers: vec![
+                renderer("org.test.plugin", "1.0.0", true, "system-renderer"),
+                renderer("org.test.plugin", "1.0.0", false, "user-renderer"),
+            ],
+            ..Default::default()
+        });
+
+        assert_eq!(scan.plugins.len(), 1);
+        assert!(!scan.plugins[0].system);
+        assert_eq!(scan.renderers.len(), 1);
+        assert_eq!(scan.renderers[0].name, "user-renderer");
+        assert_eq!(scan.inactive_system, vec!["org.test.plugin".to_string()]);
+        assert!(scan.inactive_user.is_empty());
+    }
+
+    #[test]
+    fn higher_system_version_wins_over_user() {
+        let scan = select_active_plugins(PluginScan {
+            plugins: vec![
+                plugin_meta("org.test.plugin", "2.0.0", true),
+                plugin_meta("org.test.plugin", "1.0.0", false),
+            ],
+            renderers: vec![
+                renderer("org.test.plugin", "2.0.0", true, "system-renderer"),
+                renderer("org.test.plugin", "1.0.0", false, "user-renderer"),
+            ],
+            ..Default::default()
+        });
+
+        assert_eq!(scan.plugins.len(), 1);
+        assert!(scan.plugins[0].system);
+        assert_eq!(scan.renderers.len(), 1);
+        assert_eq!(scan.renderers[0].name, "system-renderer");
+        assert_eq!(scan.inactive_user, vec!["org.test.plugin".to_string()]);
+        assert!(scan.inactive_system.is_empty());
     }
 
     #[test]

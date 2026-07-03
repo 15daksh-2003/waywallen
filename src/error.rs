@@ -106,6 +106,10 @@ pub enum Error {
     #[error("plugin install failed: {0}")]
     PluginInstallFailed(String),
 
+    /// Deleting a user-installed plugin failed.
+    #[error("plugin delete failed: {0}")]
+    PluginDeleteFailed(String),
+
     /// Source plugin does not export the requested discover function
     /// (`discover` / `details`), so it cannot serve a discover request.
     #[error("source plugin '{0}' does not support discover")]
@@ -198,6 +202,7 @@ impl Error {
             Self::SourcePluginNotFound(_) => E::SourcePluginNotFound,
             Self::SourceExtrasFailed { .. } => E::SourceExtrasFailed,
             Self::PluginInstallFailed(_) => E::PluginInstallFailed,
+            Self::PluginDeleteFailed(_) => E::PluginDeleteFailed,
             // Discover types map onto generic codes; the discover request
             // proto (and any dedicated codes) is owned by the transport PR.
             Self::DiscoverUnsupported(_) => E::FailedPrecondition,
@@ -240,6 +245,7 @@ impl Error {
             | E::RendererFrameFailed
             | E::SourceExtrasFailed
             | E::PluginInstallFailed
+            | E::PluginDeleteFailed
             | E::SettingsApplyFailed
             | E::PortalCallFailed => S::Internal,
         }
