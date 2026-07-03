@@ -186,14 +186,47 @@ MD.ApplicationWindow {
                         }
                     }
 
-                    footer: MD.RailItem {
-                        expand: m_rail.useLarge
-                        checked: false
-                        icon.name: MD.Token.icon.info
-                        text: "About"
-                        onClicked: MD.Util.showPopup('waywallen.ui/PagePopup', {
-                            source: 'waywallen.ui/AboutPage'
-                        }, win)
+                    footer: Item {
+                        implicitHeight: m_rail_footer.implicitHeight
+
+                        Column {
+                            id: m_rail_footer
+                            width: parent.width
+
+                            MD.RailItem {
+                                width: parent.width
+                                expand: m_rail.useLarge
+                                checked: false
+                                icon.name: MD.Token.icon.settings
+                                text: "Settings"
+                                onClicked: MD.Util.showPopup('waywallen.ui/PagePopup', {
+                                    source: 'waywallen.ui/SettingsPage'
+                                }, win)
+                            }
+
+                            MD.RailItem {
+                                width: parent.width
+                                expand: m_rail.useLarge
+                                checked: false
+                                icon.name: MD.Token.icon.extension
+                                text: "Plugins"
+                                onClicked: MD.Util.showPopup('waywallen.ui/PagePopup', {
+                                    source: 'waywallen.ui/PluginManagePage'
+                                }, win)
+                            }
+
+                            MD.RailItem {
+                                visible: m_rail.useLarge
+                                width: parent.width
+                                expand: true
+                                checked: false
+                                icon.name: MD.Token.icon.info
+                                text: "About"
+                                onClicked: MD.Util.showPopup('waywallen.ui/PagePopup', {
+                                    source: 'waywallen.ui/AboutPage'
+                                }, win)
+                            }
+                        }
                     }
                 }
             }

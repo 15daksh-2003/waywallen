@@ -9,7 +9,7 @@ import waywallen.ui as W
 MD.Page {
     id: root
     padding: 0
-    showHeader: true
+    showHeader: MD.MProp.size.isCompact
     showBackground: false
     title: 'Status'
 
@@ -26,6 +26,13 @@ MD.Page {
             text: qsTr("Settings")
             onTriggered: MD.Util.showPopup('waywallen.ui/PagePopup', {
                 source: 'waywallen.ui/SettingsPage'
+            }, root.Window.window)
+        },
+        MD.Action {
+            icon.name: MD.Token.icon.info
+            text: qsTr("About")
+            onTriggered: MD.Util.showPopup('waywallen.ui/PagePopup', {
+                source: 'waywallen.ui/AboutPage'
             }, root.Window.window)
         }
     ]
