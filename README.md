@@ -25,7 +25,13 @@ It started life as a Wallpaper Engine plugin for KDE.
 
 ### Install
 
-**Prebuilt binaries** — grab the latest archive from the [Releases page](https://github.com/waywallen/waywallen/releases).
+**Prebuilt binaries** — grab the latest appimage from the [Releases page](https://github.com/waywallen/waywallen/releases).
+
+**Flatpak**  
+
+<a href='https://flathub.org/en/apps/org.waywallen.waywallen'>
+<img width='240' alt='Get it on Flathub' src='https://flathub.org/api/badge?locale=en'/>
+</a>
 
 **From source** — see [BUILD.md](BUILD.md).
 
