@@ -12,9 +12,12 @@ end
 function M.auto_detect(ctx)
     local candidates = {}
     local xdg = ctx.env("XDG_PICTURES_DIR")
-    if xdg and xdg ~= "" then table.insert(candidates, xdg) end
     local home = ctx.env("HOME")
-    if home and home ~= "" then table.insert(candidates, home .. "/Pictures/Wallpapers") end
+    if xdg and xdg ~= "" then
+        table.insert(candidates, xdg)
+    elseif home and home ~= "" then
+        table.insert(candidates, home .. "/Pictures/Wallpapers")
+    end
 
     local found, seen = {}, {}
     for _, p in ipairs(candidates) do

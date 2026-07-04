@@ -28,11 +28,16 @@ function M.auto_detect(ctx)
     local pictures = ctx.env("XDG_PICTURES_DIR")
 
     local candidates = {}
-    if videos and videos ~= "" then table.insert(candidates, videos) end
-    if home and home ~= "" then table.insert(candidates, home .. "/Videos/Wallpapers") end
-    if home and home ~= "" then table.insert(candidates, home .. "/Videos") end
-    if pictures and pictures ~= "" then table.insert(candidates, pictures .. "/Wallpapers") end
-    if home and home ~= "" then table.insert(candidates, home .. "/Pictures/Wallpapers") end
+    if videos and videos ~= "" then
+        table.insert(candidates, videos .. "/Wallpapers")
+    elseif home and home ~= "" then
+        table.insert(candidates, home .. "/Videos/Wallpapers")
+    end
+    if pictures and pictures ~= "" then
+        table.insert(candidates, pictures .. "/Wallpapers")
+    elseif home and home ~= "" then
+        table.insert(candidates, home .. "/Pictures/Wallpapers")
+    end
     return first_existing(ctx, candidates)
 end
 
