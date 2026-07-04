@@ -59,3 +59,28 @@ It started life as a Wallpaper Engine plugin for KDE.
 - [open-wallpaper-engine](https://github.com/waywallen/open-wallpaper-engine)
   - scene support
   - web support
+
+> [!NOTE]  
+> For third plugins:  
+> You need to mannually download plugin zip and install in the ui's plugins page.  
+> After installed, this plugin's update will be notified and handled by waywallen.  
+
+## FAQ
+- How to debug in flatpak
+  ```bash
+  flatpak install org.waywallen.waywallen.Debug
+  flatpak run --devel --command=bash org.waywallen.waywallen
+  # 1. run directly
+  [📦 org.waywallen.waywallen ~]$ gdb Qcm
+  (gdb) run
+  Enable debuginfod for this session? (y or [n]) n
+  ...
+  # get the stacktrace
+  (gdb) bt
+  
+  # 2. or use coredump file
+  coredumpctl dump <id> -o core.save
+  flatpak run --devel --filesystem=host --command=bash org.waywallen.waywallen
+  [📦 org.waywallen.waywallen ~]$ gdb Qcm core.save
+  ...
+  ```
