@@ -39,6 +39,7 @@ Util::Desktop Util::desktop() const {
             if (v == QLatin1String("hyprland")) return Desktop::Hyprland;
             if (v == QLatin1String("sway")) return Desktop::Sway;
             if (v == QLatin1String("niri")) return Desktop::Niri;
+            if (v == QLatin1String("gnome")) return Desktop::Gnome;
         }
         return Desktop::Unknown;
     }();

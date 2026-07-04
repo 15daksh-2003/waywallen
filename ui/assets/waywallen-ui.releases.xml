@@ -22,7 +22,7 @@
     </ul>
     <p>Security:</p>
     <ul>
-      <li>Bind the WebSocket control plane to localhost.</li>
+      <li>Bind WebSocket control plane to localhost by @RedOrkGreenRox in #116.</li>
     </ul>
   </description>
 </release>

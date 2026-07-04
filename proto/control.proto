@@ -858,6 +858,16 @@ message StatusSync {
   uint32 active_task_count = 2;
   // Daemon lifecycle phase. UI gates the startup dialog on this.
   DaemonPhase phase = 3;
+  DisplayBackendStatus display_backend = 4;
+}
+
+message DisplayBackendStatus {
+  string name = 1;
+  string state = 2;
+  string desktop = 3;
+  string binary = 4;
+  string reason = 5;
+  string flatpak_id = 6;
 }
 
 // One or more libraries were just added — by `LibraryAdd` (one path)

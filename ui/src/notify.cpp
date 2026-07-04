@@ -63,13 +63,16 @@ Notify::Notify(QObject* parent): QObject(parent) {
                 const bool        new_scan  = s.scanInProgress();
                 const quint32     new_tasks = s.activeTaskCount();
                 const DaemonPhase new_phase = pb_phase_to_enum(s.phase());
-                const bool        ready_edge =
+                const auto        new_backend =
+                    s.hasDisplayBackend() ? s.displayBackend() : proto::DisplayBackendStatus {};
+                const bool ready_edge =
                     new_phase == DaemonPhase::Ready && m_daemon_phase != DaemonPhase::Ready;
                 if (new_scan != m_scan_in_progress || new_tasks != m_active_task_count ||
-                    new_phase != m_daemon_phase) {
+                    new_phase != m_daemon_phase || new_backend != m_display_backend) {
                     m_scan_in_progress  = new_scan;
                     m_active_task_count = new_tasks;
                     m_daemon_phase      = new_phase;
+                    m_display_backend   = new_backend;
                     Q_EMIT statusChanged();
                 }
                 if (ready_edge) {
@@ -97,13 +100,15 @@ Notify::Notify(QObject* parent): QObject(parent) {
     // stale Ready while the daemon is gone.
     connect(backend, &Backend::disconnected, this, [this] {
         const bool changed = m_scan_in_progress || m_active_task_count != 0 ||
-                             m_daemon_phase != DaemonPhase::Starting;
+                             m_daemon_phase != DaemonPhase::Starting ||
+                             m_display_backend != proto::DisplayBackendStatus {};
         if (! changed) {
             return;
         }
         m_scan_in_progress  = false;
         m_active_task_count = 0;
         m_daemon_phase      = DaemonPhase::Starting;
+        m_display_backend   = proto::DisplayBackendStatus {};
         Q_EMIT statusChanged();
     });
 }

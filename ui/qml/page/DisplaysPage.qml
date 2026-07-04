@@ -181,11 +181,18 @@ MD.Page {
                         color: MD.Token.color.on_surface_variant
                     }
 
-                    // KDE-specific install hint. Self-gated on
-                    // `W.Util.desktop`; on other DEs (wlroots, niri,
-                    // …) the daemon spawns its own layer-shell
-                    // backend so this collapses to nothing.
+                    // Desktop-specific install hints are self-gated on
+                    // `W.Util.desktop`, so this section stays empty when
+                    // the daemon can spawn its own display backend.
                     W.KdeDisplaysHelp {
+                        Layout.fillWidth: true
+                    }
+
+                    W.GnomeDisplaysHelp {
+                        Layout.fillWidth: true
+                    }
+
+                    W.LayerShellDisplaysHelp {
                         Layout.fillWidth: true
                     }
                 }

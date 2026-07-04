@@ -7,6 +7,7 @@ module;
 
 export module waywallen:notify;
 export import qextra;
+export import :proto;
 
 namespace waywallen
 {
@@ -49,6 +50,8 @@ public:
     /// `Starting` when the WS disconnects so a daemon restart triggers
     /// the dialog again.
     Q_PROPERTY(DaemonPhase daemonPhase READ daemonPhase NOTIFY statusChanged FINAL)
+    Q_PROPERTY(waywallen::control::v1::DisplayBackendStatus displayBackend READ displayBackend
+                   NOTIFY statusChanged FINAL)
 
     Notify(QObject* parent);
     ~Notify() override;
@@ -62,6 +65,9 @@ public:
     auto scanInProgress() const -> bool { return m_scan_in_progress; }
     auto activeTaskCount() const -> quint32 { return m_active_task_count; }
     auto daemonPhase() const -> DaemonPhase { return m_daemon_phase; }
+    auto displayBackend() const -> const control::v1::DisplayBackendStatus& {
+        return m_display_backend;
+    }
 
 Q_SIGNALS:
     /// Daemon finished a wallpaper sync (success or failure). `count`
@@ -103,9 +109,10 @@ Q_SIGNALS:
     void playlistChanged();
 
 private:
-    bool        m_scan_in_progress { false };
-    quint32     m_active_task_count { 0 };
-    DaemonPhase m_daemon_phase { DaemonPhase::Starting };
+    bool                              m_scan_in_progress { false };
+    quint32                           m_active_task_count { 0 };
+    DaemonPhase                       m_daemon_phase { DaemonPhase::Starting };
+    control::v1::DisplayBackendStatus m_display_backend;
 };
 
 } // namespace waywallen

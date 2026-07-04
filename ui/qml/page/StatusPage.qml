@@ -104,6 +104,28 @@ MD.Page {
         return name + "-" + pid;
     }
 
+    function desktopLabel(value) {
+        const raw = (value || "").trim();
+        if (!raw.length)
+            return "";
+        const key = raw.toLowerCase();
+        if (key === "cosmic")
+            return "COSMIC";
+        if (key === "gnome")
+            return "GNOME";
+        if (key === "kde")
+            return "KDE";
+        if (key === "hyprland")
+            return "Hyprland";
+        if (key === "niri")
+            return "Niri";
+        if (key === "river")
+            return "River";
+        if (key === "sway")
+            return "Sway";
+        return raw.charAt(0).toUpperCase() + raw.slice(1);
+    }
+
     W.RendererKillQuery {
         id: killQuery
         onStatusChanged: {
@@ -166,6 +188,21 @@ MD.Page {
                             text: healthQuery.service || "—"
                             typescale: MD.Token.typescale.body_medium
                             color: MD.Token.color.on_surface
+                        }
+                        W.Tag {
+                            readonly property string label: root.desktopLabel(W.Notify.displayBackend.desktop)
+                            Layout.alignment: Qt.AlignVCenter
+                            visible: label.length > 0
+                            text: label
+                            bgColor: MD.Token.color.secondary_container
+                            fgColor: MD.Token.color.on_secondary_container
+                        }
+                        W.Tag {
+                            Layout.alignment: Qt.AlignVCenter
+                            visible: W.Notify.displayBackend.flatpakId.length > 0
+                            text: "Flatpak"
+                            bgColor: MD.Token.color.tertiary_container
+                            fgColor: MD.Token.color.on_tertiary_container
                         }
                     }
 

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -6,6 +6,13 @@ use tokio::process::Command;
 use tokio::sync::watch;
 
 use crate::plugin::display_registry::{DisplayDef, DisplayRegistry, SpawnMode};
+
+pub const DISPLAY_BACKEND_STATE_DISABLED: &str = "disabled";
+pub const DISPLAY_BACKEND_STATE_UNMATCHED: &str = "unmatched";
+pub const DISPLAY_BACKEND_STATE_EXTERNAL: &str = "external";
+pub const DISPLAY_BACKEND_STATE_READY: &str = "ready";
+pub const DISPLAY_BACKEND_STATE_BINARY_MISSING: &str = "binary_missing";
+pub const DISPLAY_BACKEND_STATE_FLATPAK_RESTRICTED: &str = "flatpak_restricted";
 
 /// Observed desktop environment + Wayland capability snapshot.
 #[derive(Debug, Default, Clone)]
@@ -20,12 +27,104 @@ pub struct DeCaps {
     /// Placeholder for future `wl_registry` probe — list of global names
     /// like `"wlr-layer-shell"`, `"linux-dmabuf-v4"`, `"plasma-shell"`.
     pub probed_globals: Vec<String>,
+    pub flatpak_id: Option<String>,
 }
 
 impl DeCaps {
     pub fn is_kde(&self) -> bool {
         self.xdg_desktop.iter().any(|t| t == "kde")
     }
+
+    pub fn is_flatpak(&self) -> bool {
+        self.flatpak_id.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DisplayBackendStatus {
+    pub name: String,
+    pub state: String,
+    pub desktop: String,
+    pub binary: String,
+    pub reason: String,
+    pub flatpak_id: String,
+}
+
+impl DisplayBackendStatus {
+    pub fn disabled(caps: &DeCaps) -> Self {
+        Self {
+            state: DISPLAY_BACKEND_STATE_DISABLED.to_string(),
+            desktop: primary_desktop(caps),
+            reason: "--no-display".to_string(),
+            flatpak_id: flatpak_id(caps),
+            ..Default::default()
+        }
+    }
+
+    pub fn unmatched(caps: &DeCaps) -> Self {
+        Self {
+            state: DISPLAY_BACKEND_STATE_UNMATCHED.to_string(),
+            desktop: primary_desktop(caps),
+            reason: "no display backend matched this desktop".to_string(),
+            flatpak_id: flatpak_id(caps),
+            ..Default::default()
+        }
+    }
+
+    pub fn external(def: &DisplayDef, caps: &DeCaps) -> Self {
+        Self {
+            name: def.name.clone(),
+            state: DISPLAY_BACKEND_STATE_EXTERNAL.to_string(),
+            desktop: primary_desktop(caps),
+            binary: def.bin.display().to_string(),
+            reason: "display backend is managed by the desktop".to_string(),
+            flatpak_id: flatpak_id(caps),
+        }
+    }
+
+    pub fn ready(def: &DisplayDef, caps: &DeCaps) -> Self {
+        Self {
+            name: def.name.clone(),
+            state: DISPLAY_BACKEND_STATE_READY.to_string(),
+            desktop: primary_desktop(caps),
+            binary: def.bin.display().to_string(),
+            reason: String::new(),
+            flatpak_id: flatpak_id(caps),
+        }
+    }
+
+    pub fn binary_missing(def: &DisplayDef, caps: &DeCaps) -> Self {
+        Self {
+            name: def.name.clone(),
+            state: DISPLAY_BACKEND_STATE_BINARY_MISSING.to_string(),
+            desktop: primary_desktop(caps),
+            binary: def.bin.display().to_string(),
+            reason: format!(
+                "display backend binary '{}' was not found",
+                def.bin.display()
+            ),
+            flatpak_id: flatpak_id(caps),
+        }
+    }
+
+    pub fn flatpak_restricted(def: &DisplayDef, caps: &DeCaps) -> Self {
+        Self {
+            name: def.name.clone(),
+            state: DISPLAY_BACKEND_STATE_FLATPAK_RESTRICTED.to_string(),
+            desktop: primary_desktop(caps),
+            binary: def.bin.display().to_string(),
+            reason: "layer-shell Wayland protocols are not available inside Flatpak".to_string(),
+            flatpak_id: flatpak_id(caps),
+        }
+    }
+}
+
+fn primary_desktop(caps: &DeCaps) -> String {
+    caps.xdg_desktop.first().cloned().unwrap_or_default()
+}
+
+fn flatpak_id(caps: &DeCaps) -> String {
+    caps.flatpak_id.clone().unwrap_or_default()
 }
 
 /// Read environment to populate `DeCaps`. Never panics; unset values are
@@ -46,11 +145,13 @@ pub fn detect_de() -> DeCaps {
     let is_wayland_session = std::env::var("XDG_SESSION_TYPE")
         .map(|v| v.eq_ignore_ascii_case("wayland"))
         .unwrap_or(false);
+    let flatpak_id = std::env::var("FLATPAK_ID").ok().filter(|s| !s.is_empty());
     DeCaps {
         xdg_desktop,
         wayland_display,
         is_wayland_session,
         probed_globals: Vec::new(),
+        flatpak_id,
     }
 }
 
@@ -238,6 +339,53 @@ pub fn should_daemon_spawn(outcome: &PickOutcome) -> bool {
         }
         PickOutcome::None => false,
     }
+}
+
+pub fn resolve_backend_bin(bin: &Path) -> Option<PathBuf> {
+    if bin.as_os_str().is_empty() {
+        return None;
+    }
+
+    if bin.is_absolute() || bin.components().count() > 1 {
+        return bin.is_file().then(|| bin.to_path_buf());
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let candidate = parent.join(bin);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(bin);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+pub fn preflight_daemon_backend(
+    def: DisplayDef,
+    caps: &DeCaps,
+) -> (DisplayBackendStatus, Option<DisplayDef>) {
+    if caps.is_flatpak() && requires_layer_shell(&def) {
+        return (DisplayBackendStatus::flatpak_restricted(&def, caps), None);
+    }
+    let Some(resolved) = resolve_backend_bin(&def.bin) else {
+        return (DisplayBackendStatus::binary_missing(&def, caps), None);
+    };
+    let mut def = def;
+    def.bin = resolved;
+    (DisplayBackendStatus::ready(&def, caps), Some(def))
+}
+
+fn requires_layer_shell(def: &DisplayDef) -> bool {
+    def.requires.iter().any(|r| r == "wlr-layer-shell")
 }
 
 // ---------------------------------------------------------------------------
@@ -486,5 +634,43 @@ mod tests {
             ..Default::default()
         };
         assert!(should_daemon_spawn(&pick_backend(&reg, &caps_niri)));
+    }
+
+    #[test]
+    fn preflight_missing_binary_reports_status_and_skips_backend() {
+        let caps = DeCaps {
+            xdg_desktop: vec!["hyprland".into()],
+            ..Default::default()
+        };
+        let mut backend = def("layer-shell", &["hyprland"], 50, SpawnMode::Daemon);
+        backend.bin = PathBuf::from("/__waywallen_missing_layer_shell_binary__");
+
+        let (status, backend) = preflight_daemon_backend(backend, &caps);
+
+        assert!(backend.is_none());
+        assert_eq!(status.name, "layer-shell");
+        assert_eq!(status.state, DISPLAY_BACKEND_STATE_BINARY_MISSING);
+        assert_eq!(status.desktop, "hyprland");
+        assert!(status.reason.contains("was not found"));
+    }
+
+    #[test]
+    fn preflight_flatpak_layer_shell_reports_restricted_and_skips_backend() {
+        let caps = DeCaps {
+            xdg_desktop: vec!["sway".into()],
+            flatpak_id: Some("org.waywallen.waywallen".into()),
+            ..Default::default()
+        };
+        let mut backend = def("layer-shell", &["sway"], 50, SpawnMode::Daemon);
+        backend.requires = vec!["wlr-layer-shell".into()];
+
+        let (status, backend) = preflight_daemon_backend(backend, &caps);
+
+        assert!(backend.is_none());
+        assert_eq!(status.name, "layer-shell");
+        assert_eq!(status.state, DISPLAY_BACKEND_STATE_FLATPAK_RESTRICTED);
+        assert_eq!(status.desktop, "sway");
+        assert_eq!(status.flatpak_id, "org.waywallen.waywallen");
+        assert!(status.reason.contains("Flatpak"));
     }
 }

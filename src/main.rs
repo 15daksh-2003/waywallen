@@ -51,6 +51,7 @@ pub struct AppState {
     pub source_plugins: Arc<tokio::sync::RwLock<Vec<plugin::source_manager::SourcePluginInfo>>>,
     pub plugin_mutation: tokio::sync::Mutex<()>,
     pub router: Arc<routing::Router>,
+    pub display_backend_status: std::sync::RwLock<display::spawner::DisplayBackendStatus>,
     pub settings: Arc<settings::SettingsStore>,
     /// Snapshot of `/dev/dri` taken at startup. Read-only after construction;
     /// surfaced to UI and used by RendererManager spawn resolution.
@@ -336,6 +337,9 @@ async fn async_main() -> anyhow::Result<()> {
         source_plugins,
         plugin_mutation: tokio::sync::Mutex::new(()),
         router: router.clone(),
+        display_backend_status: std::sync::RwLock::new(
+            display::spawner::DisplayBackendStatus::default(),
+        ),
         settings: settings_store,
         gpus,
         db: db.clone(),
@@ -404,6 +408,8 @@ async fn async_main() -> anyhow::Result<()> {
     let display_caps = display::spawner::detect_de();
     let display_backend: Option<plugin::display_registry::DisplayDef> = if cli.no_display {
         log::info!("--no-display: skipping display backend selection");
+        *state.display_backend_status.write().unwrap() =
+            display::spawner::DisplayBackendStatus::disabled(&display_caps);
         None
     } else {
         let pick = if let Some(name) = cli.display_backend.as_deref() {
@@ -424,15 +430,32 @@ async fn async_main() -> anyhow::Result<()> {
         };
         display::spawner::log_outcome(&pick, &display_caps);
         let should_spawn = display::spawner::should_daemon_spawn(&pick);
-        match pick {
+        let (status, backend) = match pick {
             display::spawner::PickOutcome::KdeHardMatch(def)
             | display::spawner::PickOutcome::Matched(def)
                 if should_spawn =>
             {
-                Some(def)
+                let (status, backend) =
+                    display::spawner::preflight_daemon_backend(def, &display_caps);
+                if status.state == display::spawner::DISPLAY_BACKEND_STATE_BINARY_MISSING
+                    || status.state == display::spawner::DISPLAY_BACKEND_STATE_FLATPAK_RESTRICTED
+                {
+                    log::error!("{}", status.reason);
+                }
+                (status, backend)
             }
-            _ => None,
-        }
+            display::spawner::PickOutcome::KdeHardMatch(def)
+            | display::spawner::PickOutcome::Matched(def) => (
+                display::spawner::DisplayBackendStatus::external(&def, &display_caps),
+                None,
+            ),
+            display::spawner::PickOutcome::None => (
+                display::spawner::DisplayBackendStatus::unmatched(&display_caps),
+                None,
+            ),
+        };
+        *state.display_backend_status.write().unwrap() = status;
+        backend
     };
 
     let display_sock_path = display::endpoint::default_socket_path();

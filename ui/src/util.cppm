@@ -33,6 +33,7 @@ public:
         Hyprland = 2,
         Sway     = 3,
         Niri     = 4,
+        Gnome    = 5,
     };
     Q_ENUM(Desktop)
 

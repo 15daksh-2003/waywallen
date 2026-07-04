@@ -56,6 +56,7 @@ using proto::WallpaperScanRequest;
 using proto::WallpaperScanResponse;
 using proto::WallpaperSyncFinished;
 
+using proto::DisplayBackendStatus;
 using proto::StatusSync;
 using proto::DaemonPhaseGadget::DaemonPhase;
 

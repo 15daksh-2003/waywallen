@@ -770,12 +770,27 @@ fn status_sync_event(state: &Arc<AppState>) -> pb::Event {
     } else {
         pb::DaemonPhase::Starting
     };
+    let display_backend = state.display_backend_status.read().unwrap().clone();
     pb::Event {
         payload: Some(pb::event::Payload::StatusSync(pb::StatusSync {
             scan_in_progress,
             active_task_count,
             phase: phase as i32,
+            display_backend: Some(display_backend_status_to_pb(display_backend)),
         })),
+    }
+}
+
+fn display_backend_status_to_pb(
+    s: crate::display::spawner::DisplayBackendStatus,
+) -> pb::DisplayBackendStatus {
+    pb::DisplayBackendStatus {
+        name: s.name,
+        state: s.state,
+        desktop: s.desktop,
+        binary: s.binary,
+        reason: s.reason,
+        flatpak_id: s.flatpak_id,
     }
 }
 

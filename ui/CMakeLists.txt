@@ -140,6 +140,8 @@ set(QML_FILES
   qml/component/Tag.qml
   qml/component/GpuTag.qml
   qml/component/KdeDisplaysHelp.qml
+  qml/component/GnomeDisplaysHelp.qml
+  qml/component/LayerShellDisplaysHelp.qml
   qml/component/ThumbnailImage.qml
   qml/component/SearchChip.qml
   qml/component/ValueSlider.qml
