@@ -966,9 +966,28 @@ impl RendererManager {
     /// Forward an MPRIS media snapshot to a live renderer. Silently
     /// drops when the renderer did not subscribe to MPRIS events.
     pub async fn send_mpris(&self, id: &str, snapshot: MprisSnapshot) -> Result<()> {
-        if !self.subscribed_to(id, EVENT_KIND_MPRIS).await {
+        let Some(handle) = self.get(id).await else {
+            log::debug!("renderer {id}: drop mpris snapshot; renderer not found");
+            return Ok(());
+        };
+        if !handle
+            .events_subscribed
+            .iter()
+            .any(|e| e == EVENT_KIND_MPRIS)
+        {
+            log::debug!(
+                "renderer {id}: drop mpris snapshot; not subscribed to mpris events={:?}",
+                handle.events_subscribed
+            );
             return Ok(());
         }
+        log::debug!(
+            "renderer {id}: send mpris snapshot state={} title={:?} artist={:?} art_url={:?}",
+            snapshot.state,
+            snapshot.title,
+            snapshot.artist,
+            snapshot.art_url
+        );
         self.send_control(
             id,
             ControlMsg::Mpris {

@@ -49,6 +49,7 @@ async fn run(app: Arc<AppState>) -> Result<()> {
             return Ok(());
         }
     };
+    log::debug!("mpris: connected to D-Bus session bus");
     let dbus = match DBusProxy::new(&conn).await {
         Ok(proxy) => proxy,
         Err(e) => {
@@ -70,12 +71,14 @@ async fn run(app: Arc<AppState>) -> Result<()> {
     let mut tasks: BTreeMap<String, PlayerTask> = BTreeMap::new();
     let mut players: BTreeMap<String, MprisSnapshot> = BTreeMap::new();
     let mut current = MprisSnapshot::default();
+    let mut discovered = 0usize;
 
     match dbus.list_names().await {
         Ok(names) => {
             for name in names {
                 let name = name.as_str().to_string();
                 if is_mpris_name(&name) {
+                    discovered += 1;
                     spawn_player_watch(
                         &mut tasks,
                         conn.clone(),
@@ -88,7 +91,9 @@ async fn run(app: Arc<AppState>) -> Result<()> {
         }
         Err(e) => log::warn!("mpris: ListNames failed: {e}"),
     }
+    log::debug!("mpris: discovered {discovered} existing MPRIS player(s)");
     if tasks.is_empty() {
+        log::debug!("mpris: no player tasks after startup; publishing stopped snapshot");
         publish_to_renderers(&app, &current).await;
     }
 
@@ -103,9 +108,11 @@ async fn run(app: Arc<AppState>) -> Result<()> {
                 let Some(msg) = msg else { break; };
                 match msg {
                     PlayerMsg::Snapshot { name, snapshot } => {
+                        log::debug!("mpris: snapshot from {name}: {}", snapshot_debug(&snapshot));
                         players.insert(name, snapshot);
                     }
                     PlayerMsg::Gone(name) => {
+                        log::debug!("mpris: player gone: {name}");
                         players.remove(&name);
                         if let Some(task) = tasks.remove(&name) {
                             task.handle.abort();
@@ -114,6 +121,7 @@ async fn run(app: Arc<AppState>) -> Result<()> {
                 }
                 let next = choose_snapshot(&players);
                 if next != current {
+                    log::debug!("mpris: selected snapshot changed: {}", snapshot_debug(&next));
                     current = next;
                     publish_to_renderers(&app, &current).await;
                 }
@@ -127,6 +135,9 @@ async fn run(app: Arc<AppState>) -> Result<()> {
                             continue;
                         }
                         let appeared = args.new_owner.as_ref().is_some();
+                        log::debug!(
+                            "mpris: NameOwnerChanged name={name} appeared={appeared}"
+                        );
                         if appeared {
                             spawn_player_watch(
                                 &mut tasks,
@@ -142,6 +153,10 @@ async fn run(app: Arc<AppState>) -> Result<()> {
                             }
                             let next = choose_snapshot(&players);
                             if next != current {
+                                log::debug!(
+                                    "mpris: selected snapshot changed after owner removal: {}",
+                                    snapshot_debug(&next)
+                                );
                                 current = next;
                                 publish_to_renderers(&app, &current).await;
                             }
@@ -156,10 +171,12 @@ async fn run(app: Arc<AppState>) -> Result<()> {
                     | Ok(RouterEvent::DisplaysReplace(_))
                     | Ok(RouterEvent::RendererUpsert(_))
                     | Ok(RouterEvent::RenderersReplace(_)) => {
+                        log::debug!("mpris: route change; republishing current snapshot");
                         publish_to_renderers(&app, &current).await;
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        log::debug!("mpris: route events lagged; republishing current snapshot");
                         publish_to_renderers(&app, &current).await;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -182,8 +199,10 @@ fn spawn_player_watch(
     shutdown: watch::Receiver<bool>,
 ) {
     if tasks.contains_key(&name) {
+        log::debug!("mpris: player watch already running for {name}");
         return;
     }
+    log::debug!("mpris: spawning player watch for {name}");
     let task_name = name.clone();
     let handle = tokio::spawn(async move {
         watch_player(conn, task_name, tx, shutdown).await;
@@ -238,11 +257,16 @@ async fn watch_player(
         }
     };
 
+    log::debug!("mpris: watching player {name}");
     let mut last_art_url = String::new();
     let mut previous_art_url = String::new();
     if let Some(snapshot) =
         read_player_snapshot(&proxy, &mut last_art_url, &mut previous_art_url).await
     {
+        log::debug!(
+            "mpris: initial snapshot for {name}: {}",
+            snapshot_debug(&snapshot)
+        );
         let _ = tx
             .send(PlayerMsg::Snapshot {
                 name: name.clone(),
@@ -267,9 +291,14 @@ async fn watch_player(
                 {
                     continue;
                 }
+                log::debug!("mpris: PropertiesChanged for {name}");
                 if let Some(snapshot) =
                     read_player_snapshot(&proxy, &mut last_art_url, &mut previous_art_url).await
                 {
+                    log::debug!(
+                        "mpris: updated snapshot for {name}: {}",
+                        snapshot_debug(&snapshot)
+                    );
                     let _ = tx.send(PlayerMsg::Snapshot {
                         name: name.clone(),
                         snapshot,
@@ -336,6 +365,14 @@ async fn publish_to_renderers(app: &AppState, snapshot: &MprisSnapshot) {
             ids.insert(link.renderer_id);
         }
     }
+    let mut ids: Vec<_> = ids.into_iter().collect();
+    ids.sort();
+    log::debug!(
+        "mpris: publishing snapshot to {} renderer(s): {:?}; {}",
+        ids.len(),
+        ids,
+        snapshot_debug(snapshot)
+    );
     for id in ids {
         if let Err(e) = app.renderer_manager.send_mpris(&id, snapshot.clone()).await {
             log::warn!("mpris: failed to send snapshot to renderer {id}: {e:#}");
@@ -353,6 +390,26 @@ fn playback_state_from_status(status: &str) -> u32 {
         "Paused" => STATE_PAUSED,
         _ => STATE_STOPPED,
     }
+}
+
+fn playback_state_label(state: u32) -> &'static str {
+    match state {
+        STATE_PLAYING => "Playing",
+        STATE_PAUSED => "Paused",
+        _ => "Stopped",
+    }
+}
+
+fn snapshot_debug(snapshot: &MprisSnapshot) -> String {
+    format!(
+        "state={} title={:?} artist={:?} album={:?} art_url={:?} previous_art_url={:?}",
+        playback_state_label(snapshot.state),
+        snapshot.title,
+        snapshot.artist,
+        snapshot.album,
+        snapshot.art_url,
+        snapshot.previous_art_url,
+    )
 }
 
 fn metadata_string(metadata: &HashMap<String, OwnedValue>, key: &str) -> String {
