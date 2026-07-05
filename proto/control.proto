@@ -79,6 +79,7 @@ message Request {
     PluginDeleteRequest       plugin_delete = 60;
     WallpaperRemoveRequest    wallpaper_remove = 61;
     PluginInspectRequest      plugin_inspect = 62;
+    PluginUpdateCheckRequest  plugin_update_check = 63;
   }
 }
 
@@ -145,6 +146,7 @@ message Response {
     PluginDeleteResponse       plugin_delete = 60;
     WallpaperRemoveResponse    wallpaper_remove = 61;
     PluginInspectResponse      plugin_inspect = 62;
+    PluginUpdateCheckResponse  plugin_update_check = 63;
   }
 }
 
@@ -831,6 +833,7 @@ message Event {
     DisplayConnectionFailed display_connection_failed = 15;
     RemoteDownloadProgress remote_download_progress = 16;
     PlaylistChanged        playlist_changed          = 17;
+    Empty                  plugin_update_changed     = 18;
   }
 }
 
@@ -1226,6 +1229,36 @@ message PluginDeleteResponse {
   bool needs_restart = 2;
 }
 
+enum PluginUpdateState {
+  PLUGIN_UPDATE_STATE_UNSPECIFIED = 0;
+  PLUGIN_UPDATE_STATE_UNKNOWN = 1;
+  PLUGIN_UPDATE_STATE_NO_URL = 2;
+  PLUGIN_UPDATE_STATE_CHECKING = 3;
+  PLUGIN_UPDATE_STATE_UP_TO_DATE = 4;
+  PLUGIN_UPDATE_STATE_AVAILABLE = 5;
+  PLUGIN_UPDATE_STATE_FAILED = 6;
+  PLUGIN_UPDATE_STATE_UNSUPPORTED = 7;
+}
+
+message PluginUpdateInfo {
+  string plugin_id = 1;
+  PluginUpdateState state = 2;
+  string latest_version = 3;
+  string zip_url = 4;
+  string sha256 = 5;
+  string error = 6;
+  int64 checked_at_ms = 7;
+}
+
+message PluginUpdateCheckRequest {
+  // Empty checks all active plugins.
+  string plugin_id = 1;
+}
+
+message PluginUpdateCheckResponse {
+  repeated PluginUpdateInfo updates = 1;
+}
+
 // Installable-plugin (package) view: one entry per `[plugin]`, with the
 // renderer components it provides (carrying their settings schema so a UI
 // can offer per-plugin configuration). Source presence is a flag.
@@ -1237,6 +1270,7 @@ message PluginInfo {
   repeated RendererPluginInfo renderers = 5;
   bool system = 6;
   string update = 7;
+  PluginUpdateInfo update_info = 8;
 }
 
 message PluginListRequest {}

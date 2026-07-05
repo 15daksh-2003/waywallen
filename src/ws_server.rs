@@ -384,6 +384,30 @@ fn renderer_def_to_pb(
     }
 }
 
+fn plugin_update_state_to_pb(state: crate::plugin::update::PluginUpdateState) -> i32 {
+    match state {
+        crate::plugin::update::PluginUpdateState::Unknown => 1,
+        crate::plugin::update::PluginUpdateState::NoUrl => 2,
+        crate::plugin::update::PluginUpdateState::Checking => 3,
+        crate::plugin::update::PluginUpdateState::UpToDate => 4,
+        crate::plugin::update::PluginUpdateState::Available => 5,
+        crate::plugin::update::PluginUpdateState::Failed => 6,
+        crate::plugin::update::PluginUpdateState::Unsupported => 7,
+    }
+}
+
+fn plugin_update_info_to_pb(info: crate::plugin::update::PluginUpdateInfo) -> pb::PluginUpdateInfo {
+    pb::PluginUpdateInfo {
+        plugin_id: info.plugin_id,
+        state: plugin_update_state_to_pb(info.state),
+        latest_version: info.latest_version,
+        zip_url: info.zip_url,
+        sha256: info.sha256,
+        error: info.error,
+        checked_at_ms: info.checked_at_ms,
+    }
+}
+
 fn gpu_info_to_pb(g: &crate::gpu::GpuInfo) -> pb::GpuInfo {
     pb::GpuInfo {
         render_node: g
@@ -894,6 +918,9 @@ fn global_event_to_pb(e: &GlobalEvent, state: &Arc<AppState>) -> Option<pb::Even
                 })),
             })
         }
+        GlobalEvent::PluginUpdateChanged => Some(pb::Event {
+            payload: Some(pb::event::Payload::PluginUpdateChanged(pb::Empty {})),
+        }),
         GlobalEvent::SourcesReady
         | GlobalEvent::DisplayReady
         | GlobalEvent::DaemonReady
@@ -1349,37 +1376,35 @@ async fn dispatch_inner(
         }
 
         Req::PluginList(_) => {
-            let plugin_roots = state.plugin_roots.clone();
-            let plugin_scan = tokio::task::spawn_blocking(move || {
-                crate::plugin::renderer_registry::scan_plugin_roots(plugin_roots.as_slice())
-            })
-            .await
-            .map_err(|e| Error::Internal(anyhow::anyhow!("plugin list join: {e}")))?;
-            let plugins = plugin_scan
-                .packages()
-                .into_iter()
-                .map(|pkg| {
-                    let renderers = plugin_scan
-                        .renderers
-                        .iter()
-                        .filter(|def| def.plugin_id == pkg.id)
-                        .map(|def| renderer_def_to_pb(def, &pkg.version))
-                        .collect();
-                    pb::PluginInfo {
-                        id: pkg.id.clone(),
-                        name: pkg.name.clone(),
-                        version: pkg.version.clone(),
-                        has_source: pkg.has_entry,
-                        renderers,
-                        system: pkg.system,
-                        update: pkg.update.clone().unwrap_or_default(),
-                    }
-                })
-                .collect();
+            let registry = state.renderer_manager.registry_snapshot();
+            let renderer_defs: Vec<_> = registry.all_renderers().into_iter().cloned().collect();
+            let packages = state.plugins.read().await.clone();
+            let inactive_system = state.inactive_system.read().await.clone();
+            let inactive_user = state.inactive_user.read().await.clone();
+            let mut plugins = Vec::new();
+            for pkg in packages {
+                let renderers = renderer_defs
+                    .iter()
+                    .filter(|def| def.plugin_id == pkg.id)
+                    .map(|def| renderer_def_to_pb(def, &pkg.version))
+                    .collect();
+                let update_info =
+                    crate::plugin::update::snapshot_for_package(&state.plugin_updates, &pkg).await;
+                plugins.push(pb::PluginInfo {
+                    id: pkg.id.clone(),
+                    name: pkg.name.clone(),
+                    version: pkg.version.clone(),
+                    has_source: pkg.has_entry,
+                    renderers,
+                    system: pkg.system,
+                    update: pkg.update.clone().unwrap_or_default(),
+                    update_info: Some(plugin_update_info_to_pb(update_info)),
+                });
+            }
             Res::PluginList(pb::PluginListResponse {
                 plugins,
-                inactive_system: plugin_scan.inactive_system,
-                inactive_user: plugin_scan.inactive_user,
+                inactive_system,
+                inactive_user,
             })
         }
 
@@ -1882,6 +1907,16 @@ async fn dispatch_inner(
                 plugin_id: result.plugin_id,
                 needs_restart: result.needs_restart,
             })
+        }
+
+        Req::PluginUpdateCheck(r) => {
+            let plugin_id = (!r.plugin_id.is_empty()).then_some(r.plugin_id.as_str());
+            let updates = crate::control::check_plugin_updates(state, plugin_id)
+                .await
+                .into_iter()
+                .map(plugin_update_info_to_pb)
+                .collect();
+            Res::PluginUpdateCheck(pb::PluginUpdateCheckResponse { updates })
         }
 
         Req::DisplayLayoutSet(r) => {

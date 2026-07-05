@@ -53,6 +53,18 @@ static auto renderer_to_map(const proto::RendererPluginInfo& r) -> QVariantMap {
     return m;
 }
 
+static auto plugin_update_to_map(const proto::PluginUpdateInfo& info) -> QVariantMap {
+    QVariantMap m;
+    m[u"pluginId"_s]      = info.pluginId();
+    m[u"state"_s]         = static_cast<int>(info.state());
+    m[u"latestVersion"_s] = info.latestVersion();
+    m[u"zipUrl"_s]        = info.zipUrl();
+    m[u"sha256"_s]        = info.sha256();
+    m[u"error"_s]         = info.error();
+    m[u"checkedAtMs"_s]   = static_cast<qlonglong>(info.checkedAtMs());
+    return m;
+}
+
 // --- PluginListQuery --------------------------------------------------------
 
 PluginListQuery::PluginListQuery(QObject* parent): Query(parent) {}
@@ -78,13 +90,14 @@ void PluginListQuery::reload() {
             QVariantList items;
             for (const auto& p : rsp.pluginList().plugins()) {
                 QVariantMap m;
-                m[u"id"_s]        = p.id_proto();
-                m[u"name"_s]      = p.name();
-                m[u"version"_s]   = p.version();
-                m[u"update"_s]    = p.update();
-                m[u"hasSource"_s] = p.hasSource();
-                m[u"system"_s]    = p.system();
-                m[u"section"_s]   = p.system() ? u"system"_s : u"user"_s;
+                m[u"id"_s]         = p.id_proto();
+                m[u"name"_s]       = p.name();
+                m[u"version"_s]    = p.version();
+                m[u"update"_s]     = p.update();
+                m[u"hasSource"_s]  = p.hasSource();
+                m[u"system"_s]     = p.system();
+                m[u"section"_s]    = p.system() ? u"system"_s : u"user"_s;
+                m[u"updateInfo"_s] = plugin_update_to_map(p.updateInfo());
                 QVariantList renderers;
                 for (const auto& r : p.renderers()) {
                     renderers.append(renderer_to_map(r));
@@ -248,6 +261,48 @@ void PluginDeleteQuery::remove(const QString& pluginId) {
             self->m_needs_restart = r.needsRestart();
             Q_EMIT self->resultChanged();
             Q_EMIT self->deleted(self->m_plugin_id, self->m_needs_restart);
+        });
+        co_return;
+    });
+}
+
+PluginUpdateCheckQuery::PluginUpdateCheckQuery(QObject* parent): Query(parent) {}
+
+auto PluginUpdateCheckQuery::pluginId() const -> const QString& { return m_plugin_id; }
+void PluginUpdateCheckQuery::setPluginId(const QString& v) {
+    if (m_plugin_id == v) return;
+    m_plugin_id = v;
+    Q_EMIT pluginIdChanged();
+}
+auto PluginUpdateCheckQuery::updates() const -> const QVariantList& { return m_updates; }
+
+void PluginUpdateCheckQuery::reload() { check(m_plugin_id); }
+
+void PluginUpdateCheckQuery::check(const QString& pluginId) {
+    if (querying()) return;
+    setPluginId(pluginId);
+    setStatus(Status::Querying);
+    auto backend = App::instance()->backend();
+
+    auto req   = proto::Request {};
+    auto inner = proto::PluginUpdateCheckRequest {};
+    inner.setPluginId(m_plugin_id);
+    req.setPluginUpdateCheck(std::move(inner));
+
+    auto self = QWatcher { this };
+    spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
+        auto result = co_await backend->send(std::move(req));
+        co_await asio::post(asio::bind_executor(QAsyncResult::get_executor(), use_task));
+        if (! self) co_return;
+
+        self->inspect_set(result, [self](const proto::Response& rsp) {
+            QVariantList updates;
+            for (const auto& info : rsp.pluginUpdateCheck().updates()) {
+                updates.append(plugin_update_to_map(info));
+            }
+            self->m_updates = std::move(updates);
+            Q_EMIT self->updatesChanged();
+            Q_EMIT self->checked();
         });
         co_return;
     });

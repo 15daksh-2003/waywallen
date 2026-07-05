@@ -44,7 +44,9 @@ pub struct AppState {
     pub plugins: Arc<tokio::sync::RwLock<Vec<plugin::renderer_registry::PluginPackageMeta>>>,
     pub inactive_system: Arc<tokio::sync::RwLock<Vec<String>>>,
     pub inactive_user: Arc<tokio::sync::RwLock<Vec<String>>>,
-    /// Plugin scan roots used by `PluginListRequest`.
+    pub plugin_updates: plugin::update::PluginUpdateStore,
+    pub plugin_update_check: tokio::sync::Mutex<()>,
+    /// Plugin scan roots reused when an explicit install changes plugin files.
     pub plugin_roots: Arc<Vec<plugin::renderer_registry::PluginRoot>>,
     /// The installed source plugins (types/labels/hints). The only
     /// scan-derived state outside the DB for the Add-Library UI.
@@ -240,6 +242,7 @@ async fn async_main() -> anyhow::Result<()> {
         plugin_scan.inactive_system.clone(),
     ));
     let inactive_user = Arc::new(tokio::sync::RwLock::new(plugin_scan.inactive_user.clone()));
+    let plugin_updates = plugin::update::new_store();
     let plugin_roots = Arc::new(plugin_roots);
     let entry_refs = std::mem::take(&mut plugin_scan.entries);
 
@@ -335,6 +338,8 @@ async fn async_main() -> anyhow::Result<()> {
         plugins: plugin_packages,
         inactive_system,
         inactive_user,
+        plugin_updates,
+        plugin_update_check: tokio::sync::Mutex::new(()),
         plugin_roots,
         source_plugins,
         plugin_mutation: tokio::sync::Mutex::new(()),
@@ -378,6 +383,15 @@ async fn async_main() -> anyhow::Result<()> {
             .spawn_async(tasks::TaskKind::Service, "auto-stop/restore", async move {
                 control::run_auto_stop_restore(app_for_restore, shutdown_for_restore).await;
                 Ok(())
+            });
+    }
+    {
+        let update_state = state.clone();
+        let shutdown_for_updates = state.shutdown_subscribe();
+        state
+            .tasks
+            .spawn_async(tasks::TaskKind::Service, "plugin/update-checker", async move {
+                control::run_plugin_update_checker(update_state, shutdown_for_updates).await
             });
     }
 

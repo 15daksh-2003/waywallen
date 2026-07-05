@@ -54,6 +54,7 @@ pub enum GlobalEvent {
         error: String,
     },
     PlaylistChanged,
+    PluginUpdateChanged,
 }
 
 pub struct EventBus {

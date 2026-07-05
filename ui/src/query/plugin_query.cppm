@@ -146,4 +146,32 @@ private:
     bool    m_needs_restart = false;
 };
 
+export class PluginUpdateCheckQuery
+    : public Query,
+      public QueryExtra<control::v1::Response, PluginUpdateCheckQuery> {
+    Q_OBJECT
+    QML_ELEMENT
+
+    Q_PROPERTY(QString pluginId READ pluginId WRITE setPluginId NOTIFY pluginIdChanged FINAL)
+    Q_PROPERTY(QVariantList updates READ updates NOTIFY updatesChanged FINAL)
+
+public:
+    PluginUpdateCheckQuery(QObject* parent = nullptr);
+
+    auto pluginId() const -> const QString&;
+    void setPluginId(const QString&);
+    auto updates() const -> const QVariantList&;
+
+    void             reload() override;
+    Q_INVOKABLE void check(const QString& pluginId = {});
+
+    Q_SIGNAL void pluginIdChanged();
+    Q_SIGNAL void updatesChanged();
+    Q_SIGNAL void checked();
+
+private:
+    QString      m_plugin_id;
+    QVariantList m_updates;
+};
+
 } // namespace waywallen

@@ -1,6 +1,17 @@
-#![allow(dead_code)]
-
 use serde::Deserialize;
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::RwLock;
+
+use crate::plugin::renderer_registry::PluginPackageMeta;
+use crate::plugin::source_manager;
+use crate::renderer_manager;
+use crate::tasks;
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct PluginUpdatePackage {
@@ -35,6 +46,253 @@ impl PluginUpdateManifest {
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginUpdateState {
+    Unknown,
+    NoUrl,
+    Checking,
+    UpToDate,
+    Available,
+    Failed,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginUpdateInfo {
+    pub plugin_id: String,
+    pub state: PluginUpdateState,
+    pub latest_version: String,
+    pub zip_url: String,
+    pub sha256: String,
+    pub error: String,
+    pub checked_at_ms: i64,
+}
+
+pub type PluginUpdateStore = Arc<RwLock<HashMap<String, PluginUpdateInfo>>>;
+
+pub fn new_store() -> PluginUpdateStore {
+    Arc::new(RwLock::new(HashMap::new()))
+}
+
+pub fn default_info(pkg: &PluginPackageMeta) -> PluginUpdateInfo {
+    PluginUpdateInfo {
+        plugin_id: pkg.id.clone(),
+        state: if pkg.update.as_deref().is_some_and(|u| !u.is_empty()) {
+            PluginUpdateState::Unknown
+        } else {
+            PluginUpdateState::NoUrl
+        },
+        latest_version: String::new(),
+        zip_url: String::new(),
+        sha256: String::new(),
+        error: String::new(),
+        checked_at_ms: 0,
+    }
+}
+
+pub async fn snapshot_for_package(
+    store: &PluginUpdateStore,
+    pkg: &PluginPackageMeta,
+) -> PluginUpdateInfo {
+    store
+        .read()
+        .await
+        .get(&pkg.id)
+        .cloned()
+        .unwrap_or_else(|| default_info(pkg))
+}
+
+pub async fn check_packages(
+    store: &PluginUpdateStore,
+    packages: Vec<PluginPackageMeta>,
+    retain_missing: bool,
+) -> Vec<PluginUpdateInfo> {
+    {
+        let mut w = store.write().await;
+        if retain_missing {
+            let ids: HashSet<_> = packages.iter().map(|p| p.id.clone()).collect();
+            w.retain(|id, _| ids.contains(id));
+        }
+        for pkg in &packages {
+            let info = if pkg.update.as_deref().is_some_and(|u| !u.is_empty()) {
+                checking_info(pkg)
+            } else {
+                no_url_info(pkg)
+            };
+            w.insert(pkg.id.clone(), info);
+        }
+    }
+
+    let client = reqwest::Client::new();
+    let mut out = Vec::with_capacity(packages.len());
+    for pkg in packages {
+        let info = if pkg.update.as_deref().is_some_and(|u| !u.is_empty()) {
+            check_one(&client, &pkg).await
+        } else {
+            no_url_info(&pkg)
+        };
+        store.write().await.insert(pkg.id.clone(), info.clone());
+        out.push(info);
+    }
+    out
+}
+
+fn checking_info(pkg: &PluginPackageMeta) -> PluginUpdateInfo {
+    PluginUpdateInfo {
+        plugin_id: pkg.id.clone(),
+        state: PluginUpdateState::Checking,
+        latest_version: String::new(),
+        zip_url: String::new(),
+        sha256: String::new(),
+        error: String::new(),
+        checked_at_ms: 0,
+    }
+}
+
+fn no_url_info(pkg: &PluginPackageMeta) -> PluginUpdateInfo {
+    PluginUpdateInfo {
+        plugin_id: pkg.id.clone(),
+        state: PluginUpdateState::NoUrl,
+        latest_version: String::new(),
+        zip_url: String::new(),
+        sha256: String::new(),
+        error: String::new(),
+        checked_at_ms: tasks::now_ms(),
+    }
+}
+
+async fn check_one(client: &reqwest::Client, pkg: &PluginPackageMeta) -> PluginUpdateInfo {
+    let checked_at_ms = tasks::now_ms();
+    let Some(url) = pkg.update.as_deref().filter(|u| !u.is_empty()) else {
+        return no_url_info(pkg);
+    };
+
+    match fetch_manifest(client, url).await {
+        Ok(manifest) => info_from_manifest(pkg, manifest, checked_at_ms),
+        Err(e) => PluginUpdateInfo {
+            plugin_id: pkg.id.clone(),
+            state: PluginUpdateState::Failed,
+            latest_version: String::new(),
+            zip_url: String::new(),
+            sha256: String::new(),
+            error: e,
+            checked_at_ms,
+        },
+    }
+}
+
+async fn fetch_manifest(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<PluginUpdateManifest, String> {
+    let response = tokio::time::timeout(REQUEST_TIMEOUT, client.get(url).send())
+        .await
+        .map_err(|_| {
+            format!(
+                "update request timed out after {}s",
+                REQUEST_TIMEOUT.as_secs()
+            )
+        })?
+        .map_err(|e| format!("update request failed: {e}"))?;
+    let response = response
+        .error_for_status()
+        .map_err(|e| format!("update response failed: {e}"))?;
+    let text = response
+        .text()
+        .await
+        .map_err(|e| format!("read update manifest failed: {e}"))?;
+    PluginUpdateManifest::from_json_str(&text).map_err(|e| format!("parse update manifest: {e}"))
+}
+
+fn info_from_manifest(
+    pkg: &PluginPackageMeta,
+    manifest: PluginUpdateManifest,
+    checked_at_ms: i64,
+) -> PluginUpdateInfo {
+    if !version_cmp(&manifest.version, &pkg.version).is_gt() {
+        return PluginUpdateInfo {
+            plugin_id: pkg.id.clone(),
+            state: PluginUpdateState::UpToDate,
+            latest_version: manifest.version,
+            zip_url: String::new(),
+            sha256: String::new(),
+            error: String::new(),
+            checked_at_ms,
+        };
+    }
+
+    let Some(package) = manifest.package_for_current_arch() else {
+        return unsupported_info(
+            pkg,
+            manifest.version,
+            format!("no package for {}", std::env::consts::ARCH),
+            checked_at_ms,
+        );
+    };
+    if manifest.entry_version != source_manager::ENTRY_VERSION {
+        return unsupported_info(
+            pkg,
+            manifest.version,
+            format!(
+                "entry_version {} is unsupported; expected {}",
+                manifest.entry_version,
+                source_manager::ENTRY_VERSION
+            ),
+            checked_at_ms,
+        );
+    }
+    if manifest.spawn_version != renderer_manager::SPAWN_VERSION {
+        return unsupported_info(
+            pkg,
+            manifest.version,
+            format!(
+                "spawn_version {} is unsupported; expected {}",
+                manifest.spawn_version,
+                renderer_manager::SPAWN_VERSION
+            ),
+            checked_at_ms,
+        );
+    }
+
+    PluginUpdateInfo {
+        plugin_id: pkg.id.clone(),
+        state: PluginUpdateState::Available,
+        latest_version: manifest.version,
+        zip_url: package.zip_url,
+        sha256: package.sha256,
+        error: String::new(),
+        checked_at_ms,
+    }
+}
+
+fn unsupported_info(
+    pkg: &PluginPackageMeta,
+    latest_version: String,
+    error: String,
+    checked_at_ms: i64,
+) -> PluginUpdateInfo {
+    PluginUpdateInfo {
+        plugin_id: pkg.id.clone(),
+        state: PluginUpdateState::Unsupported,
+        latest_version,
+        zip_url: String::new(),
+        sha256: String::new(),
+        error,
+        checked_at_ms,
+    }
+}
+
+fn version_cmp(a: &str, b: &str) -> Ordering {
+    match (parse_version(a), parse_version(b)) {
+        (Some(a), Some(b)) => a.cmp(&b),
+        _ => a.cmp(b),
+    }
+}
+
+fn parse_version(v: &str) -> Option<semver::Version> {
+    semver::Version::parse(v.trim().trim_start_matches(['v', 'V'])).ok()
 }
 
 #[cfg(test)]
@@ -83,5 +341,83 @@ mod tests {
             }
         "#;
         assert!(PluginUpdateManifest::from_json_str(src).is_err());
+    }
+
+    #[test]
+    fn compares_semver_with_v_prefix() {
+        assert!(version_cmp("v1.2.0", "1.1.9").is_gt());
+        assert!(version_cmp("1.0.0", "1.0.0").is_eq());
+    }
+
+    #[test]
+    fn marks_missing_arch_package_unsupported() {
+        let pkg = PluginPackageMeta {
+            id: "org.test".into(),
+            name: "Test".into(),
+            version: "1.0.0".into(),
+            update: Some("https://example.invalid/update.json".into()),
+            has_entry: false,
+            system: true,
+        };
+        let manifest = PluginUpdateManifest {
+            version: "2.0.0".into(),
+            entry_version: source_manager::ENTRY_VERSION,
+            spawn_version: renderer_manager::SPAWN_VERSION,
+            x86_64: None,
+            aarch64: None,
+        };
+        let info = info_from_manifest(&pkg, manifest, 7);
+        assert_eq!(info.state, PluginUpdateState::Unsupported);
+        assert_eq!(info.checked_at_ms, 7);
+    }
+
+    #[test]
+    fn treats_old_manifest_without_arch_package_as_up_to_date() {
+        let pkg = PluginPackageMeta {
+            id: "org.test".into(),
+            name: "Test".into(),
+            version: "2.0.0".into(),
+            update: Some("https://example.invalid/update.json".into()),
+            has_entry: false,
+            system: true,
+        };
+        let manifest = PluginUpdateManifest {
+            version: "1.0.0".into(),
+            entry_version: source_manager::ENTRY_VERSION,
+            spawn_version: renderer_manager::SPAWN_VERSION,
+            x86_64: None,
+            aarch64: None,
+        };
+        let info = info_from_manifest(&pkg, manifest, 7);
+        assert_eq!(info.state, PluginUpdateState::UpToDate);
+        assert_eq!(info.latest_version, "1.0.0");
+    }
+
+    #[tokio::test]
+    async fn preserves_existing_store_entries_for_partial_checks() {
+        let store = new_store();
+        let a = PluginPackageMeta {
+            id: "org.a".into(),
+            name: "A".into(),
+            version: "1.0.0".into(),
+            update: None,
+            has_entry: false,
+            system: true,
+        };
+        let b = PluginPackageMeta {
+            id: "org.b".into(),
+            name: "B".into(),
+            version: "1.0.0".into(),
+            update: None,
+            has_entry: false,
+            system: true,
+        };
+
+        check_packages(&store, vec![a.clone(), b.clone()], true).await;
+        check_packages(&store, vec![a.clone()], false).await;
+        assert!(store.read().await.contains_key("org.b"));
+
+        check_packages(&store, vec![a], true).await;
+        assert!(!store.read().await.contains_key("org.b"));
     }
 }

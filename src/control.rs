@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::anyhow;
 
 use crate::error::{Error, Result};
+use crate::events::GlobalEvent;
 use crate::model::{repo, sync};
 use crate::plugin::renderer_registry::{PluginPackageMeta, PluginScan, RendererRegistry};
 use crate::queue::rotator::RotationConfig;
@@ -117,6 +118,7 @@ async fn apply_plugin_scan(
     *app.plugins.write().await = packages.clone();
     *app.inactive_system.write().await = scan.inactive_system.clone();
     *app.inactive_user.write().await = scan.inactive_user.clone();
+    app.plugin_updates.write().await.remove(installed_plugin_id);
 
     if app.settings.reconcile(&registry) {
         app.events
@@ -126,6 +128,52 @@ async fn apply_plugin_scan(
 
     reload_source_entries(app, scan.entries, installed_plugin_id).await?;
     Ok(packages)
+}
+
+pub async fn check_plugin_updates(
+    app: &Arc<AppState>,
+    plugin_id: Option<&str>,
+) -> Vec<crate::plugin::update::PluginUpdateInfo> {
+    let _guard = app.plugin_update_check.lock().await;
+    let mut packages = app.plugins.read().await.clone();
+    let plugin_id = plugin_id.filter(|id| !id.is_empty());
+    if let Some(plugin_id) = plugin_id {
+        packages.retain(|pkg| pkg.id == plugin_id);
+    }
+    let updates =
+        crate::plugin::update::check_packages(&app.plugin_updates, packages, plugin_id.is_none())
+            .await;
+    if !updates.is_empty() {
+        app.events.publish(GlobalEvent::PluginUpdateChanged);
+    }
+    updates
+}
+
+pub async fn run_plugin_update_checker(
+    app: Arc<AppState>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    if *shutdown.borrow() {
+        return Ok(());
+    }
+
+    let initial_delay = tokio::time::sleep(Duration::from_secs(10));
+    tokio::pin!(initial_delay);
+    tokio::select! {
+        _ = shutdown.changed() => return Ok(()),
+        _ = &mut initial_delay => {}
+    }
+
+    loop {
+        let _ = check_plugin_updates(&app, None).await;
+
+        let wait = tokio::time::sleep(Duration::from_secs(30 * 60));
+        tokio::pin!(wait);
+        tokio::select! {
+            _ = shutdown.changed() => return Ok(()),
+            _ = &mut wait => {}
+        }
+    }
 }
 
 async fn affected_display_plan(

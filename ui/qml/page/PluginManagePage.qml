@@ -11,6 +11,13 @@ MD.Page {
     title: 'Plugins'
     scrolling: !m_flick.atYBeginning
     readonly property int inactivePluginCount: (pluginListQuery.inactiveSystem ? pluginListQuery.inactiveSystem.length : 0) + (pluginListQuery.inactiveUser ? pluginListQuery.inactiveUser.length : 0)
+    readonly property int pluginUpdateStateUnknown: 1
+    readonly property int pluginUpdateStateNoUrl: 2
+    readonly property int pluginUpdateStateChecking: 3
+    readonly property int pluginUpdateStateUpToDate: 4
+    readonly property int pluginUpdateStateAvailable: 5
+    readonly property int pluginUpdateStateFailed: 6
+    readonly property int pluginUpdateStateUnsupported: 7
     property var inactiveDialog: null
 
     function openInactiveDialog() {
@@ -19,12 +26,76 @@ MD.Page {
         inactiveDialog = MD.Util.showPopup(inactiveDialogComponent, {}, root.Window.window);
     }
 
+    function updateState(info) {
+        return info && info.state !== undefined ? info.state : pluginUpdateStateUnknown;
+    }
+
+    function updateTagVisible(info) {
+        const state = updateState(info);
+        return state !== pluginUpdateStateUnknown && state !== pluginUpdateStateNoUrl;
+    }
+
+    function updateActionVisible(info) {
+        return updateState(info) === pluginUpdateStateAvailable && !!info && !!info.zipUrl && info.zipUrl.length > 0;
+    }
+
+    function openUpdateUrl(info) {
+        if (!root.updateActionVisible(info))
+            return;
+        MD.Util.openUrlExternally(info.zipUrl);
+    }
+
+    function updateTagText(info) {
+        const state = updateState(info);
+        if (state === pluginUpdateStateChecking)
+            return qsTr("Checking");
+        if (state === pluginUpdateStateUpToDate)
+            return qsTr("Up to date");
+        if (state === pluginUpdateStateAvailable) {
+            const latest = info.latestVersion || "";
+            if (latest.length === 0)
+                return qsTr("Update available");
+            return latest.startsWith("v") || latest.startsWith("V")
+                ? qsTr("New %1").arg(latest)
+                : qsTr("New v%1").arg(latest);
+        }
+        if (state === pluginUpdateStateFailed)
+            return qsTr("Check failed");
+        if (state === pluginUpdateStateUnsupported)
+            return qsTr("Unsupported update");
+        return "";
+    }
+
+    function updateTagBgColor(info) {
+        const state = updateState(info);
+        if (state === pluginUpdateStateAvailable)
+            return MD.Token.color.primary_container;
+        if (state === pluginUpdateStateFailed || state === pluginUpdateStateUnsupported)
+            return MD.Token.color.error_container;
+        return MD.Token.color.secondary_container;
+    }
+
+    function updateTagFgColor(info) {
+        const state = updateState(info);
+        if (state === pluginUpdateStateFailed || state === pluginUpdateStateUnsupported)
+            return MD.Token.color.on_error_container;
+        if (state === pluginUpdateStateAvailable)
+            return MD.Token.color.on_primary_container;
+        return MD.Token.color.on_secondary_container;
+    }
+
     actions: [
         MD.Action {
             icon.name: MD.Token.icon.warning
             text: qsTr("Inactive plugins")
-            property bool visible: root.inactivePluginCount > 0
+            visible: root.inactivePluginCount > 0
             onTriggered: root.openInactiveDialog()
+        },
+        MD.Action {
+            icon.name: "update"
+            text: qsTr("Check updates")
+            enabled: !updateCheckQuery.querying
+            onTriggered: updateCheckQuery.check()
         },
         MD.Action {
             icon.name: MD.Token.icon.add
@@ -50,9 +121,16 @@ MD.Page {
         id: deleteQuery
     }
 
+    W.PluginUpdateCheckQuery {
+        id: updateCheckQuery
+    }
+
     Connections {
         target: W.Notify
         function onDaemonReady() {
+            pluginListQuery.reload();
+        }
+        function onPluginUpdateChanged() {
             pluginListQuery.reload();
         }
     }
@@ -352,18 +430,75 @@ MD.Page {
                         size: 24
                         color: MD.Token.color.on_surface_variant
                     }
-                    trailing: RowLayout {
+                    trailing: Item {
+                        readonly property real actionButtonWidth: 40
+                        readonly property int visibleActionCount: (pluginUpdateAction.visible ? 1 : 0) + (pluginDeleteAction.visible ? 1 : 0)
+                        readonly property bool hasOverflow: visibleActionCount >= 2
+                        readonly property real actionAreaWidth: visibleActionCount > 0
+                            ? actionButtonWidth * (hasOverflow ? 2 : 1)
+                            : 0
+                        readonly property real actionAreaHeight: visibleActionCount > 0
+                            ? pluginFloatingTags.implicitHeight + 4 + pluginActionToolBar.implicitHeight
+                            : 0
+
+                        implicitWidth: actionAreaWidth
+                        implicitHeight: actionAreaHeight
+
+                        MD.ActionToolBar {
+                            id: pluginActionToolBar
+                            anchors.right: parent.right
+                            y: pluginFloatingTags.implicitHeight + 4
+                            visible: pluginUpdateAction.visible || pluginDeleteAction.visible
+                            width: parent.actionAreaWidth
+                            actions: [pluginUpdateAction, pluginDeleteAction]
+                            iconDelegate: MD.IconButton {
+                                action: MD.ToolBarLayout.action
+                                mdState.size: MD.Enum.XS
+                            }
+                            moreDelegate: MD.IconButton {
+                                action: pluginActionToolBar.moreAction
+                                mdState.size: MD.Enum.XS
+                            }
+                        }
+
+                        MD.Action {
+                            id: pluginUpdateAction
+                            text: qsTr("Update")
+                            icon.name: "download"
+                            visible: root.updateActionVisible(pluginItem.modelData.updateInfo)
+                            displayHint: MD.ToolBarLayout.KeepVisible
+                            onTriggered: root.openUpdateUrl(pluginItem.modelData.updateInfo)
+                        }
+
+                        MD.Action {
+                            id: pluginDeleteAction
+                            text: qsTr("Delete")
+                            icon.name: MD.Token.icon.delete
+                            visible: pluginItem.modelData.system !== true
+                            displayHint: pluginUpdateAction.visible
+                                ? MD.ToolBarLayout.AlwaysHide
+                                : MD.ToolBarLayout.KeepVisible
+                            enabled: !deleteQuery.querying
+                            onTriggered: deleteQuery.remove(pluginItem.modelData.id)
+                        }
+                    }
+                    Flow {
+                        id: pluginFloatingTags
+                        anchors.top: parent.top
+                        anchors.topMargin: 8
+                        anchors.right: parent.right
+                        anchors.rightMargin: 16
                         spacing: 6
+                        z: 2
+
                         W.Tag {
-                            Layout.alignment: Qt.AlignVCenter
                             text: "v" + (pluginItem.modelData.version || "0.0.0")
                         }
-                        MD.IconButton {
-                            Layout.alignment: Qt.AlignVCenter
-                            visible: pluginItem.modelData.system !== true
-                            enabled: !deleteQuery.querying
-                            icon.name: MD.Token.icon.delete
-                            onClicked: deleteQuery.remove(pluginItem.modelData.id)
+                        W.Tag {
+                            visible: root.updateTagVisible(pluginItem.modelData.updateInfo)
+                            text: root.updateTagText(pluginItem.modelData.updateInfo)
+                            bgColor: root.updateTagBgColor(pluginItem.modelData.updateInfo)
+                            fgColor: root.updateTagFgColor(pluginItem.modelData.updateInfo)
                         }
                     }
                     below: Flow {

@@ -107,6 +107,7 @@ Q_SIGNALS:
     void remoteDownloadProgress(const QString& sourceId, const QString& id, int state,
                                 const QString& error);
     void playlistChanged();
+    void pluginUpdateChanged();
 
 private:
     bool                              m_scan_in_progress { false };
