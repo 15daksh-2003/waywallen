@@ -107,6 +107,8 @@ using proto::PluginListResponse;
 using proto::PluginUpdateCheckRequest;
 using proto::PluginUpdateCheckResponse;
 using proto::PluginUpdateInfo;
+using proto::PluginUpdateInstallRequest;
+using proto::PluginUpdateInstallResponse;
 using proto::PluginUpdateStateGadget::PluginUpdateState;
 
 using proto::ContentRatingListRequest;

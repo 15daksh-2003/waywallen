@@ -39,10 +39,10 @@ MD.Page {
         return updateState(info) === pluginUpdateStateAvailable && !!info && !!info.zipUrl && info.zipUrl.length > 0;
     }
 
-    function openUpdateUrl(info) {
-        if (!root.updateActionVisible(info))
+    function installUpdate(pluginId, info) {
+        if (!root.updateActionVisible(info) || !pluginId || pluginId.length === 0)
             return;
-        MD.Util.openUrlExternally(info.zipUrl);
+        updateInstallQuery.install(pluginId);
     }
 
     function updateTagText(info) {
@@ -94,13 +94,13 @@ MD.Page {
         MD.Action {
             icon.name: "update"
             text: qsTr("Check updates")
-            enabled: !updateCheckQuery.querying
+            enabled: !updateCheckQuery.querying && !updateInstallQuery.querying
             onTriggered: updateCheckQuery.check()
         },
         MD.Action {
             icon.name: MD.Token.icon.add
             text: qsTr("Install from .zip")
-            enabled: !installQuery.querying && !inspectQuery.querying
+            enabled: !installQuery.querying && !inspectQuery.querying && !updateInstallQuery.querying
             onTriggered: zipDialog.open()
         }
     ]
@@ -123,6 +123,10 @@ MD.Page {
 
     W.PluginUpdateCheckQuery {
         id: updateCheckQuery
+    }
+
+    W.PluginUpdateInstallQuery {
+        id: updateInstallQuery
     }
 
     Connections {
@@ -159,6 +163,22 @@ MD.Page {
             const message = installQuery.error && installQuery.error.length > 0
                 ? installQuery.error
                 : qsTr("Plugin install failed");
+            W.Action.toast(message, 6000, 1, null);
+        }
+    }
+
+    Connections {
+        target: updateInstallQuery
+        function onInstalled(pluginId) {
+            W.Action.toast(qsTr("Updated \"%1\"").arg(pluginId));
+            pluginListQuery.reload();
+        }
+        function onStatusChanged(status) {
+            if (status !== 3)
+                return;
+            const message = updateInstallQuery.error && updateInstallQuery.error.length > 0
+                ? updateInstallQuery.error
+                : qsTr("Plugin update failed");
             W.Action.toast(message, 6000, 1, null);
         }
     }
@@ -463,11 +483,15 @@ MD.Page {
 
                         MD.Action {
                             id: pluginUpdateAction
-                            text: qsTr("Update")
+                            text: updateInstallQuery.pluginId === pluginItem.modelData.id && updateInstallQuery.querying
+                                ? qsTr("Updating")
+                                : qsTr("Update")
                             icon.name: "download"
                             visible: root.updateActionVisible(pluginItem.modelData.updateInfo)
                             displayHint: MD.ToolBarLayout.KeepVisible
-                            onTriggered: root.openUpdateUrl(pluginItem.modelData.updateInfo)
+                            enabled: !updateInstallQuery.querying && !deleteQuery.querying
+                            busy: updateInstallQuery.pluginId === pluginItem.modelData.id && updateInstallQuery.querying
+                            onTriggered: root.installUpdate(pluginItem.modelData.id, pluginItem.modelData.updateInfo)
                         }
 
                         MD.Action {
@@ -478,7 +502,7 @@ MD.Page {
                             displayHint: pluginUpdateAction.visible
                                 ? MD.ToolBarLayout.AlwaysHide
                                 : MD.ToolBarLayout.KeepVisible
-                            enabled: !deleteQuery.querying
+                            enabled: !deleteQuery.querying && !updateInstallQuery.querying
                             onTriggered: deleteQuery.remove(pluginItem.modelData.id)
                         }
                     }

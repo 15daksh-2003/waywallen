@@ -80,6 +80,7 @@ message Request {
     WallpaperRemoveRequest    wallpaper_remove = 61;
     PluginInspectRequest      plugin_inspect = 62;
     PluginUpdateCheckRequest  plugin_update_check = 63;
+    PluginUpdateInstallRequest plugin_update_install = 64;
   }
 }
 
@@ -147,6 +148,7 @@ message Response {
     WallpaperRemoveResponse    wallpaper_remove = 61;
     PluginInspectResponse      plugin_inspect = 62;
     PluginUpdateCheckResponse  plugin_update_check = 63;
+    PluginUpdateInstallResponse plugin_update_install = 64;
   }
 }
 
@@ -1268,6 +1270,14 @@ message PluginUpdateCheckRequest {
 message PluginUpdateCheckResponse {
   repeated PluginUpdateInfo updates = 1;
   string query_id = 2;
+}
+
+message PluginUpdateInstallRequest {
+  string plugin_id = 1;
+}
+
+message PluginUpdateInstallResponse {
+  string query_id = 1;
 }
 
 // Installable-plugin (package) view: one entry per `[plugin]`, with the

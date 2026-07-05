@@ -306,7 +306,7 @@ void PluginUpdateCheckQuery::check(const QString& pluginId) {
             co_return;
         }
 
-        const auto rsp = result.unwrap_unchecked();
+        const auto   rsp = result.unwrap_unchecked();
         QVariantList updates;
         for (const auto& info : rsp.pluginUpdateCheck().updates()) {
             updates.append(plugin_update_to_map(info));
@@ -314,6 +314,49 @@ void PluginUpdateCheckQuery::check(const QString& pluginId) {
         self->m_updates = std::move(updates);
         Q_EMIT self->updatesChanged();
         self->acceptProgressQuery(rsp.pluginUpdateCheck().queryId());
+        co_return;
+    });
+}
+
+PluginUpdateInstallQuery::PluginUpdateInstallQuery(QObject* parent): ProgressQuery(parent) {
+    connect(this, &ProgressQuery::progressEnded, this, [this](bool error, const QString&) {
+        if (! error) {
+            Q_EMIT installed(m_plugin_id);
+        }
+    });
+}
+
+auto PluginUpdateInstallQuery::pluginId() const -> const QString& { return m_plugin_id; }
+
+void PluginUpdateInstallQuery::reload() { install(m_plugin_id); }
+
+void PluginUpdateInstallQuery::install(const QString& pluginId) {
+    if (pluginId.isEmpty() || querying() || progressing()) return;
+    if (m_plugin_id != pluginId) {
+        m_plugin_id = pluginId;
+        Q_EMIT pluginIdChanged();
+    }
+    beginProgressQuery();
+    auto backend = App::instance()->backend();
+
+    auto req   = proto::Request {};
+    auto inner = proto::PluginUpdateInstallRequest {};
+    inner.setPluginId(m_plugin_id);
+    req.setPluginUpdateInstall(std::move(inner));
+
+    auto self = QWatcher { this };
+    spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
+        auto result = co_await backend->send(std::move(req));
+        co_await asio::post(asio::bind_executor(QAsyncResult::get_executor(), use_task));
+        if (! self) co_return;
+
+        if (! result) {
+            self->failProgressQuery(result.unwrap_err_unchecked());
+            co_return;
+        }
+
+        const auto rsp = result.unwrap_unchecked();
+        self->acceptProgressQuery(rsp.pluginUpdateInstall().queryId());
         co_return;
     });
 }

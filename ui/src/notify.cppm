@@ -19,6 +19,7 @@ export struct TaskProgressSnapshot {
     bool    ended { false };
     bool    error { false };
     QString message;
+    quint64 sequence { 0 };
 };
 
 /// UI-side mirror of the daemon's `GlobalEvent` broadcasts. The
@@ -78,6 +79,7 @@ public:
         return m_display_backend;
     }
     auto taskProgressSnapshot(const QString& queryId, TaskProgressSnapshot& out) const -> bool;
+    auto taskProgressSequence() const -> quint64 { return m_task_progress_sequence; }
 
 Q_SIGNALS:
     /// Daemon finished a wallpaper sync (success or failure). `count`
@@ -119,14 +121,15 @@ Q_SIGNALS:
     void playlistChanged();
     void pluginUpdateChanged();
     void taskProgress(const QString& queryId, double progress, bool progressing, bool ended,
-                      bool error, const QString& message);
+                      bool error, const QString& message, quint64 sequence);
 
 private:
-    bool                              m_scan_in_progress { false };
-    quint32                           m_active_task_count { 0 };
-    DaemonPhase                       m_daemon_phase { DaemonPhase::Starting };
-    control::v1::DisplayBackendStatus m_display_backend;
+    bool                                 m_scan_in_progress { false };
+    quint32                              m_active_task_count { 0 };
+    DaemonPhase                          m_daemon_phase { DaemonPhase::Starting };
+    control::v1::DisplayBackendStatus    m_display_backend;
     QHash<QString, TaskProgressSnapshot> m_task_progress;
+    quint64                              m_task_progress_sequence { 0 };
 };
 
 } // namespace waywallen

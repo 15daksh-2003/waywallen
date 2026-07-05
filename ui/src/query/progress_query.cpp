@@ -14,9 +14,14 @@ ProgressQuery::ProgressQuery(QObject* parent): Query(parent) {
         Notify::instance(),
         &Notify::taskProgress,
         this,
-        [this](const QString& queryId, double progress, bool progressing, bool ended, bool error,
-               const QString& message) {
-            if (m_query_id.isEmpty() || queryId != m_query_id) {
+        [this](const QString& queryId,
+               double         progress,
+               bool           progressing,
+               bool           ended,
+               bool           error,
+               const QString& message,
+               quint64        sequence) {
+            if (m_query_id.isEmpty() || queryId != m_query_id || sequence <= m_begin_sequence) {
                 return;
             }
             applyTaskProgress(TaskProgressSnapshot {
@@ -25,6 +30,7 @@ ProgressQuery::ProgressQuery(QObject* parent): Query(parent) {
                 .ended       = ended,
                 .error       = error,
                 .message     = message,
+                .sequence    = sequence,
             });
         },
         Qt::QueuedConnection);
@@ -48,6 +54,11 @@ auto ProgressQuery::progress() const -> double { return m_progress; }
 auto ProgressQuery::progressing() const -> bool { return m_progressing; }
 
 void ProgressQuery::beginProgressQuery() {
+    m_begin_sequence = Notify::instance()->taskProgressSequence();
+    if (! m_query_id.isEmpty()) {
+        m_query_id.clear();
+        Q_EMIT queryIdChanged();
+    }
     setError({});
     setProgressValue(0.0);
     setProgressingValue(true);
@@ -65,7 +76,8 @@ void ProgressQuery::acceptProgressQuery(const QString& queryId) {
     }
 
     TaskProgressSnapshot snapshot;
-    if (Notify::instance()->taskProgressSnapshot(m_query_id, snapshot)) {
+    if (Notify::instance()->taskProgressSnapshot(m_query_id, snapshot) &&
+        snapshot.sequence > m_begin_sequence) {
         applyTaskProgress(snapshot);
     }
 }

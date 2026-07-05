@@ -1933,6 +1933,13 @@ async fn dispatch_inner(
             })
         }
 
+        Req::PluginUpdateInstall(r) => {
+            let submission = crate::control::spawn_plugin_update_install(state, r.plugin_id)?;
+            Res::PluginUpdateInstall(pb::PluginUpdateInstallResponse {
+                query_id: submission.query_id,
+            })
+        }
+
         Req::DisplayLayoutSet(r) => {
             let new_fillmode = if r.clear_fillmode {
                 None

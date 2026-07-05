@@ -175,4 +175,27 @@ private:
     QVariantList m_updates;
 };
 
+export class PluginUpdateInstallQuery
+    : public ProgressQuery,
+      public QueryExtra<control::v1::Response, PluginUpdateInstallQuery> {
+    Q_OBJECT
+    QML_ELEMENT
+
+    Q_PROPERTY(QString pluginId READ pluginId NOTIFY pluginIdChanged FINAL)
+
+public:
+    PluginUpdateInstallQuery(QObject* parent = nullptr);
+
+    auto pluginId() const -> const QString&;
+
+    void             reload() override;
+    Q_INVOKABLE void install(const QString& pluginId);
+
+    Q_SIGNAL void pluginIdChanged();
+    Q_SIGNAL void installed(const QString& pluginId);
+
+private:
+    QString m_plugin_id;
+};
+
 } // namespace waywallen

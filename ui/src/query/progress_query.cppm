@@ -46,6 +46,7 @@ private:
     QString m_query_id;
     double  m_progress { 0.0 };
     bool    m_progressing { false };
+    quint64 m_begin_sequence { 0 };
 };
 
 } // namespace waywallen
