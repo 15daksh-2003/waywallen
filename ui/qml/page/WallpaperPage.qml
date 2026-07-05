@@ -200,6 +200,9 @@ MD.Page {
         function onPlaylistChanged() {
             playlistListQuery.reload();
         }
+        function onPluginChanged() {
+            pluginQuery.reload();
+        }
     }
 
     function reloadAll() {

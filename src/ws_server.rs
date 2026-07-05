@@ -921,6 +921,9 @@ fn global_event_to_pb(e: &GlobalEvent, state: &Arc<AppState>) -> Option<pb::Even
         GlobalEvent::PluginUpdateChanged => Some(pb::Event {
             payload: Some(pb::event::Payload::PluginUpdateChanged(pb::Empty {})),
         }),
+        GlobalEvent::PluginChanged => Some(pb::Event {
+            payload: Some(pb::event::Payload::PluginChanged(pb::Empty {})),
+        }),
         GlobalEvent::TaskProgress(progress) => Some(pb::Event {
             payload: Some(pb::event::Payload::TaskProgress(pb::TaskProgress {
                 query_id: progress.query_id.clone(),

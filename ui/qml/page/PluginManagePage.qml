@@ -137,6 +137,9 @@ MD.Page {
         function onPluginUpdateChanged() {
             pluginListQuery.reload();
         }
+        function onPluginChanged() {
+            pluginListQuery.reload();
+        }
     }
 
     Connections {

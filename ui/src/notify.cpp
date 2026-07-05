@@ -99,6 +99,8 @@ Notify::Notify(QObject* parent): QObject(parent) {
                     p.sourceId(), p.id_proto(), static_cast<int>(p.state()), p.error());
             } else if (evt.hasPlaylistChanged()) {
                 Q_EMIT playlistChanged();
+            } else if (evt.hasPluginChanged()) {
+                Q_EMIT pluginChanged();
             } else if (evt.hasPluginUpdateChanged()) {
                 Q_EMIT pluginUpdateChanged();
             } else if (evt.hasPluginRestartFailed()) {

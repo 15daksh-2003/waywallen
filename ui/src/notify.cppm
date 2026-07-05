@@ -119,6 +119,7 @@ Q_SIGNALS:
     void remoteDownloadProgress(const QString& sourceId, const QString& id, int state,
                                 const QString& error);
     void playlistChanged();
+    void pluginChanged();
     void pluginUpdateChanged();
     void pluginRestartFailed(const QString& pluginId, const QString& error);
     void taskProgress(const QString& queryId, double progress, bool progressing, bool ended,

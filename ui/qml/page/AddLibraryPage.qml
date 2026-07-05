@@ -22,6 +22,9 @@ MD.Page {
         function onDaemonReady() {
             sourceQuery.reload();
         }
+        function onPluginChanged() {
+            sourceQuery.reload();
+        }
     }
 
     Component.onCompleted: {

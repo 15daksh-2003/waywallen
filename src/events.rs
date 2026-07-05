@@ -54,6 +54,7 @@ pub enum GlobalEvent {
         error: String,
     },
     PlaylistChanged,
+    PluginChanged,
     PluginUpdateChanged,
     PluginRestartFailed {
         plugin_id: String,

@@ -84,6 +84,9 @@ MD.Page {
         function onSettingsChanged() {
             settingsQuery.reload();
         }
+        function onPluginChanged() {
+            pluginQuery.reload();
+        }
     }
 
     Component.onCompleted: {

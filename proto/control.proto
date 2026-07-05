@@ -838,6 +838,7 @@ message Event {
     Empty                  plugin_update_changed     = 18;
     TaskProgress           task_progress             = 19;
     PluginRestartFailed    plugin_restart_failed     = 20;
+    Empty                  plugin_changed            = 21;
   }
 }
 

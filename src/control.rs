@@ -132,6 +132,7 @@ async fn apply_plugin_scan(
     }
 
     reload_source_entries(app, scan.entries, installed_plugin_id).await?;
+    app.events.publish(GlobalEvent::PluginChanged);
     Ok(packages)
 }
 

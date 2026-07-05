@@ -178,6 +178,13 @@ Item {
         }
     }
 
+    Connections {
+        target: W.Notify
+        function onPluginChanged() {
+            pluginQuery.reload();
+        }
+    }
+
     W.UserPropertyListModel {
         id: propertyModel
         schemaJson: wallpaperGetQuery.wallpaper?.userPropertiesSchema ?? ""
