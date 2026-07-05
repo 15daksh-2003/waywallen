@@ -1,3 +1,28 @@
+<release version="0.2.4" date="2026-07-05">
+  <description>
+    <p>Added:</p>
+    <ul>
+      <li>Plugin update checks with background scheduling, manual refresh, and progress reporting.</li>
+      <li>Plugin update installation flow with update actions and registry refresh after install.</li>
+      <li>Per-wallpaper audio enable/disable support for the video renderer.</li>
+    </ul>
+    <p>Fixes:</p>
+    <ul>
+      <li>Plugin scan ownership now preserves system and user roots during scanning.</li>
+      <li>Plugin install completion is no longer blocked by renderer restart handling.</li>
+      <li>Plugin filters refresh supported types after installing new renderers.</li>
+      <li>Wallpaper property editing keeps the selected wallpaper stable during quick switches.</li>
+      <li>Looped video decoder frame handling.</li>
+      <li>Auto-detected source folders are narrowed.</li>
+    </ul>
+    <p>Improved:</p>
+    <ul>
+      <li>Plugin page update tags and actions.</li>
+      <li>Discover and wallpaper view tweak state are stored separately.</li>
+      <li>DBus menu mute state is persisted in settings.</li>
+    </ul>
+  </description>
+</release>
 <release version="0.2.3" date="2026-07-03">
   <description>
     <p>Added:</p>

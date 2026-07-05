@@ -7,12 +7,12 @@ import waywallen.ui as W
 
 MD.Page {
     id: root
-    title: 'Source Manage'
+    title: qsTr("Library Manager")
 
     actions: [
         MD.Action {
             icon.name: MD.Token.icon.add
-            text: qsTr("Add source")
+            text: qsTr("Add library")
             onTriggered: root.MD.MProp.page.pushItem('waywallen.ui/AddLibraryPage')
         }
     ]
@@ -72,7 +72,7 @@ MD.Page {
             visible: W.App.libraryManager.count === 0
             anchors.centerIn: parent
             width: Math.max(0, parent.width - 24)
-            text: qsTr("No source directories")
+            text: qsTr("No libraries")
             typescale: MD.Token.typescale.body_medium
             color: MD.Token.color.on_surface_variant
             horizontalAlignment: Text.AlignHCenter

@@ -281,7 +281,7 @@ MD.Page {
     MD.Action {
         id: sourcesAction
         icon.name: MD.Token.icon.hard_drive
-        text: "Sources"
+        text: qsTr("Library Manager")
         onTriggered: MD.Util.showPopup('waywallen.ui/PagePopup', {
             source: 'waywallen.ui/SourceManagePage'
         }, root.Window.window)
@@ -1076,6 +1076,12 @@ MD.Page {
 
                         ColumnLayout {
                             spacing: 16
+                            readonly property bool showLibraryHint: !wallpaperQuery.querying
+                                && !wallpaperQuery.hasActiveFilters
+                                && wallpaperQuery.searchText.trim().length === 0
+                                && W.App.libraryManager.count === 0
+                            readonly property int libraryHintSize: 22
+                            readonly property string libraryHintIcon: '<font face="' + MD.Token.font.icon_family + '" style="font-size: ' + libraryHintSize + 'px;">' + sourcesAction.icon.name + '</font>'
 
                             MD.BusyIndicator {
                                 Layout.alignment: Qt.AlignHCenter
@@ -1090,6 +1096,18 @@ MD.Page {
                                 color: MD.Token.color.on_surface_variant
                             }
 
+                            MD.Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                Layout.preferredWidth: Math.max(0, Math.min(420, m_grid_view.width - 32))
+                                visible: parent.showLibraryHint
+                                text: qsTr("Click the %1 button in the top right to add a library.").arg(parent.libraryHintIcon)
+                                textFormat: Text.RichText
+                                typescale: MD.Token.typescale.body_medium
+                                color: MD.Token.color.on_surface_variant
+                                wrapMode: Text.WordWrap
+                                horizontalAlignment: Text.AlignHCenter
+                            }
+
                             MD.BusyButton {
                                 Layout.alignment: Qt.AlignHCenter
                                 // Only offer auto-detect when the empty grid is
@@ -1098,7 +1116,7 @@ MD.Page {
                                 // and not when libraries are already registered
                                 // (in that case the user wants Refresh, not a
                                 // second round of auto-detection).
-                                visible: !wallpaperQuery.querying && !wallpaperQuery.hasActiveFilters && wallpaperQuery.searchText.trim().length === 0 && W.App.libraryManager.count === 0
+                                visible: parent.showLibraryHint
                                 text: "Auto detect libraries"
                                 busy: autoDetectQuery.querying
                                 mdState.type: MD.Enum.BtFilledTonal
