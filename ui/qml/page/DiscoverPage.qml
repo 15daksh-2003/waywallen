@@ -20,6 +20,7 @@ MD.Page {
 
     W.TweakState {
         id: discoverTweakState
+        settingsCategory: "DiscoverView"
     }
 
     function sourceInfo(id) {

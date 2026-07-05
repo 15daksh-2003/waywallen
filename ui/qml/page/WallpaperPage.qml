@@ -101,6 +101,7 @@ MD.Page {
 
     W.TweakState {
         id: wallpaperTweakState
+        settingsCategory: "WallpaperView"
     }
 
     W.PlaylistListSheetState {

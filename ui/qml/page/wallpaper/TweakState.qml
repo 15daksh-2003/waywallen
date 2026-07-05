@@ -10,13 +10,14 @@ QtObject {
     readonly property int minimumItemSize: 112
     readonly property int maximumItemSize: 260
     readonly property int itemSizeStep: 8
+    property string settingsCategory: "WallpaperView"
     property int itemSize: 162
     property real itemAspectRatio: 1
     property int layoutMode: layoutFillCell
     readonly property real itemHeight: itemSize / Math.max(itemAspectRatio, 0.1)
 
     readonly property Settings settings: Settings {
-        category: "WallpaperView"
+        category: root.settingsCategory
         property alias itemSize: root.itemSize
         property alias itemAspectRatio: root.itemAspectRatio
         property alias layoutMode: root.layoutMode
