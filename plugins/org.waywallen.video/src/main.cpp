@@ -1058,15 +1058,16 @@ int main(int argc, char** argv) {
             });
             continue;
         }
+        const bool decoder_looped = fs == wavsen::video::NextFrame::Looped;
         switch (fkind) {
         case wavsen::video::FrameKind::VulkanShared: frame_pts = vkv.pts_seconds; break;
         case wavsen::video::FrameKind::VaapiDrm: frame_pts = drmv.pts_seconds; break;
         case wavsen::video::FrameKind::Sw: frame_pts = frame.pts_seconds; break;
         }
 
-        /* Loop boundary: decoder seeks itself to 0 when loop=on, so we
-         * detect it by PTS regression and re-anchor audio + presenter. */
-        if (frame_pts >= 0.0 && prev_pts >= 0.0 && frame_pts + 0.5 < prev_pts) {
+        const bool pts_regressed =
+            frame_pts >= 0.0 && prev_pts >= 0.0 && frame_pts + 0.5 < prev_pts;
+        if (decoder_looped || pts_regressed) {
             if (av_player) av_player->seek_to_start();
             presenter.reset();
         }
