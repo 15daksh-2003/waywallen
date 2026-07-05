@@ -101,6 +101,10 @@ MD.ApplicationWindow {
             // flag=1 → close button; 6s gives the user time to read.
             W.Action.toast(qsTr("%1 connection failed: %2").arg(who).arg(reason), 6000, 1, null);
         }
+        function onPluginRestartFailed(pluginId, error) {
+            const who = pluginId.length > 0 ? pluginId : qsTr("Plugin");
+            W.Action.toast(qsTr("%1 renderer restart failed: %2").arg(who).arg(error), 6000, 1, null);
+        }
     }
 
     W.DaemonNotRunDialog {}

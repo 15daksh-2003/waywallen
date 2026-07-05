@@ -120,6 +120,7 @@ Q_SIGNALS:
                                 const QString& error);
     void playlistChanged();
     void pluginUpdateChanged();
+    void pluginRestartFailed(const QString& pluginId, const QString& error);
     void taskProgress(const QString& queryId, double progress, bool progressing, bool ended,
                       bool error, const QString& message, quint64 sequence);
 

@@ -837,6 +837,7 @@ message Event {
     PlaylistChanged        playlist_changed          = 17;
     Empty                  plugin_update_changed     = 18;
     TaskProgress           task_progress             = 19;
+    PluginRestartFailed    plugin_restart_failed     = 20;
   }
 }
 
@@ -874,6 +875,11 @@ message TaskProgress {
   bool ended = 4;
   bool error = 5;
   string message = 6;
+}
+
+message PluginRestartFailed {
+  string plugin_id = 1;
+  string error = 2;
 }
 
 message DisplayBackendStatus {

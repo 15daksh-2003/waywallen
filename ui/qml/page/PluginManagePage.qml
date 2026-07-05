@@ -471,7 +471,7 @@ MD.Page {
                             visible: pluginUpdateAction.visible || pluginDeleteAction.visible
                             width: parent.actionAreaWidth
                             actions: [pluginUpdateAction, pluginDeleteAction]
-                            iconDelegate: MD.IconButton {
+                            iconDelegate: MD.BusyIconButton {
                                 action: MD.ToolBarLayout.action
                                 mdState.size: MD.Enum.XS
                             }
@@ -489,9 +489,15 @@ MD.Page {
                             icon.name: "download"
                             visible: root.updateActionVisible(pluginItem.modelData.updateInfo)
                             displayHint: MD.ToolBarLayout.KeepVisible
-                            enabled: !updateInstallQuery.querying && !deleteQuery.querying
                             busy: updateInstallQuery.pluginId === pluginItem.modelData.id && updateInstallQuery.querying
-                            onTriggered: root.installUpdate(pluginItem.modelData.id, pluginItem.modelData.updateInfo)
+                                ? (updateInstallQuery.progressing ? MD.Enum.Progress : MD.Enum.Busy)
+                                : MD.Enum.Idle
+                            progress: updateInstallQuery.pluginId === pluginItem.modelData.id ? updateInstallQuery.progress : 0
+                            onTriggered: {
+                                if (updateInstallQuery.querying || deleteQuery.querying)
+                                    return;
+                                root.installUpdate(pluginItem.modelData.id, pluginItem.modelData.updateInfo);
+                            }
                         }
 
                         MD.Action {

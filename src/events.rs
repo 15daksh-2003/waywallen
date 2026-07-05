@@ -55,6 +55,10 @@ pub enum GlobalEvent {
     },
     PlaylistChanged,
     PluginUpdateChanged,
+    PluginRestartFailed {
+        plugin_id: String,
+        error: String,
+    },
     TaskProgress(crate::tasks::TaskProgress),
 }
 

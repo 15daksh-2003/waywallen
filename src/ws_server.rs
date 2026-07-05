@@ -931,6 +931,14 @@ fn global_event_to_pb(e: &GlobalEvent, state: &Arc<AppState>) -> Option<pb::Even
                 message: progress.message.clone(),
             })),
         }),
+        GlobalEvent::PluginRestartFailed { plugin_id, error } => Some(pb::Event {
+            payload: Some(pb::event::Payload::PluginRestartFailed(
+                pb::PluginRestartFailed {
+                    plugin_id: plugin_id.clone(),
+                    error: error.clone(),
+                },
+            )),
+        }),
         GlobalEvent::SourcesReady
         | GlobalEvent::DisplayReady
         | GlobalEvent::DaemonReady

@@ -528,6 +528,29 @@ async fn restart_affected_renderers(
     Ok(())
 }
 
+fn spawn_affected_renderer_restart(
+    app: &Arc<AppState>,
+    plugin_id: String,
+    renderer_ids: Vec<renderer_manager::RendererId>,
+) {
+    if renderer_ids.is_empty() {
+        return;
+    }
+
+    let app = app.clone();
+    let tasks = app.tasks.clone();
+    let task_name = format!("plugin-restart/{plugin_id}");
+    tasks.spawn_async(crate::tasks::TaskKind::Generic, task_name, async move {
+        if let Err(e) = restart_affected_renderers(&app, renderer_ids).await {
+            let error = format!("{e:#}");
+            log::warn!("plugin restart failed for {plugin_id}: {error}");
+            app.events
+                .publish(GlobalEvent::PluginRestartFailed { plugin_id, error });
+        }
+        Ok(())
+    });
+}
+
 fn spawn_source_refresh(app: &Arc<AppState>, plugin_id: &str) {
     let app = app.clone();
     let tasks = app.tasks.clone();
@@ -581,7 +604,7 @@ pub async fn install_plugin_archive(
         !old_renderer_ids.is_empty() && (active_user_install || old_active != new_active);
 
     if should_restart_renderers {
-        restart_affected_renderers(app, old_renderer_ids).await?;
+        spawn_affected_renderer_restart(app, plugin_id.clone(), old_renderer_ids);
     }
 
     spawn_source_refresh(app, &plugin_id);
