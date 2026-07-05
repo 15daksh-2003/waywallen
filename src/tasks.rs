@@ -93,11 +93,63 @@ pub enum TaskEvent {
     Cancelled(TaskId),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaskProgress {
+    pub query_id: String,
+    pub progress: f32,
+    pub progressing: bool,
+    pub ended: bool,
+    pub error: bool,
+    pub message: String,
+}
+
+#[derive(Clone)]
+pub struct ProgressReporter {
+    query_id: String,
+    sink: ProgressSink,
+}
+
+impl ProgressReporter {
+    pub fn query_id(&self) -> &str {
+        &self.query_id
+    }
+
+    pub fn report(&self, progress: f32, message: impl Into<String>) {
+        (self.sink)(TaskProgress {
+            query_id: self.query_id.clone(),
+            progress: progress.clamp(0.0, 1.0),
+            progressing: true,
+            ended: false,
+            error: false,
+            message: message.into(),
+        });
+    }
+
+    fn finish(&self, progress: f32, error: bool, message: impl Into<String>) {
+        (self.sink)(TaskProgress {
+            query_id: self.query_id.clone(),
+            progress: progress.clamp(0.0, 1.0),
+            progressing: false,
+            ended: true,
+            error,
+            message: message.into(),
+        });
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgressTaskSubmission {
+    pub query_id: String,
+    pub task_id: TaskId,
+    pub spawned: bool,
+}
+
 // ---------------------------------------------------------------------------
 // TaskManager — public handle
 
 type BoxedResultFut = Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>;
 type BoxedResultFn = Box<dyn FnOnce() -> Result<()> + Send + 'static>;
+pub type ProgressSink = Arc<dyn Fn(TaskProgress) + Send + Sync + 'static>;
 
 enum TaskMsg {
     Async {
@@ -214,6 +266,75 @@ impl TaskManager {
         id
     }
 
+    pub fn spawn_progress_async_once<F, Fut>(
+        &self,
+        kind: TaskKind,
+        query_id: impl Into<String>,
+        name: impl Into<String>,
+        sink: ProgressSink,
+        fut: F,
+    ) -> ProgressTaskSubmission
+    where
+        F: FnOnce(ProgressReporter) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        let query_id = query_id.into();
+        if let Some(task_id) = self.running_unique_task_id(&query_id) {
+            return ProgressTaskSubmission {
+                query_id,
+                task_id,
+                spawned: false,
+            };
+        }
+
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let name = name.into();
+        let token = CancellationToken::new();
+        self.cancel_tokens
+            .write()
+            .unwrap()
+            .insert(id, token.clone());
+        self.record_started(id, kind, name.clone());
+        self.unique_keys
+            .write()
+            .unwrap()
+            .insert(query_id.clone(), id);
+
+        let reporter = ProgressReporter {
+            query_id: query_id.clone(),
+            sink,
+        };
+        let task_reporter = reporter.clone();
+        let wrapped = async move {
+            task_reporter.report(0.0, "");
+            let result = tokio::select! {
+                _ = token.cancelled() => Err(anyhow::anyhow!("cancelled")),
+                r = fut(task_reporter.clone()) => r,
+            };
+            match &result {
+                Ok(()) => task_reporter.finish(1.0, false, ""),
+                Err(e) => task_reporter.finish(1.0, true, format!("{e:#}")),
+            }
+            result
+        };
+        if let Err(e) = self.tx.send(TaskMsg::Async {
+            id,
+            name: name.clone(),
+            fut: Box::pin(wrapped),
+        }) {
+            log::warn!("task '{name}' (id {id}) dropped: supervisor is gone ({e})");
+            self.cancel_tokens.write().unwrap().remove(&id);
+            self.unique_keys.write().unwrap().retain(|_, v| *v != id);
+            reporter.finish(1.0, true, "supervisor gone");
+            self.finalize(id, TaskState::Failed("supervisor gone".into()));
+        }
+        ProgressTaskSubmission {
+            query_id,
+            task_id: id,
+            spawned: true,
+        }
+    }
+
     /// Cooperatively cancel a running task.
     /// Returns `true` when a live cancellation token existed.
     pub fn cancel(&self, id: TaskId) -> bool {
@@ -264,6 +385,21 @@ impl TaskManager {
     /// events and should re-snapshot via [`list`](Self::list) on start.
     pub fn subscribe(&self) -> broadcast::Receiver<TaskEvent> {
         self.events.subscribe()
+    }
+
+    fn running_unique_task_id(&self, key: &str) -> Option<TaskId> {
+        let task_id = self.unique_keys.read().unwrap().get(key).copied()?;
+        let running = self
+            .records
+            .read()
+            .unwrap()
+            .get(&task_id)
+            .is_some_and(|r| matches!(r.state, TaskState::Running));
+        if running {
+            return Some(task_id);
+        }
+        self.unique_keys.write().unwrap().remove(key);
+        None
     }
 
     fn record_started(&self, id: TaskId, kind: TaskKind, name: String) {
@@ -670,6 +806,92 @@ mod tests {
             )
             .await
         );
+        let _ = tx.send(true);
+    }
+
+    #[tokio::test]
+    async fn progress_task_reuses_running_submission() {
+        let (tx, rx) = watch::channel(false);
+        let tm = TaskManager::spawn(rx);
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<TaskProgress>();
+        let sink: ProgressSink = Arc::new(move |p| {
+            let _ = progress_tx.send(p);
+        });
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let task_gate = gate.clone();
+
+        let first = tm.spawn_progress_async_once(
+            TaskKind::Generic,
+            "unit/progress-reuse",
+            "unit/progress-reuse",
+            sink.clone(),
+            move |reporter| {
+                let task_gate = task_gate.clone();
+                async move {
+                    reporter.report(0.5, "half");
+                    task_gate.notified().await;
+                    Ok(())
+                }
+            },
+        );
+        let second = tm.spawn_progress_async_once(
+            TaskKind::Generic,
+            "unit/progress-reuse",
+            "unit/progress-reuse",
+            sink,
+            move |_| async move { anyhow::bail!("duplicate task should not run") },
+        );
+
+        assert!(first.spawned);
+        assert!(!second.spawned);
+        assert_eq!(first.query_id, second.query_id);
+        assert_eq!(first.task_id, second.task_id);
+
+        let seen_half = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let p = progress_rx.recv().await.expect("progress sender closed");
+                if p.query_id == "unit/progress-reuse" && (p.progress - 0.5).abs() < f32::EPSILON {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(seen_half.is_ok(), "progress update was not sent");
+
+        gate.notify_one();
+        let _ = tx.send(true);
+    }
+
+    #[tokio::test]
+    async fn progress_task_sends_end_on_completion() {
+        let (tx, rx) = watch::channel(false);
+        let tm = TaskManager::spawn(rx);
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<TaskProgress>();
+        let sink: ProgressSink = Arc::new(move |p| {
+            let _ = progress_tx.send(p);
+        });
+
+        tm.spawn_progress_async_once(
+            TaskKind::Generic,
+            "unit/progress-end",
+            "unit/progress-end",
+            sink,
+            move |_| async move { Ok(()) },
+        );
+
+        let ended = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let p = progress_rx.recv().await.expect("progress sender closed");
+                if p.query_id == "unit/progress-end" && p.ended {
+                    break p;
+                }
+            }
+        })
+        .await
+        .expect("end progress was not sent");
+        assert!(!ended.progressing);
+        assert!(!ended.error);
+        assert_eq!(ended.progress, 1.0);
         let _ = tx.send(true);
     }
 

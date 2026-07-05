@@ -149,6 +149,89 @@ pub async fn check_plugin_updates(
     updates
 }
 
+async fn check_plugin_updates_with_progress<F>(
+    app: &Arc<AppState>,
+    plugin_id: Option<&str>,
+    on_progress: F,
+) -> Vec<crate::plugin::update::PluginUpdateInfo>
+where
+    F: FnMut(f32) + Send,
+{
+    let _guard = app.plugin_update_check.lock().await;
+    let mut packages = app.plugins.read().await.clone();
+    let plugin_id = plugin_id.filter(|id| !id.is_empty());
+    if let Some(plugin_id) = plugin_id {
+        packages.retain(|pkg| pkg.id == plugin_id);
+    }
+    let updates = crate::plugin::update::check_packages_with_progress(
+        &app.plugin_updates,
+        packages,
+        plugin_id.is_none(),
+        on_progress,
+    )
+    .await;
+    if !updates.is_empty() {
+        app.events.publish(GlobalEvent::PluginUpdateChanged);
+    }
+    updates
+}
+
+pub async fn plugin_update_snapshots(
+    app: &Arc<AppState>,
+    plugin_id: Option<&str>,
+) -> Vec<crate::plugin::update::PluginUpdateInfo> {
+    let mut packages = app.plugins.read().await.clone();
+    let plugin_id = plugin_id.filter(|id| !id.is_empty());
+    if let Some(plugin_id) = plugin_id {
+        packages.retain(|pkg| pkg.id == plugin_id);
+    }
+    let mut out = Vec::with_capacity(packages.len());
+    for pkg in packages {
+        out.push(crate::plugin::update::snapshot_for_package(
+            &app.plugin_updates,
+            &pkg,
+        )
+        .await);
+    }
+    out
+}
+
+pub fn plugin_update_check_query_id(plugin_id: Option<&str>) -> String {
+    match plugin_id.filter(|id| !id.is_empty()) {
+        Some(plugin_id) => format!("plugin/update-check/{plugin_id}"),
+        None => "plugin/update-check/all".into(),
+    }
+}
+
+pub fn spawn_plugin_update_check(
+    app: &Arc<AppState>,
+    plugin_id: Option<String>,
+) -> crate::tasks::ProgressTaskSubmission {
+    let query_id = plugin_update_check_query_id(plugin_id.as_deref());
+    let event_sender = app.events.sender();
+    let sink: crate::tasks::ProgressSink = Arc::new(move |progress| {
+        let _ = event_sender.send(GlobalEvent::TaskProgress(progress));
+    });
+    let task_app = app.clone();
+    let task_plugin_id = plugin_id.clone();
+    app.tasks.spawn_progress_async_once(
+        crate::tasks::TaskKind::Generic,
+        query_id.clone(),
+        query_id,
+        sink,
+        move |reporter| async move {
+            let progress_reporter = reporter.clone();
+            let _ = check_plugin_updates_with_progress(
+                &task_app,
+                task_plugin_id.as_deref(),
+                move |progress| progress_reporter.report(progress, ""),
+            )
+            .await;
+            Ok(())
+        },
+    )
+}
+
 pub async fn run_plugin_update_checker(
     app: Arc<AppState>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,

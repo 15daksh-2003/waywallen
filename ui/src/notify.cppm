@@ -1,4 +1,5 @@
 module;
+#include <QHash>
 #include "QExtra/macro_qt.hpp"
 
 #ifdef Q_MOC_RUN
@@ -11,6 +12,14 @@ export import :proto;
 
 namespace waywallen
 {
+
+export struct TaskProgressSnapshot {
+    double  progress { 0.0 };
+    bool    progressing { false };
+    bool    ended { false };
+    bool    error { false };
+    QString message;
+};
 
 /// UI-side mirror of the daemon's `GlobalEvent` broadcasts. The
 /// daemon serializes process-wide events (sync lifecycle etc.) onto
@@ -68,6 +77,7 @@ public:
     auto displayBackend() const -> const control::v1::DisplayBackendStatus& {
         return m_display_backend;
     }
+    auto taskProgressSnapshot(const QString& queryId, TaskProgressSnapshot& out) const -> bool;
 
 Q_SIGNALS:
     /// Daemon finished a wallpaper sync (success or failure). `count`
@@ -108,12 +118,15 @@ Q_SIGNALS:
                                 const QString& error);
     void playlistChanged();
     void pluginUpdateChanged();
+    void taskProgress(const QString& queryId, double progress, bool progressing, bool ended,
+                      bool error, const QString& message);
 
 private:
     bool                              m_scan_in_progress { false };
     quint32                           m_active_task_count { 0 };
     DaemonPhase                       m_daemon_phase { DaemonPhase::Starting };
     control::v1::DisplayBackendStatus m_display_backend;
+    QHash<QString, TaskProgressSnapshot> m_task_progress;
 };
 
 } // namespace waywallen

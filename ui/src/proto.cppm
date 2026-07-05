@@ -58,6 +58,7 @@ using proto::WallpaperSyncFinished;
 
 using proto::DisplayBackendStatus;
 using proto::StatusSync;
+using proto::TaskProgress;
 using proto::DaemonPhaseGadget::DaemonPhase;
 
 using proto::SourceListRequest;

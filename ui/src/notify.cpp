@@ -33,6 +33,16 @@ Notify* Notify::create(QQmlEngine*, QJSEngine*) {
     return n;
 }
 
+auto Notify::taskProgressSnapshot(const QString& queryId, TaskProgressSnapshot& out) const
+    -> bool {
+    auto it = m_task_progress.constFind(queryId);
+    if (it == m_task_progress.constEnd()) {
+        return false;
+    }
+    out = it.value();
+    return true;
+}
+
 Notify::Notify(QObject* parent): QObject(parent) {
     auto* backend = App::instance()->backend();
     if (! backend) {
@@ -92,6 +102,18 @@ Notify::Notify(QObject* parent): QObject(parent) {
                 Q_EMIT playlistChanged();
             } else if (evt.hasPluginUpdateChanged()) {
                 Q_EMIT pluginUpdateChanged();
+            } else if (evt.hasTaskProgress()) {
+                const auto& p = evt.taskProgress();
+                TaskProgressSnapshot snap {
+                    .progress    = p.progress(),
+                    .progressing = p.progressing(),
+                    .ended       = p.ended(),
+                    .error       = p.error(),
+                    .message     = p.message(),
+                };
+                m_task_progress.insert(p.queryId(), snap);
+                Q_EMIT taskProgress(p.queryId(), snap.progress, snap.progressing, snap.ended,
+                                    snap.error, snap.message);
             }
         },
         Qt::QueuedConnection);
@@ -111,6 +133,7 @@ Notify::Notify(QObject* parent): QObject(parent) {
         m_active_task_count = 0;
         m_daemon_phase      = DaemonPhase::Starting;
         m_display_backend   = proto::DisplayBackendStatus {};
+        m_task_progress.clear();
         Q_EMIT statusChanged();
     });
 }

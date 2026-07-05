@@ -55,6 +55,7 @@ pub enum GlobalEvent {
     },
     PlaylistChanged,
     PluginUpdateChanged,
+    TaskProgress(crate::tasks::TaskProgress),
 }
 
 pub struct EventBus {

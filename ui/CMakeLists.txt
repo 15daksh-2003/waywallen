@@ -73,6 +73,7 @@ set(SOURCES_NO_MOC
   src/model/filter_rule_model.cpp
   src/model/user_property_model.cpp
   src/query/wallpaper_query.cpp
+  src/query/progress_query.cpp
   src/query/renderer_query.cpp
   src/query/source_query.cpp
   src/query/plugin_query.cpp
@@ -110,6 +111,7 @@ set(MOC_SOURCE_FILES
   src/model/filter_rule_model.cppm
   src/model/user_property_model.cppm
   src/query/wallpaper_query.cppm
+  src/query/progress_query.cppm
   src/query/renderer_query.cppm
   src/query/source_query.cppm
   src/query/plugin_query.cppm

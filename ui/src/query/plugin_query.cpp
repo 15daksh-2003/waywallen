@@ -266,7 +266,13 @@ void PluginDeleteQuery::remove(const QString& pluginId) {
     });
 }
 
-PluginUpdateCheckQuery::PluginUpdateCheckQuery(QObject* parent): Query(parent) {}
+PluginUpdateCheckQuery::PluginUpdateCheckQuery(QObject* parent): ProgressQuery(parent) {
+    connect(this, &ProgressQuery::progressEnded, this, [this](bool error, const QString&) {
+        if (! error) {
+            Q_EMIT checked();
+        }
+    });
+}
 
 auto PluginUpdateCheckQuery::pluginId() const -> const QString& { return m_plugin_id; }
 void PluginUpdateCheckQuery::setPluginId(const QString& v) {
@@ -279,9 +285,9 @@ auto PluginUpdateCheckQuery::updates() const -> const QVariantList& { return m_u
 void PluginUpdateCheckQuery::reload() { check(m_plugin_id); }
 
 void PluginUpdateCheckQuery::check(const QString& pluginId) {
-    if (querying()) return;
+    if (querying() || progressing()) return;
     setPluginId(pluginId);
-    setStatus(Status::Querying);
+    beginProgressQuery();
     auto backend = App::instance()->backend();
 
     auto req   = proto::Request {};
@@ -295,15 +301,19 @@ void PluginUpdateCheckQuery::check(const QString& pluginId) {
         co_await asio::post(asio::bind_executor(QAsyncResult::get_executor(), use_task));
         if (! self) co_return;
 
-        self->inspect_set(result, [self](const proto::Response& rsp) {
-            QVariantList updates;
-            for (const auto& info : rsp.pluginUpdateCheck().updates()) {
-                updates.append(plugin_update_to_map(info));
-            }
-            self->m_updates = std::move(updates);
-            Q_EMIT self->updatesChanged();
-            Q_EMIT self->checked();
-        });
+        if (! result) {
+            self->failProgressQuery(result.unwrap_err_unchecked());
+            co_return;
+        }
+
+        const auto rsp = result.unwrap_unchecked();
+        QVariantList updates;
+        for (const auto& info : rsp.pluginUpdateCheck().updates()) {
+            updates.append(plugin_update_to_map(info));
+        }
+        self->m_updates = std::move(updates);
+        Q_EMIT self->updatesChanged();
+        self->acceptProgressQuery(rsp.pluginUpdateCheck().queryId());
         co_return;
     });
 }

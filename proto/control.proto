@@ -834,6 +834,7 @@ message Event {
     RemoteDownloadProgress remote_download_progress = 16;
     PlaylistChanged        playlist_changed          = 17;
     Empty                  plugin_update_changed     = 18;
+    TaskProgress           task_progress             = 19;
   }
 }
 
@@ -862,6 +863,15 @@ message StatusSync {
   // Daemon lifecycle phase. UI gates the startup dialog on this.
   DaemonPhase phase = 3;
   DisplayBackendStatus display_backend = 4;
+}
+
+message TaskProgress {
+  string query_id = 1;
+  float progress = 2;
+  bool progressing = 3;
+  bool ended = 4;
+  bool error = 5;
+  string message = 6;
 }
 
 message DisplayBackendStatus {
@@ -1257,6 +1267,7 @@ message PluginUpdateCheckRequest {
 
 message PluginUpdateCheckResponse {
   repeated PluginUpdateInfo updates = 1;
+  string query_id = 2;
 }
 
 // Installable-plugin (package) view: one entry per `[plugin]`, with the

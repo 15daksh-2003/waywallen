@@ -7,6 +7,7 @@ module;
 
 export module waywallen:query.plugin;
 export import :query.query;
+export import :query.progress;
 
 namespace waywallen
 {
@@ -147,7 +148,7 @@ private:
 };
 
 export class PluginUpdateCheckQuery
-    : public Query,
+    : public ProgressQuery,
       public QueryExtra<control::v1::Response, PluginUpdateCheckQuery> {
     Q_OBJECT
     QML_ELEMENT

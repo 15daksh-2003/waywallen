@@ -921,6 +921,16 @@ fn global_event_to_pb(e: &GlobalEvent, state: &Arc<AppState>) -> Option<pb::Even
         GlobalEvent::PluginUpdateChanged => Some(pb::Event {
             payload: Some(pb::event::Payload::PluginUpdateChanged(pb::Empty {})),
         }),
+        GlobalEvent::TaskProgress(progress) => Some(pb::Event {
+            payload: Some(pb::event::Payload::TaskProgress(pb::TaskProgress {
+                query_id: progress.query_id.clone(),
+                progress: progress.progress,
+                progressing: progress.progressing,
+                ended: progress.ended,
+                error: progress.error,
+                message: progress.message.clone(),
+            })),
+        }),
         GlobalEvent::SourcesReady
         | GlobalEvent::DisplayReady
         | GlobalEvent::DaemonReady
@@ -1910,13 +1920,17 @@ async fn dispatch_inner(
         }
 
         Req::PluginUpdateCheck(r) => {
-            let plugin_id = (!r.plugin_id.is_empty()).then_some(r.plugin_id.as_str());
-            let updates = crate::control::check_plugin_updates(state, plugin_id)
+            let plugin_id = (!r.plugin_id.is_empty()).then_some(r.plugin_id);
+            let submission = crate::control::spawn_plugin_update_check(state, plugin_id.clone());
+            let updates = crate::control::plugin_update_snapshots(state, plugin_id.as_deref())
                 .await
                 .into_iter()
                 .map(plugin_update_info_to_pb)
                 .collect();
-            Res::PluginUpdateCheck(pb::PluginUpdateCheckResponse { updates })
+            Res::PluginUpdateCheck(pb::PluginUpdateCheckResponse {
+                updates,
+                query_id: submission.query_id,
+            })
         }
 
         Req::DisplayLayoutSet(r) => {

@@ -109,6 +109,18 @@ pub async fn check_packages(
     packages: Vec<PluginPackageMeta>,
     retain_missing: bool,
 ) -> Vec<PluginUpdateInfo> {
+    check_packages_with_progress(store, packages, retain_missing, |_| {}).await
+}
+
+pub async fn check_packages_with_progress<F>(
+    store: &PluginUpdateStore,
+    packages: Vec<PluginPackageMeta>,
+    retain_missing: bool,
+    mut on_progress: F,
+) -> Vec<PluginUpdateInfo>
+where
+    F: FnMut(f32) + Send,
+{
     {
         let mut w = store.write().await;
         if retain_missing {
@@ -124,10 +136,17 @@ pub async fn check_packages(
             w.insert(pkg.id.clone(), info);
         }
     }
+    on_progress(0.0);
 
+    if packages.is_empty() {
+        on_progress(1.0);
+        return Vec::new();
+    }
+
+    let total = packages.len() as f32;
     let client = reqwest::Client::new();
     let mut out = Vec::with_capacity(packages.len());
-    for pkg in packages {
+    for (idx, pkg) in packages.into_iter().enumerate() {
         let info = if pkg.update.as_deref().is_some_and(|u| !u.is_empty()) {
             check_one(&client, &pkg).await
         } else {
@@ -135,6 +154,7 @@ pub async fn check_packages(
         };
         store.write().await.insert(pkg.id.clone(), info.clone());
         out.push(info);
+        on_progress((idx + 1) as f32 / total);
     }
     out
 }
