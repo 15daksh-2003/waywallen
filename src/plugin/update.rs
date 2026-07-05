@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -207,7 +208,8 @@ async fn fetch_manifest(
     client: &reqwest::Client,
     url: &str,
 ) -> Result<PluginUpdateManifest, String> {
-    let response = tokio::time::timeout(REQUEST_TIMEOUT, client.get(url).send())
+    let url = normalize_update_manifest_url(url);
+    let response = tokio::time::timeout(REQUEST_TIMEOUT, client.get(url.as_ref()).send())
         .await
         .map_err(|_| {
             format!(
@@ -224,6 +226,35 @@ async fn fetch_manifest(
         .await
         .map_err(|e| format!("read update manifest failed: {e}"))?;
     PluginUpdateManifest::from_json_str(&text).map_err(|e| format!("parse update manifest: {e}"))
+}
+
+fn normalize_update_manifest_url(url: &str) -> Cow<'_, str> {
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return Cow::Borrowed(url);
+    };
+    if parsed.host_str() != Some("github.com") {
+        return Cow::Borrowed(url);
+    }
+
+    let Some(segments) = parsed.path_segments() else {
+        return Cow::Borrowed(url);
+    };
+    let segments = segments.collect::<Vec<_>>();
+    if segments.len() < 5
+        || segments[0].is_empty()
+        || segments[1].is_empty()
+        || segments[2] != "blob"
+        || segments[3].is_empty()
+    {
+        return Cow::Borrowed(url);
+    }
+
+    let mut raw_segments = Vec::with_capacity(segments.len() + 2);
+    raw_segments.extend_from_slice(&segments[..2]);
+    raw_segments.extend_from_slice(&["raw", "refs", "heads", segments[3]]);
+    raw_segments.extend_from_slice(&segments[4..]);
+    parsed.set_path(&format!("/{}", raw_segments.join("/")));
+    Cow::Owned(parsed.into())
 }
 
 fn info_from_manifest(
@@ -367,6 +398,30 @@ mod tests {
     fn compares_semver_with_v_prefix() {
         assert!(version_cmp("v1.2.0", "1.1.9").is_gt());
         assert!(version_cmp("1.0.0", "1.0.0").is_eq());
+    }
+
+    #[test]
+    fn normalizes_github_blob_update_urls() {
+        assert_eq!(
+            normalize_update_manifest_url(
+                "https://github.com/example/plugin/blob/main/update.json"
+            ),
+            "https://github.com/example/plugin/raw/refs/heads/main/update.json"
+        );
+        assert_eq!(
+            normalize_update_manifest_url(
+                "https://github.com/example/plugin/blob/release/meta/update.json"
+            ),
+            "https://github.com/example/plugin/raw/refs/heads/release/meta/update.json"
+        );
+    }
+
+    #[test]
+    fn leaves_non_github_blob_update_urls_unchanged() {
+        let url = "https://example.invalid/plugin/blob/main/update.json";
+        assert_eq!(normalize_update_manifest_url(url), url);
+        let url = "https://github.com/example/plugin/raw/refs/heads/main/update.json";
+        assert_eq!(normalize_update_manifest_url(url), url);
     }
 
     #[test]
