@@ -516,13 +516,13 @@ MD.Page {
                         z: 2
 
                         W.Tag {
-                            text: "v" + (pluginItem.modelData.version || "0.0.0")
-                        }
-                        W.Tag {
                             visible: root.updateTagVisible(pluginItem.modelData.updateInfo)
                             text: root.updateTagText(pluginItem.modelData.updateInfo)
                             bgColor: root.updateTagBgColor(pluginItem.modelData.updateInfo)
                             fgColor: root.updateTagFgColor(pluginItem.modelData.updateInfo)
+                        }
+                        W.Tag {
+                            text: "v" + (pluginItem.modelData.version || "0.0.0")
                         }
                     }
                     below: Flow {
