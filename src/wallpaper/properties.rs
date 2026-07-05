@@ -5,6 +5,7 @@ use crate::settings::ResolvedLayout;
 use serde::{Deserialize, Serialize};
 
 const SCHEME_COLOR_KEY: &str = "waywallen.scheme_color";
+const ENABLE_AUDIO_KEY: &str = "waywallen.enable_audio";
 const FILL_MODE_KEY: &str = "waywallen.fill_mode";
 const ROTATION_KEY: &str = "waywallen.rotation";
 const LOCATION_X_KEY: &str = "waywallen.location_x";
@@ -93,6 +94,13 @@ pub fn is_daemon_display_property_key(key: &str) -> bool {
     )
 }
 
+pub fn is_daemon_predefined_property_key(key: &str) -> bool {
+    matches!(
+        canonical_user_property_key(key),
+        SCHEME_COLOR_KEY | ENABLE_AUDIO_KEY
+    )
+}
+
 pub fn canonical_user_property_key(key: &str) -> &str {
     match key {
         LEGACY_SCHEME_COLOR_KEY => SCHEME_COLOR_KEY,
@@ -119,7 +127,9 @@ pub fn dedupe_predefined_schema(raw: &str) -> String {
             remapped.insert(canonical.to_string(), value);
         }
     }
-    remapped.retain(|key, _| !DAEMON_LAYOUT_SCHEMA_KEYS.contains(&key.as_str()));
+    remapped.retain(|key, _| {
+        is_daemon_predefined_property_key(key) || !DAEMON_LAYOUT_SCHEMA_KEYS.contains(&key.as_str())
+    });
     *map = remapped;
     if map.is_empty() {
         String::new()
@@ -322,6 +332,7 @@ mod tests {
     fn keeps_scheme_color_default_when_filtering_schema() {
         let raw = r#"{
             "waywallen.scheme_color": { "type": "color", "value": [0.1, 0.2, 0.3] },
+            "waywallen.enable_audio": { "type": "bool", "value": true },
             "ui_browse_properties_scheme_color": { "type": "color" },
             "schemecolor": { "type": "color", "value": [0.9, 0.8, 0.7] },
             "waywallen.fill_mode": { "type": "combo" },
@@ -331,6 +342,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&filtered).unwrap();
         let obj = value.as_object().unwrap();
         assert!(obj.contains_key("waywallen.scheme_color"));
+        assert!(obj.contains_key("waywallen.enable_audio"));
         assert!(!obj.contains_key("schemecolor"));
         assert!(!obj.contains_key("waywallen.fill_mode"));
         assert!(obj.contains_key("ui_browse_properties_scheme_color"));
@@ -340,6 +352,29 @@ mod tests {
                 .and_then(|v| v.as_object())
                 .and_then(|v| v.get("value")),
             Some(&serde_json::json!([0.1, 0.2, 0.3]))
+        );
+    }
+
+    #[test]
+    fn classifies_enable_audio_as_predefined_renderer_property() {
+        assert!(is_daemon_predefined_property_key("waywallen.enable_audio"));
+        assert!(!is_daemon_display_property_key("waywallen.enable_audio"));
+
+        let raw = r#"{
+            "waywallen.enable_audio": "false",
+            "waywallen.fill_mode": "centered"
+        }"#;
+        let (renderer, layout) = split_renderer_properties(Some(raw));
+        assert_eq!(layout.fillmode, Some(FillMode::Centered));
+        let renderer = renderer.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&renderer).unwrap();
+        assert_eq!(
+            value
+                .as_object()
+                .unwrap()
+                .get("waywallen.enable_audio")
+                .and_then(|v| v.as_str()),
+            Some("false")
         );
     }
 

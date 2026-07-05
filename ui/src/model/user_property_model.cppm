@@ -14,8 +14,9 @@ import rstd.cppstd;
 export namespace waywallen::model
 {
 
-// Wallpaper detail property list. Built-in rows are always present;
-// plugin-published user properties are appended from the schema.
+// Wallpaper detail property list. Built-in rows are derived from
+// daemon defaults and the source schema; plugin-published user
+// properties are appended from the schema.
 //
 // `schemaJson` is the renderer-published map<string,WPProperty>;
 // `overridesJson` is the DB column verbatim (object keyed by property

@@ -7,6 +7,11 @@ function M.properties()
             type = "color",
             value = {0.0, 0.0, 0.0, 1.0},
         },
+        ["waywallen.enable_audio"] = {
+            text = "Enable audio",
+            type = "bool",
+            value = true,
+        },
     }
 end
 

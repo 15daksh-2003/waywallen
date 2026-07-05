@@ -20,8 +20,11 @@ QString userPropertiesSection() { return QStringLiteral("User properties"); }
 QString builtinKind() { return QStringLiteral("property"); }
 QString userKind() { return QStringLiteral("user"); }
 QString schemeColorKey() { return QStringLiteral("waywallen.scheme_color"); }
+QString enableAudioKey() { return QStringLiteral("waywallen.enable_audio"); }
 
-bool isPredefinedKey(const QString& key) { return key == schemeColorKey(); }
+bool isPredefinedKey(const QString& key) {
+    return key == schemeColorKey() || key == enableAudioKey();
+}
 
 QString jsonValueToWireString(const QJsonValue& v) {
     switch (v.type()) {
@@ -244,6 +247,17 @@ void UserPropertyListModel::appendPredefinedEntries_(const QJsonObject& schema) 
     auto scheme =
         make(schemeColorKey(), std::move(scheme_label), QStringLiteral("color"), scheme_default);
     m_entries.append(std::move(scheme));
+
+    if (schema.contains(enableAudioKey())) {
+        const auto audio_schema = schema.value(enableAudioKey()).toObject();
+        auto       audio_label  = audio_schema.value(QStringLiteral("text")).toString();
+        if (audio_label.isEmpty()) audio_label = QStringLiteral("Enable audio");
+        auto audio_default = coerceDefaultWireString(audio_schema.value(QStringLiteral("value")),
+                                                     QStringLiteral("bool"));
+        auto audio =
+            make(enableAudioKey(), std::move(audio_label), QStringLiteral("bool"), audio_default);
+        m_entries.append(std::move(audio));
+    }
 }
 
 void UserPropertyListModel::setValue(const QString& key, const QString& value) {
