@@ -255,8 +255,7 @@ struct MenuState {
 }
 
 async fn snapshot_menu_state(app: &Arc<AppState>) -> MenuState {
-    // Read from settings, the canonical source for persisted menu state.
-    // Queue memory is kept in sync by control-plane updates.
+    // Settings owns persisted menu choices; router owns live lifecycle state.
     let g = app.settings.global();
     let lifecycle = app.router.manual_lifecycle_state().await;
     MenuState {

@@ -1076,7 +1076,7 @@ pub async fn queue_status(app: &Arc<AppState>) -> QueueStatus {
     }
 }
 
-/// Restore queue mode and rotation cadence from disk. Idempotent.
+/// Restore queue mode, rotation cadence, and manual audio state from disk. Idempotent.
 pub async fn run_restore(app: &Arc<AppState>) -> Result<()> {
     use crate::events::GlobalEvent;
 
@@ -1087,6 +1087,7 @@ pub async fn run_restore(app: &Arc<AppState>) -> Result<()> {
     if g.rotation_secs > 0 {
         app.rotation.set_interval(g.rotation_secs);
     }
+    app.router.set_manual_mute(g.manual_muted).await;
 
     app.events.publish(GlobalEvent::RestoreApplied(None));
     Ok(())
@@ -1217,18 +1218,27 @@ pub async fn toggle_pause_all(app: &Arc<AppState>) -> Result<bool> {
 
 pub async fn mute_all(app: &Arc<AppState>) -> Result<()> {
     app.router.set_manual_mute(true).await;
+    app.settings.update(|s| {
+        s.global.manual_muted = true;
+    });
     crate::tray::dbusmenu::notify_menu_changed(app).await;
     Ok(())
 }
 
 pub async fn unmute_all(app: &Arc<AppState>) -> Result<()> {
     app.router.set_manual_mute(false).await;
+    app.settings.update(|s| {
+        s.global.manual_muted = false;
+    });
     crate::tray::dbusmenu::notify_menu_changed(app).await;
     Ok(())
 }
 
 pub async fn toggle_mute_all(app: &Arc<AppState>) -> Result<bool> {
     let muted = app.router.toggle_manual_mute().await;
+    app.settings.update(|s| {
+        s.global.manual_muted = muted;
+    });
     crate::tray::dbusmenu::notify_menu_changed(app).await;
     Ok(muted)
 }

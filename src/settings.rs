@@ -161,6 +161,8 @@ pub struct GlobalSettings {
     pub rotation_secs: u32,
     /// Fade duration shared by mute and unmute control messages.
     pub audio_fade_ms: u32,
+    /// Manual global mute requested through daemon controls.
+    pub manual_muted: bool,
     /// Default layout used when a display has no override.
     /// Drives daemon-side projection.
     pub layout: LayoutDefaults,
@@ -208,6 +210,7 @@ impl Default for GlobalSettings {
             queue_mode: "sequential".to_string(),
             rotation_secs: 0,
             audio_fade_ms: DEFAULT_AUDIO_FADE_MS,
+            manual_muted: false,
             layout: LayoutDefaults::default(),
             auto_replay: None,
             wallpaper_filter: WallpaperFilterState::default(),
@@ -931,7 +934,19 @@ mod tests {
         let s: Settings = toml::from_str("").unwrap();
         assert!(s.global.last_wallpaper.is_none());
         assert_eq!(s.global.audio_fade_ms, DEFAULT_AUDIO_FADE_MS);
+        assert!(!s.global.manual_muted);
         assert!(s.plugins.is_empty());
+    }
+
+    #[test]
+    fn manual_muted_roundtrip() {
+        let src = r#"
+[global]
+manual_muted = true
+"#;
+        let s: Settings = toml::from_str(src).unwrap();
+        assert!(s.global.manual_muted);
+        assert!(toml::to_string(&s).unwrap().contains("manual_muted = true"));
     }
 
     #[test]

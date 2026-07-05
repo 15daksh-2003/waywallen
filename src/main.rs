@@ -633,7 +633,7 @@ async fn async_main() -> anyhow::Result<()> {
         );
     }
 
-    // Restore queue mode and rotation cadence from disk.
+    // Restore queue mode, rotation cadence, and manual audio state from disk.
     // Per-display wallpaper restoration is handled elsewhere.
     {
         let restore_state = state.clone();
