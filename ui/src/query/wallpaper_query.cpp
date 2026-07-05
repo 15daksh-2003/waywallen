@@ -298,16 +298,18 @@ void WallpaperGetQuery::reload() {
     setStatus(Status::Querying);
     auto backend = App::instance()->backend();
 
-    auto req   = proto::Request {};
-    auto inner = proto::WallpaperGetRequest {};
-    inner.setWallpaperId(m_wallpaper_id);
+    const auto wallpaper_id = m_wallpaper_id;
+    auto       req          = proto::Request {};
+    auto       inner        = proto::WallpaperGetRequest {};
+    inner.setWallpaperId(wallpaper_id);
     req.setWallpaperGet(std::move(inner));
 
     auto self = QWatcher { this };
-    spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
+    spawn([self, backend, req = std::move(req), wallpaper_id]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
         co_await asio::post(asio::bind_executor(QAsyncResult::get_executor(), use_task));
         if (! self) co_return;
+        if (self->m_wallpaper_id != wallpaper_id) co_return;
 
         self->inspect_set(result, [self](const proto::Response& rsp) {
             self->m_wallpaper = rsp.wallpaperGet().entry();

@@ -160,7 +160,6 @@ Item {
 
     W.WallpaperPropertySetQuery {
         id: setQuery
-        wallpaperId: root.wallpaperId
     }
 
     W.WallpaperLayoutSetQuery {
@@ -195,7 +194,16 @@ Item {
 
     QtObject {
         id: m_pending_writes
+        property string wallpaperId: ""
         property var entries: ({})
+
+        function restartFlush() {
+            wallpaperId = root.wallpaperId;
+            if (wallpaperId.length === 0)
+                return false;
+            m_flush_timer.restart();
+            return true;
+        }
     }
 
     Qml.Timer {
@@ -203,8 +211,10 @@ Item {
         interval: 200
         repeat: false
         onTriggered: {
+            const wallpaperId = m_pending_writes.wallpaperId;
             const e = m_pending_writes.entries;
             for (const k in e) {
+                setQuery.wallpaperId = wallpaperId;
                 setQuery.propertyKey = k;
                 setQuery.propertyValue = e[k];
                 setQuery.reload();
@@ -219,7 +229,8 @@ Item {
             const e = m_pending_writes.entries;
             e[key] = value;
             m_pending_writes.entries = e;
-            m_flush_timer.restart();
+            if (!m_pending_writes.restartFlush())
+                m_pending_writes.entries = {};
         }
     }
 
