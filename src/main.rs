@@ -44,8 +44,8 @@ pub struct AppState {
     pub plugins: Arc<tokio::sync::RwLock<Vec<plugin::renderer_registry::PluginPackageMeta>>>,
     pub inactive_system: Arc<tokio::sync::RwLock<Vec<String>>>,
     pub inactive_user: Arc<tokio::sync::RwLock<Vec<String>>>,
-    /// Plugin directories used by `PluginListRequest`.
-    pub plugin_roots: Arc<Vec<PathBuf>>,
+    /// Plugin scan roots used by `PluginListRequest`.
+    pub plugin_roots: Arc<Vec<plugin::renderer_registry::PluginRoot>>,
     /// The installed source plugins (types/labels/hints). The only
     /// scan-derived state outside the DB for the Add-Library UI.
     pub source_plugins: Arc<tokio::sync::RwLock<Vec<plugin::source_manager::SourcePluginInfo>>>,
@@ -226,9 +226,11 @@ async fn async_main() -> anyhow::Result<()> {
     let dbus_conn = dbus_iface::acquire_or_handoff(handoff_ui).await;
     log::info!("DBus name acquired: {}", dbus_iface::BUS_NAME);
 
-    let mut plugin_roots = plugin::renderer_registry::standard_plugin_dirs("plugins");
+    let mut plugin_roots = plugin::renderer_registry::standard_plugin_roots("plugins");
     for plugin_dir in &cli.plugin_dirs {
-        plugin_roots.push(plugin_dir.join("plugins"));
+        plugin_roots.push(plugin::renderer_registry::PluginRoot::system(
+            plugin_dir.join("plugins"),
+        ));
     }
     let mut plugin_scan = plugin::renderer_registry::scan_plugin_roots(&plugin_roots);
     // Installable-plugin (package) list for the UI's plugin-centric view.

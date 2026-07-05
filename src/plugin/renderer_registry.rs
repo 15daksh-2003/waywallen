@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::wallpaper::types::WallpaperType;
 
@@ -40,8 +40,7 @@ pub struct PluginMeta {
     /// Loaded during scanning from the required `files.txt`.
     #[serde(skip)]
     pub files: Vec<String>,
-    /// True when the plugin lives outside `$XDG_DATA_HOME`.
-    /// Covers bundled, system, and explicit `--plugin` roots.
+    /// True when the plugin was discovered from a system scan root.
     #[serde(skip)]
     pub system: bool,
 }
@@ -108,8 +107,30 @@ pub struct PluginPackageMeta {
     pub version: String,
     pub update: Option<String>,
     pub has_entry: bool,
-    /// Not installed under `$XDG_DATA_HOME` (bundled / system / explicit root).
+    /// Discovered from a system scan root.
     pub system: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginRoot {
+    pub dir: PathBuf,
+    pub system: bool,
+}
+
+impl PluginRoot {
+    pub fn system(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            dir: normalize_path(&dir.into()),
+            system: true,
+        }
+    }
+
+    pub fn user(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            dir: normalize_path(&dir.into()),
+            system: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -537,10 +558,10 @@ impl RendererRegistry {
 
 /// Scan a `plugins/` directory.
 /// Each immediate subdirectory with `plugin.toml` is one plugin.
-pub fn scan_plugins(dir: &Path) -> PluginScan {
+pub fn scan_plugins(dir: &Path, system: bool) -> PluginScan {
     let mut out = PluginScan::default();
-    let user_root = standard_plugin_dirs("plugins").into_iter().next_back();
-    let entries = match std::fs::read_dir(dir) {
+    let dir = normalize_path(dir);
+    let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         Err(e) => {
             log::warn!("read plugins dir {}: {e}", dir.display());
@@ -548,7 +569,7 @@ pub fn scan_plugins(dir: &Path) -> PluginScan {
         }
     };
     for entry in entries.flatten() {
-        let plugin_dir = entry.path();
+        let plugin_dir = normalize_path(&entry.path());
         if !plugin_dir.is_dir() {
             continue;
         }
@@ -568,7 +589,7 @@ pub fn scan_plugins(dir: &Path) -> PluginScan {
         };
 
         let mut meta = manifest.plugin;
-        meta.system = !is_under(&plugin_dir, user_root.as_deref());
+        meta.system = system;
 
         // Every plugin must ship a newline-separated `files.txt` manifest.
         let files_path = plugin_dir.join(PLUGIN_FILES_MANIFEST);
@@ -646,30 +667,18 @@ pub fn scan_plugins(dir: &Path) -> PluginScan {
     out
 }
 
-/// Whether `path` lives under `root` (the user XDG plugins dir). Compares
-/// canonicalized paths so symlinked install prefixes still match; falls
-fn is_under(path: &Path, root: Option<&Path>) -> bool {
-    let Some(root) = root else { return false };
-    match (path.canonicalize(), root.canonicalize()) {
-        (Ok(p), Ok(r)) => p.starts_with(r),
-        _ => path.starts_with(root),
-    }
-}
-
 /// Join `p` against `base` when relative; pass through when absolute.
 fn resolve_rel(base: &Path, p: PathBuf) -> PathBuf {
-    if p.is_relative() {
-        base.join(p)
-    } else {
-        p
-    }
+    normalize_path(&if p.is_relative() { base.join(p) } else { p })
 }
 
-pub fn scan_plugin_roots(dirs: &[PathBuf]) -> PluginScan {
+pub fn scan_plugin_roots(roots: &[PluginRoot]) -> PluginScan {
     let mut scan = PluginScan::default();
-    for dir in dirs {
-        if dir.is_dir() {
-            scan.merge(scan_plugins(dir));
+    for system in [true, false] {
+        for root in roots.iter().filter(|root| root.system == system) {
+            if root.dir.is_dir() {
+                scan.merge(scan_plugins(&root.dir, root.system));
+            }
         }
     }
     select_active_plugins(scan)
@@ -758,16 +767,18 @@ fn parse_version(v: &str) -> Option<semver::Version> {
     semver::Version::parse(v.trim().trim_start_matches(['v', 'V'])).ok()
 }
 
-/// Return the two canonical plugin directories (bundled + XDG) for a
-/// given subdirectory name (e.g. `"plugins"` or `"displays"`). Returned
-pub fn standard_plugin_dirs(subdir: &str) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
+/// Return the standard scan roots (bundled + XDG) for a given subdirectory
+/// name (e.g. `"plugins"` or `"displays"`).
+pub fn standard_plugin_roots(subdir: &str) -> Vec<PluginRoot> {
+    let mut roots = Vec::new();
 
     // Bundled: <exec>/../share/waywallen/<subdir>/
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             if let Some(prefix) = parent.parent() {
-                dirs.push(prefix.join("share/waywallen").join(subdir));
+                roots.push(PluginRoot::system(
+                    prefix.join("share/waywallen").join(subdir),
+                ));
             }
         }
     }
@@ -779,9 +790,41 @@ pub fn standard_plugin_dirs(subdir: &str) -> Vec<PathBuf> {
             let home = std::env::var_os("HOME").unwrap_or_default();
             PathBuf::from(home).join(".local/share")
         });
-    dirs.push(xdg.join("waywallen").join(subdir));
+    roots.push(PluginRoot::user(xdg.join("waywallen").join(subdir)));
 
-    dirs
+    roots
+}
+
+pub fn standard_plugin_dirs(subdir: &str) -> Vec<PathBuf> {
+    standard_plugin_roots(subdir)
+        .into_iter()
+        .map(|root| root.dir)
+        .collect()
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(part) => out.push(part),
+            Component::ParentDir => {
+                let last = out.components().next_back();
+                if matches!(last, Some(Component::Normal(_))) {
+                    out.pop();
+                } else if !matches!(last, Some(Component::RootDir | Component::Prefix(_))) {
+                    out.push("..");
+                }
+            }
+        }
+    }
+    if out.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        out
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -790,6 +833,27 @@ pub fn standard_plugin_dirs(subdir: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 mod schema_tests {
     use super::*;
+
+    fn write_test_plugin(plugins_dir: &Path, id: &str) {
+        let plugin_dir = plugins_dir.join(id);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.toml"),
+            format!(
+                r#"[plugin]
+id = "{id}"
+name = "{id}"
+version = "1.0.0"
+
+[renderers.test]
+bin = "../bin/renderer"
+types = ["image"]
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(plugin_dir.join("files.txt"), "plugin.toml\nfiles.txt\n").unwrap();
+    }
 
     fn plugin_meta(id: &str, version: &str, system: bool) -> PluginMeta {
         PluginMeta {
@@ -856,6 +920,43 @@ mod schema_tests {
         );
         let r = &m.renderers["wescene-renderer"];
         assert_eq!(r.events, vec!["pointer".to_string(), "mpris".to_string()]);
+    }
+
+    #[test]
+    fn scan_plugin_roots_scans_system_before_user() {
+        let tmp = tempfile::tempdir().unwrap();
+        let system_plugins = tmp.path().join("system/plugins");
+        let user_plugins = tmp.path().join("user/plugins");
+        write_test_plugin(&system_plugins, "org.test.system");
+        write_test_plugin(&user_plugins, "org.test.user");
+
+        let scan = scan_plugin_roots(&[
+            PluginRoot::user(user_plugins),
+            PluginRoot::system(system_plugins),
+        ]);
+
+        let ids: Vec<_> = scan.plugins.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["org.test.system", "org.test.user"]);
+    }
+
+    #[test]
+    fn plugin_root_owner_and_paths_are_lexical() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("external/plugins");
+        write_test_plugin(&plugins, "org.test.plugin");
+
+        let root = PluginRoot::user(tmp.path().join("external/../external/plugins"));
+        assert_eq!(root.dir, plugins);
+
+        let scan = scan_plugin_roots(&[root]);
+        assert_eq!(scan.plugins.len(), 1);
+        assert!(!scan.plugins[0].system);
+        assert_eq!(scan.renderers.len(), 1);
+        assert!(!scan.renderers[0].plugin_system);
+        assert_eq!(
+            scan.renderers[0].bin,
+            tmp.path().join("external/plugins/bin/renderer")
+        );
     }
 
     #[test]
