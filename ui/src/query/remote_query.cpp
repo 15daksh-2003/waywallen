@@ -170,14 +170,13 @@ void RemoteSearchQuery::fetchPage(quint32 page, bool append) {
             auto t = self->model();
             if (! t) return;
             const bool more = sr.hasMore() && ! rows.isEmpty();
-            if (append)
-                t->append(rows);
-            else
-                t->reset(std::move(rows));
             self->setOffset(static_cast<qint32>(page - 1));
             self->setNoMore(! more);
             self->m_error = sr.error();
-            t->setHasMore(more);
+            if (append)
+                t->append(rows, more);
+            else
+                t->reset(std::move(rows), more);
             Q_EMIT self->stateChanged();
         });
         co_return;

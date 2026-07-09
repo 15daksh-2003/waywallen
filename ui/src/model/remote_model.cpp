@@ -59,20 +59,29 @@ void RemoteListModel::setHasMore(bool v) {
     }
 }
 
-void RemoteListModel::reset(QList<RemoteRow> rows) {
+void RemoteListModel::reset(QList<RemoteRow> rows, bool hasMore) {
+    const bool has_more_changed = m_has_more != hasMore;
     beginResetModel();
-    m_rows = std::move(rows);
+    m_rows     = std::move(rows);
+    m_has_more = hasMore;
     endResetModel();
     Q_EMIT countChanged();
+    if (has_more_changed) Q_EMIT hasMoreChanged(m_has_more);
 }
 
-void RemoteListModel::append(const QList<RemoteRow>& rows) {
-    if (rows.isEmpty()) return;
-    const int first = static_cast<int>(m_rows.size());
+void RemoteListModel::append(const QList<RemoteRow>& rows, bool hasMore) {
+    if (rows.isEmpty()) {
+        setHasMore(hasMore);
+        return;
+    }
+    const bool has_more_changed = m_has_more != hasMore;
+    const int  first            = static_cast<int>(m_rows.size());
     beginInsertRows(QModelIndex(), first, first + static_cast<int>(rows.size()) - 1);
     m_rows.append(rows);
+    m_has_more = hasMore;
     endInsertRows();
     Q_EMIT countChanged();
+    if (has_more_changed) Q_EMIT hasMoreChanged(m_has_more);
 }
 
 void RemoteListModel::setInstalled(const QString& sourceId, const QString& id, bool installed) {

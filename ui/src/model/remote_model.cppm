@@ -53,8 +53,8 @@ public:
     auto hasMore() const -> bool;
     void setHasMore(bool);
 
-    void             reset(QList<RemoteRow> rows);
-    void             append(const QList<RemoteRow>& rows);
+    void             reset(QList<RemoteRow> rows, bool hasMore);
+    void             append(const QList<RemoteRow>& rows, bool hasMore);
     Q_INVOKABLE void setInstalled(const QString& sourceId, const QString& id, bool installed);
 
     Q_INVOKABLE QVariantMap get(int row) const;

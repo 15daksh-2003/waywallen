@@ -432,7 +432,6 @@ MD.Page {
                         bottomMargin: 8
                         leftMargin: 8
                         rightMargin: 8
-                        visible: count > 0
 
                         readonly property real _availableWidth: Math.max(0, width - leftMargin - rightMargin)
                         readonly property int _cols: Math.max(1, Math.floor(_availableWidth / discoverTweakState.itemSize))
