@@ -1028,6 +1028,10 @@ message GlobalSettings {
 
   // Fade duration used for both mute and unmute control messages.
   uint32 audio_fade_ms = 17;
+
+  // Negative form preserves the default enabled behavior for older
+  // clients that never send this field.
+  bool disable_plugin_update_notifications = 18;
 }
 
 enum AutoAction {

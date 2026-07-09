@@ -93,6 +93,20 @@ pub fn default_info(pkg: &PluginPackageMeta) -> PluginUpdateInfo {
     }
 }
 
+pub fn became_available(previous: Option<&PluginUpdateInfo>, current: &PluginUpdateInfo) -> bool {
+    if current.state != PluginUpdateState::Available {
+        return false;
+    }
+    !matches!(
+        previous,
+        Some(prev)
+            if prev.state == PluginUpdateState::Available
+                && prev.latest_version == current.latest_version
+                && prev.zip_url == current.zip_url
+                && prev.sha256 == current.sha256
+    )
+}
+
 pub async fn snapshot_for_package(
     store: &PluginUpdateStore,
     pkg: &PluginPackageMeta,
@@ -494,5 +508,30 @@ mod tests {
 
         check_packages(&store, vec![a], true).await;
         assert!(!store.read().await.contains_key("org.b"));
+    }
+
+    #[test]
+    fn became_available_only_for_new_available_state() {
+        let current = PluginUpdateInfo {
+            plugin_id: "org.test".into(),
+            state: PluginUpdateState::Available,
+            latest_version: "2.0.0".into(),
+            zip_url: "https://example.invalid/plugin.zip".into(),
+            sha256: "abc".into(),
+            error: String::new(),
+            checked_at_ms: 1,
+        };
+        assert!(became_available(None, &current));
+
+        let mut previous = current.clone();
+        previous.checked_at_ms = 0;
+        assert!(!became_available(Some(&previous), &current));
+
+        previous.latest_version = "1.9.0".into();
+        assert!(became_available(Some(&previous), &current));
+
+        let mut failed = current.clone();
+        failed.state = PluginUpdateState::Failed;
+        assert!(!became_available(None, &failed));
     }
 }

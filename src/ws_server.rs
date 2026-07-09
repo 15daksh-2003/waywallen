@@ -681,6 +681,7 @@ fn global_to_pb(g: &crate::settings::GlobalSettings) -> pb::GlobalSettings {
         wallpaper_skip_types: g.wallpaper_skip_types.clone(),
         wallpaper_filter_tags: g.wallpaper_filter_tags.clone(),
         wallpaper_skip_content_ratings: g.wallpaper_skip_content_ratings.clone(),
+        disable_plugin_update_notifications: !g.plugin_update_notifications,
     }
 }
 
@@ -2532,6 +2533,7 @@ async fn dispatch_inner(
                     s.global.rotation_secs = g.rotation_secs;
                     s.global.audio_fade_ms =
                         g.audio_fade_ms.min(crate::settings::MAX_AUDIO_FADE_MS);
+                    s.global.plugin_update_notifications = !g.disable_plugin_update_notifications;
                 }
                 s.plugins = new_plugins.clone();
             });

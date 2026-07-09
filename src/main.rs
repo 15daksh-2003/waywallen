@@ -17,6 +17,7 @@ mod gpu;
 mod ipc;
 mod model;
 mod mpris;
+mod notifications;
 pub mod playlist;
 mod plugin;
 mod probe;

@@ -178,7 +178,8 @@ MD.Page {
             autoReplay: root._defaultAutoReplay(),
             queueMode: "sequential",
             rotationSecs: 0,
-            audioFadeMs: 500
+            audioFadeMs: 500,
+            pluginUpdateNotifications: true
         };
     }
 
@@ -204,7 +205,8 @@ MD.Page {
             autoReplay: root._normalizedAutoReplay(g.autoReplay || ({})),
             queueMode: g.queueMode ?? "sequential",
             rotationSecs: Number(g.rotationSecs ?? 0),
-            audioFadeMs: Number(g.audioFadeMs ?? 500)
+            audioFadeMs: Number(g.audioFadeMs ?? 500),
+            pluginUpdateNotifications: Boolean(g.pluginUpdateNotifications ?? true)
         });
     }
 
@@ -266,7 +268,7 @@ MD.Page {
 
             SettingItem {
                 first: true
-                last: true
+                last: false
 
                 RowLayout {
                     Layout.fillWidth: true
@@ -291,6 +293,33 @@ MD.Page {
                         id: m_sidebar_auto_expand
                         checked: W.Global.sidebarAutoExpand
                         onToggled: W.Global.sidebarAutoExpand = checked
+                    }
+                }
+            }
+
+            SettingItem {
+                first: false
+                last: true
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Plugin update notifications")
+                    }
+
+                    MD.Switch {
+                        id: m_plugin_update_notifications
+                        onToggled: root._mut(g => {
+                            g.pluginUpdateNotifications = checked;
+                        })
+                    }
+                    Binding {
+                        target: m_plugin_update_notifications
+                        property: "checked"
+                        value: Boolean(root._currentGlobal()?.pluginUpdateNotifications ?? true)
                     }
                 }
             }

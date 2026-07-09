@@ -198,6 +198,74 @@ pub async fn plugin_update_snapshots(
     out
 }
 
+async fn notify_new_plugin_updates(
+    app: &Arc<AppState>,
+    previous: &HashMap<String, PluginUpdateInfo>,
+    updates: &[PluginUpdateInfo],
+) {
+    if !app.settings.global().plugin_update_notifications {
+        return;
+    }
+
+    let available = updates
+        .iter()
+        .filter(|info| crate::plugin::update::became_available(previous.get(&info.plugin_id), info))
+        .collect::<Vec<_>>();
+    if available.is_empty() {
+        return;
+    }
+
+    let plugin_names = app
+        .plugins
+        .read()
+        .await
+        .iter()
+        .map(|pkg| (pkg.id.clone(), pkg.name.clone()))
+        .collect::<HashMap<_, _>>();
+    let (summary, body) = plugin_update_notification_text(&available, &plugin_names);
+    if let Err(e) = crate::notifications::notify(&summary, &body).await {
+        log::warn!("plugin update notification failed: {e}");
+    }
+}
+
+fn plugin_update_notification_text(
+    updates: &[&PluginUpdateInfo],
+    plugin_names: &HashMap<String, String>,
+) -> (String, String) {
+    if let [info] = updates {
+        return (
+            "Plugin update available".into(),
+            format!("{} is available.", plugin_update_label(info, plugin_names)),
+        );
+    }
+
+    let mut labels = updates
+        .iter()
+        .take(3)
+        .map(|info| plugin_update_label(info, plugin_names))
+        .collect::<Vec<_>>();
+    if updates.len() > labels.len() {
+        let remaining = updates.len() - labels.len();
+        labels.push(format!("{remaining} more"));
+    }
+    (
+        format!("{} plugin updates available", updates.len()),
+        format!("Available: {}.", labels.join(", ")),
+    )
+}
+
+fn plugin_update_label(info: &PluginUpdateInfo, plugin_names: &HashMap<String, String>) -> String {
+    let name = plugin_names
+        .get(&info.plugin_id)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&info.plugin_id);
+    if info.latest_version.is_empty() {
+        name.clone()
+    } else {
+        format!("{name} {}", info.latest_version)
+    }
+}
+
 pub fn plugin_update_check_query_id(plugin_id: Option<&str>) -> String {
     match plugin_id.filter(|id| !id.is_empty()) {
         Some(plugin_id) => format!("plugin/update-check/{plugin_id}"),
@@ -451,7 +519,9 @@ pub async fn run_plugin_update_checker(
     }
 
     loop {
-        let _ = check_plugin_updates(&app, None).await;
+        let previous = app.plugin_updates.read().await.clone();
+        let updates = check_plugin_updates(&app, None).await;
+        notify_new_plugin_updates(&app, &previous, &updates).await;
 
         let wait = tokio::time::sleep(Duration::from_secs(30 * 60));
         tokio::pin!(wait);

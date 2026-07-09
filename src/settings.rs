@@ -201,6 +201,8 @@ pub struct GlobalSettings {
 
     #[serde(default)]
     pub auto_attach_playlist_id: Option<i64>,
+
+    pub plugin_update_notifications: bool,
 }
 
 impl Default for GlobalSettings {
@@ -219,6 +221,7 @@ impl Default for GlobalSettings {
             wallpaper_filter_tags: Vec::new(),
             wallpaper_skip_content_ratings: Vec::new(),
             auto_attach_playlist_id: None,
+            plugin_update_notifications: true,
         }
     }
 }
@@ -935,6 +938,7 @@ mod tests {
         assert!(s.global.last_wallpaper.is_none());
         assert_eq!(s.global.audio_fade_ms, DEFAULT_AUDIO_FADE_MS);
         assert!(!s.global.manual_muted);
+        assert!(s.global.plugin_update_notifications);
         assert!(s.plugins.is_empty());
     }
 
