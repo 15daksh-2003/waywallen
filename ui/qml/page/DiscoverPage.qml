@@ -469,12 +469,6 @@ MD.Page {
                                 }
                             }
                         }
-
-                        onContentYChanged: {
-                            if (searchQuery.hasMore && !searchQuery.querying
-                                && contentY + height >= contentHeight - cellHeight * 2)
-                                searchQuery.loadMore();
-                        }
                     }
 
                     ColumnLayout {

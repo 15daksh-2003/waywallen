@@ -40,6 +40,25 @@ QHash<int, QByteArray> RemoteListModel::roleNames() const {
     };
 }
 
+bool RemoteListModel::canFetchMore(const QModelIndex& parent) const {
+    return ! parent.isValid() && m_has_more;
+}
+
+void RemoteListModel::fetchMore(const QModelIndex& parent) {
+    if (parent.isValid() || ! m_has_more) return;
+    setHasMore(false);
+    Q_EMIT reqFetchMore(rowCount());
+}
+
+auto RemoteListModel::hasMore() const -> bool { return m_has_more; }
+
+void RemoteListModel::setHasMore(bool v) {
+    if (m_has_more != v) {
+        m_has_more = v;
+        Q_EMIT hasMoreChanged(v);
+    }
+}
+
 void RemoteListModel::reset(QList<RemoteRow> rows) {
     beginResetModel();
     m_rows = std::move(rows);

@@ -37,8 +37,8 @@ private:
     QString      m_default_source_id;
 };
 
-export class RemoteSearchQuery : public Query,
-                                 public QueryExtra<control::v1::Response, RemoteSearchQuery> {
+export class RemoteSearchQuery : public QueryList,
+                                 public QueryExtra<model::RemoteListModel, RemoteSearchQuery> {
     Q_OBJECT
     QML_ELEMENT
 
@@ -71,6 +71,7 @@ public:
 
     void             reload() override;
     Q_INVOKABLE void loadMore();
+    Q_SLOT void      fetchMore(qint32) override;
 
     Q_SIGNAL void sourceIdChanged();
     Q_SIGNAL void queryChanged();
@@ -81,14 +82,11 @@ public:
 private:
     void fetchPage(quint32 page, bool append);
 
-    QString                 m_source_id;
-    QString                 m_query;
-    QString                 m_sort_key;
-    QStringList             m_tags;
-    model::RemoteListModel* m_model;
-    bool                    m_has_more { false };
-    QString                 m_error;
-    quint32                 m_page { 1 };
+    QString     m_source_id;
+    QString     m_query;
+    QString     m_sort_key;
+    QStringList m_tags;
+    QString     m_error;
 };
 
 export class RemoteDetailsQuery : public Query,

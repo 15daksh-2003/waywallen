@@ -27,6 +27,7 @@ export class RemoteListModel : public QAbstractListModel {
     QML_ANONYMOUS
 
     Q_PROPERTY(int count READ count NOTIFY countChanged FINAL)
+    Q_PROPERTY(bool hasMore READ hasMore NOTIFY hasMoreChanged FINAL)
 
 public:
     enum Role
@@ -45,8 +46,12 @@ public:
     int                    rowCount(const QModelIndex& parent = QModelIndex()) const override;
     QVariant               data(const QModelIndex& index, int role) const override;
     QHash<int, QByteArray> roleNames() const override;
+    bool                   canFetchMore(const QModelIndex& parent = QModelIndex()) const override;
+    void                   fetchMore(const QModelIndex& parent = QModelIndex()) override;
 
     auto count() const -> int { return static_cast<int>(m_rows.size()); }
+    auto hasMore() const -> bool;
+    void setHasMore(bool);
 
     void             reset(QList<RemoteRow> rows);
     void             append(const QList<RemoteRow>& rows);
@@ -55,9 +60,12 @@ public:
     Q_INVOKABLE QVariantMap get(int row) const;
 
     Q_SIGNAL void countChanged();
+    Q_SIGNAL void hasMoreChanged(bool);
+    Q_SIGNAL void reqFetchMore(qint32);
 
 private:
     QList<RemoteRow> m_rows;
+    bool             m_has_more { false };
 };
 
 } // namespace waywallen::model

@@ -68,8 +68,7 @@ void RemoteAvailabilityQuery::reload() {
     });
 }
 
-RemoteSearchQuery::RemoteSearchQuery(QObject* parent)
-    : Query(parent), m_model(new model::RemoteListModel(this)) {
+RemoteSearchQuery::RemoteSearchQuery(QObject* parent): QueryList(parent) {
     connect_requet_reload(&RemoteSearchQuery::sourceIdChanged, this);
     connect_requet_reload(&RemoteSearchQuery::queryChanged, this);
     connect_requet_reload(&RemoteSearchQuery::sortKeyChanged, this);
@@ -108,21 +107,33 @@ void RemoteSearchQuery::setTags(const QStringList& v) {
     }
 }
 
-auto RemoteSearchQuery::model() const -> model::RemoteListModel* { return m_model; }
-auto RemoteSearchQuery::hasMore() const -> bool { return m_has_more; }
+auto RemoteSearchQuery::model() const -> model::RemoteListModel* { return tdata(); }
+auto RemoteSearchQuery::hasMore() const -> bool {
+    const auto t = model();
+    return t && t->hasMore();
+}
 auto RemoteSearchQuery::errorText() const -> const QString& { return m_error; }
 
 void RemoteSearchQuery::reload() {
-    m_page = 1;
+    setOffset(0);
+    setNoMore(false);
     fetchPage(1, false);
 }
 
 void RemoteSearchQuery::loadMore() {
-    if (! m_has_more || querying()) return;
-    fetchPage(m_page + 1, true);
+    if (noMore() || querying()) return;
+    fetchPage(static_cast<quint32>(offset() + 2), true);
+}
+
+void RemoteSearchQuery::fetchMore(qint32) {
+    if (noMore()) return;
+    fetchPage(static_cast<quint32>(offset() + 2), true);
 }
 
 void RemoteSearchQuery::fetchPage(quint32 page, bool append) {
+    auto t = model();
+    if (! t) return;
+    t->setHasMore(false);
     setStatus(Status::Querying);
     auto backend = App::instance()->backend();
 
@@ -156,13 +167,17 @@ void RemoteSearchQuery::fetchPage(quint32 page, bool append) {
                     it.installed(),
                 });
             }
+            auto t = self->model();
+            if (! t) return;
+            const bool more = sr.hasMore() && ! rows.isEmpty();
             if (append)
-                self->m_model->append(rows);
+                t->append(rows);
             else
-                self->m_model->reset(std::move(rows));
-            self->m_page     = page;
-            self->m_has_more = sr.hasMore();
-            self->m_error    = sr.error();
+                t->reset(std::move(rows));
+            self->setOffset(static_cast<qint32>(page - 1));
+            self->setNoMore(! more);
+            self->m_error = sr.error();
+            t->setHasMore(more);
             Q_EMIT self->stateChanged();
         });
         co_return;
