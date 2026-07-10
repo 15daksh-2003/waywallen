@@ -81,6 +81,8 @@ message Request {
     PluginInspectRequest      plugin_inspect = 62;
     PluginUpdateCheckRequest  plugin_update_check = 63;
     PluginUpdateInstallRequest plugin_update_install = 64;
+    AutostartGetRequest       autostart_get = 65;
+    AutostartSetRequest       autostart_set = 66;
   }
 }
 
@@ -149,6 +151,8 @@ message Response {
     PluginInspectResponse      plugin_inspect = 62;
     PluginUpdateCheckResponse  plugin_update_check = 63;
     PluginUpdateInstallResponse plugin_update_install = 64;
+    AutostartGetResponse       autostart_get = 65;
+    AutostartSetResponse       autostart_set = 66;
   }
 }
 
@@ -1083,6 +1087,20 @@ message SettingsSetRequest {
 message SettingsChanged {
   GlobalSettings global = 1;
   map<string, PluginSettings> plugins = 2;
+}
+
+// Flatpak-only login startup integration through
+// org.freedesktop.portal.Background.
+message AutostartGetRequest {}
+message AutostartGetResponse {
+  bool enabled = 1;
+}
+
+message AutostartSetRequest {
+  bool enabled = 1;
+}
+message AutostartSetResponse {
+  bool enabled = 1;
 }
 
 // ---------------------------------------------------------------------------

@@ -133,8 +133,8 @@ pub enum Error {
     #[error("wallpaper type '{0}' not supported by this apply path")]
     WallpaperTypeNotSupported(String),
 
-    /// `org.freedesktop.portal.Desktop` Wallpaper call failed (bus
-    /// unavailable, no portal backend, user cancelled the request).
+    /// An `org.freedesktop.portal.Desktop` request failed (bus unavailable,
+    /// no portal backend, user cancellation, or an invalid response).
     #[error("portal call failed: {0}")]
     PortalCallFailed(String),
 

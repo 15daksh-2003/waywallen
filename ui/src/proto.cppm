@@ -128,6 +128,10 @@ using proto::LibraryRemoveRequest;
 using proto::LibrarySnapshot;
 
 using proto::AutoReplayPolicy;
+using proto::AutostartGetRequest;
+using proto::AutostartGetResponse;
+using proto::AutostartSetRequest;
+using proto::AutostartSetResponse;
 using proto::GlobalSettings;
 using proto::LayoutPrefs;
 using proto::PluginSettings;

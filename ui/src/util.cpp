@@ -55,6 +55,11 @@ bool Util::supportsDisplayRename() const {
     }
 }
 
+bool Util::isFlatpak() const {
+    static const bool result = ! qgetenv("FLATPAK_ID").isEmpty();
+    return result;
+}
+
 // --- BBCode → Qt StyledText HTML subset --------------------------------
 //
 // All regexes are static QRegularExpression so they compile once. PCRE

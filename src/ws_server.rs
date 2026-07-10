@@ -2283,6 +2283,17 @@ async fn dispatch_inner(
             })
         }
 
+        Req::AutostartGet(_) => Res::AutostartGet(pb::AutostartGetResponse {
+            enabled: state.autostart.enabled(&state.settings)?,
+        }),
+
+        Req::AutostartSet(r) => Res::AutostartSet(pb::AutostartSetResponse {
+            enabled: state
+                .autostart
+                .set_enabled(&state.settings, r.enabled)
+                .await?,
+        }),
+
         Req::SettingsGet(_) => {
             let snap = state.settings.snapshot();
             Res::SettingsGet(pb::SettingsGetResponse {

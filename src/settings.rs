@@ -205,6 +205,9 @@ pub struct GlobalSettings {
     pub plugin_update_notifications: bool,
 
     pub duplicate_renderers_for_same_wallpaper: bool,
+
+    /// Last autostart state successfully accepted by the Flatpak portal.
+    pub autostart_enabled: bool,
 }
 
 impl Default for GlobalSettings {
@@ -225,6 +228,7 @@ impl Default for GlobalSettings {
             auto_attach_playlist_id: None,
             plugin_update_notifications: true,
             duplicate_renderers_for_same_wallpaper: false,
+            autostart_enabled: false,
         }
     }
 }
@@ -943,7 +947,21 @@ mod tests {
         assert!(!s.global.manual_muted);
         assert!(s.global.plugin_update_notifications);
         assert!(!s.global.duplicate_renderers_for_same_wallpaper);
+        assert!(!s.global.autostart_enabled);
         assert!(s.plugins.is_empty());
+    }
+
+    #[test]
+    fn autostart_setting_roundtrip() {
+        let src = r#"
+[global]
+autostart_enabled = true
+"#;
+        let s: Settings = toml::from_str(src).unwrap();
+        assert!(s.global.autostart_enabled);
+        assert!(toml::to_string(&s)
+            .unwrap()
+            .contains("autostart_enabled = true"));
     }
 
     #[test]

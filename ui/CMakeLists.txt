@@ -83,6 +83,7 @@ set(SOURCES_NO_MOC
   src/query/gpu_query.cpp
   src/query/library_query.cpp
   src/query/settings_query.cpp
+  src/query/autostart_query.cpp
   src/query/remote_query.cpp
   src/query/playlist_query.cpp
   src/thumb/service.cpp
@@ -121,6 +122,7 @@ set(MOC_SOURCE_FILES
   src/query/gpu_query.cppm
   src/query/library_query.cppm
   src/query/settings_query.cppm
+  src/query/autostart_query.cppm
   src/query/remote_query.cppm
   src/query/playlist_query.cppm
   src/thumb/service.cppm

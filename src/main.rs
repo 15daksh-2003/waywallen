@@ -5,6 +5,7 @@ use anyhow::Context;
 
 use probe::media::{AvFormatProbe, MediaProbe};
 
+mod autostart;
 mod control;
 mod control_proto;
 mod dbus_iface;
@@ -53,6 +54,7 @@ pub struct AppState {
     /// scan-derived state outside the DB for the Add-Library UI.
     pub source_plugins: Arc<tokio::sync::RwLock<Vec<plugin::source_manager::SourcePluginInfo>>>,
     pub plugin_mutation: tokio::sync::Mutex<()>,
+    pub autostart: autostart::AutostartService,
     pub router: Arc<routing::Router>,
     pub display_backend_status: std::sync::RwLock<display::spawner::DisplayBackendStatus>,
     pub settings: Arc<settings::SettingsStore>,
@@ -344,6 +346,7 @@ async fn async_main() -> anyhow::Result<()> {
         plugin_roots,
         source_plugins,
         plugin_mutation: tokio::sync::Mutex::new(()),
+        autostart: autostart::AutostartService::default(),
         router: router.clone(),
         display_backend_status: std::sync::RwLock::new(
             display::spawner::DisplayBackendStatus::default(),

@@ -78,10 +78,30 @@ MD.Page {
         }
     }
 
+    W.AutostartGetQuery {
+        id: autostartGetQ
+    }
+
+    W.AutostartSetQuery {
+        id: autostartSetQ
+        onStatusChanged: {
+            if (status === 2) {
+                autostartGetQ.reload();
+            } else if (status === 3) {
+                const message = error && error.length > 0
+                    ? error
+                    : qsTr("Failed to update login startup");
+                W.Action.toast(message, 6000, 1, null);
+            }
+        }
+    }
+
     Connections {
         target: W.Notify
         function onDaemonReady() {
             getQ.reload();
+            if (W.Util.isFlatpak)
+                autostartGetQ.reload();
         }
         function onSettingsChanged() {
             getQ.reload();
@@ -89,8 +109,11 @@ MD.Page {
     }
 
     Component.onCompleted: {
-        if (W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready)
+        if (W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready) {
             getQ.reload();
+            if (W.Util.isFlatpak)
+                autostartGetQ.reload();
+        }
     }
 
     // Same pattern as WallpaperPage._persistGlobalChange but routed
@@ -295,6 +318,38 @@ MD.Page {
                         id: m_sidebar_auto_expand
                         checked: W.Global.sidebarAutoExpand
                         onToggled: W.Global.sidebarAutoExpand = checked
+                    }
+                }
+            }
+
+            SettingItem {
+                first: false
+                last: false
+                visible: W.Util.isFlatpak
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Start at login")
+                    }
+
+                    MD.Switch {
+                        id: m_autostart
+                        enabled: !autostartGetQ.querying && !autostartSetQ.querying
+                        onClicked: {
+                            autostartSetQ.enabled = checked;
+                            autostartSetQ.reload();
+                        }
+                    }
+                    Binding {
+                        target: m_autostart
+                        property: "checked"
+                        value: autostartSetQ.querying || autostartSetQ.status === 2
+                            ? autostartSetQ.enabled
+                            : autostartGetQ.enabled
                     }
                 }
             }
