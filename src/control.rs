@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
+use ashpd::desktop::wallpaper::{SetOn, WallpaperRequest};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
@@ -807,75 +808,26 @@ async fn apply_via_portal_inner(app: &Arc<AppState>, id: &str) -> Result<PortalA
             entry.resource
         )));
     }
-    let uri = file_uri_from_abs_path(&entry.resource);
-
-    let conn = zbus::Connection::session()
+    let uri = ashpd::url::Url::from_file_path(&entry.resource).map_err(|()| {
+        Error::InvalidArgument(format!(
+            "portal apply: invalid absolute path '{}'",
+            entry.resource
+        ))
+    })?;
+    let request = WallpaperRequest::default()
+        .set_on(SetOn::Background)
+        .show_preview(false)
+        .build_uri(&uri)
         .await
-        .map_err(|e| Error::PortalCallFailed(format!("session bus: {e}")))?;
-
-    let mut options: std::collections::HashMap<&str, zbus::zvariant::Value<'_>> =
-        std::collections::HashMap::new();
-    options.insert("set-on", zbus::zvariant::Value::from("background"));
-    options.insert("show-preview", zbus::zvariant::Value::from(false));
-
-    // The portal returns a Request object immediately; its async result
-    // belongs to the desktop environment.
-    let parent_window: &str = "";
-    let _request_path: zbus::zvariant::OwnedObjectPath = conn
-        .call_method(
-            Some("org.freedesktop.portal.Desktop"),
-            "/org/freedesktop/portal/desktop",
-            Some("org.freedesktop.portal.Wallpaper"),
-            "SetWallpaperURI",
-            &(parent_window, &uri, options),
-        )
-        .await
-        .map_err(|e| Error::PortalCallFailed(format!("SetWallpaperURI: {e}")))?
-        .body()
-        .deserialize()
-        .map_err(|e| Error::PortalCallFailed(format!("reply decode: {e}")))?;
+        .map_err(|e| Error::PortalCallFailed(format!("SetWallpaperURI: {e}")))?;
+    request
+        .response()
+        .map_err(|e| Error::PortalCallFailed(format!("SetWallpaperURI response: {e}")))?;
 
     Ok(PortalApplyResult {
         wallpaper_id: entry.item_id.to_string(),
-        uri,
+        uri: uri.into(),
     })
-}
-
-/// Build a `file://` URI from an absolute path.
-/// Leaves path-safe ASCII literal and percent-encodes every other byte.
-fn file_uri_from_abs_path(path: &str) -> String {
-    let mut out = String::with_capacity(path.len() + 7);
-    out.push_str("file://");
-    for b in path.bytes() {
-        match b {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'.'
-            | b'_'
-            | b'~'
-            | b'/'
-            | b':'
-            | b'@'
-            | b'!'
-            | b'$'
-            | b'&'
-            | b'\''
-            | b'('
-            | b')'
-            | b'*'
-            | b'+'
-            | b','
-            | b';'
-            | b'=' => out.push(b as char),
-            _ => {
-                use std::fmt::Write;
-                let _ = write!(out, "%{b:02X}");
-            }
-        }
-    }
-    out
 }
 
 fn resolve_renderer_plugin_name(
