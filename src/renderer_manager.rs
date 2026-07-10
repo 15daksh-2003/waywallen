@@ -650,22 +650,31 @@ impl RendererManager {
     /// Find an already-running renderer whose **identity** matches
     /// `req`, ignoring runtime-tunable plugin settings.
     pub async fn find_reusable(&self, req: &SpawnRequest) -> Option<RendererId> {
+        self.reusable_renderer_ids(req).await.into_iter().next()
+    }
+
+    /// List already-running renderers whose **identity** matches `req`,
+    /// ignoring runtime-tunable plugin settings.
+    pub async fn reusable_renderer_ids(&self, req: &SpawnRequest) -> Vec<RendererId> {
         let def = match req.renderer_name.as_deref() {
-            Some(name) => self.with_registry(|registry| registry.resolve_by_name(name).cloned())?,
-            None => self.with_registry(|registry| registry.resolve(&req.wp_type).cloned())?,
+            Some(name) => self.with_registry(|registry| registry.resolve_by_name(name).cloned()),
+            None => self.with_registry(|registry| registry.resolve(&req.wp_type).cloned()),
+        };
+        let Some(def) = def else {
+            return Vec::new();
         };
 
         let inner = self.inner.lock().await;
-        for (id, h) in inner.renderers.iter() {
-            if h.wp_type != req.wp_type || h.name != def.name {
-                continue;
-            }
-            if h.extras != req.extras {
-                continue;
-            }
-            return Some(id.clone());
-        }
-        None
+        let mut ids: Vec<_> = inner
+            .renderers
+            .iter()
+            .filter_map(|(id, h)| {
+                (h.wp_type == req.wp_type && h.name == def.name && h.extras == req.extras)
+                    .then(|| id.clone())
+            })
+            .collect();
+        ids.sort_unstable();
+        ids
     }
 
     pub async fn get(&self, id: &str) -> Option<Arc<RendererHandle>> {
@@ -1822,6 +1831,23 @@ mod reuse_tests {
         let req = req_with_extras(extras);
         let id = mgr.find_reusable(&req).await.expect("reuse hit expected");
         assert_eq!(id, "h1");
+    }
+
+    #[tokio::test]
+    async fn reusable_renderer_ids_are_sorted() {
+        let mut registry = RendererRegistry::new();
+        registry.register(def_mpv());
+        let mgr = RendererManager::new(registry);
+
+        let mut extras = HashMap::new();
+        extras.insert("path".into(), "/clip.mp4".into());
+        mgr.register_test_handle(live_mpv_handle("h2", extras.clone()))
+            .await;
+        mgr.register_test_handle(live_mpv_handle("h1", extras.clone()))
+            .await;
+
+        let ids = mgr.reusable_renderer_ids(&req_with_extras(extras)).await;
+        assert_eq!(ids, vec!["h1".to_string(), "h2".to_string()]);
     }
 
     #[tokio::test]

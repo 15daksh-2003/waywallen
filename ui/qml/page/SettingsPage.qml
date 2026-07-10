@@ -179,7 +179,8 @@ MD.Page {
             queueMode: "sequential",
             rotationSecs: 0,
             audioFadeMs: 500,
-            pluginUpdateNotifications: true
+            pluginUpdateNotifications: true,
+            duplicateRenderers: false
         };
     }
 
@@ -206,7 +207,8 @@ MD.Page {
             queueMode: g.queueMode ?? "sequential",
             rotationSecs: Number(g.rotationSecs ?? 0),
             audioFadeMs: Number(g.audioFadeMs ?? 500),
-            pluginUpdateNotifications: Boolean(g.pluginUpdateNotifications ?? true)
+            pluginUpdateNotifications: Boolean(g.pluginUpdateNotifications ?? true),
+            duplicateRenderers: Boolean(g.duplicateRenderers ?? false)
         });
     }
 
@@ -293,6 +295,33 @@ MD.Page {
                         id: m_sidebar_auto_expand
                         checked: W.Global.sidebarAutoExpand
                         onToggled: W.Global.sidebarAutoExpand = checked
+                    }
+                }
+            }
+
+            SettingItem {
+                first: false
+                last: false
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Allow duplicate renderers")
+                    }
+
+                    MD.Switch {
+                        id: m_duplicate_renderers
+                        onToggled: root._mut(g => {
+                            g.duplicateRenderers = checked;
+                        })
+                    }
+                    Binding {
+                        target: m_duplicate_renderers
+                        property: "checked"
+                        value: Boolean(root._currentGlobal()?.duplicateRenderers ?? false)
                     }
                 }
             }

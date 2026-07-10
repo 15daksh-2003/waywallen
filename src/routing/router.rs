@@ -1251,6 +1251,41 @@ impl Router {
         self.inner.lock().await.displays.len()
     }
 
+    /// Registered display ids for an apply target. `None` means all
+    /// displays; explicit ids are filtered to currently registered displays.
+    pub async fn registered_display_ids(
+        self: &Arc<Self>,
+        target: Option<&[DisplayId]>,
+    ) -> Vec<DisplayId> {
+        let inner = self.inner.lock().await;
+        let mut ids: Vec<DisplayId> = match target {
+            None => inner.displays.keys().copied().collect(),
+            Some(target) => target
+                .iter()
+                .copied()
+                .filter(|id| inner.displays.contains_key(id))
+                .collect(),
+        };
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// Enabled display links currently using `renderer_id`, ordered by id.
+    pub async fn renderer_display_ids(self: &Arc<Self>, renderer_id: &str) -> Vec<DisplayId> {
+        let inner = self.inner.lock().await;
+        let mut ids: Vec<DisplayId> = inner
+            .table
+            .links_for_renderer(renderer_id)
+            .into_iter()
+            .filter(|link| link.enabled)
+            .map(|link| link.display_id)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
     /// Walk every renderer in the table and schedule a 5s reap timer
     /// for those with no enabled links, except the optional `keep` id.
     pub async fn mark_orphans(self: &Arc<Self>, keep: Option<&str>) -> Vec<RendererId> {
@@ -2407,6 +2442,30 @@ mod tests {
         // Unknown ids are dropped.
         let keys = router.display_settings_keys(&[h1.id, 9999]).await;
         assert_eq!(keys, vec![(h1.id, "uuid-1".into())]);
+    }
+
+    #[tokio::test]
+    async fn registered_display_ids_and_renderer_display_ids_are_sorted() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+
+        let r = RendererHandle::test_stub("r1", "scene");
+        mgr.register_test_handle(r.clone()).await;
+        router.register_renderer(r).await;
+        let h1 = router.register_display(reg("HDMI-A-1", 1920, 1080)).await;
+        let h2 = router.register_display(reg("DP-1", 2560, 1440)).await;
+
+        assert_eq!(
+            router.registered_display_ids(None).await,
+            vec![h1.id, h2.id]
+        );
+        assert_eq!(
+            router
+                .registered_display_ids(Some(&[h2.id, 9999, h1.id, h2.id]))
+                .await,
+            vec![h1.id, h2.id]
+        );
+        assert_eq!(router.renderer_display_ids("r1").await, vec![h1.id, h2.id]);
     }
 
     #[tokio::test]

@@ -88,6 +88,7 @@ auto global_to_map(const proto::GlobalSettings& g) -> QVariantMap {
     m[u"rotationSecs"_s]              = g.rotationSecs();
     m[u"audioFadeMs"_s]               = g.audioFadeMs();
     m[u"pluginUpdateNotifications"_s] = ! g.disablePluginUpdateNotifications();
+    m[u"duplicateRenderers"_s]        = g.duplicateRenderersForSameWallpaper();
     QStringList wallpaper_skip_types;
     for (const auto& t : g.wallpaperSkipTypes()) {
         wallpaper_skip_types.append(t);
@@ -156,6 +157,9 @@ auto map_to_global(const QVariantMap& m) -> proto::GlobalSettings {
     }
     if (m.contains(u"pluginUpdateNotifications"_s)) {
         g.setDisablePluginUpdateNotifications(! m.value(u"pluginUpdateNotifications"_s).toBool());
+    }
+    if (m.contains(u"duplicateRenderers"_s)) {
+        g.setDuplicateRenderersForSameWallpaper(m.value(u"duplicateRenderers"_s).toBool());
     }
     if (m.contains(u"wallpaperSkipTypes"_s)) {
         QStringList skip;

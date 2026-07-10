@@ -682,6 +682,7 @@ fn global_to_pb(g: &crate::settings::GlobalSettings) -> pb::GlobalSettings {
         wallpaper_filter_tags: g.wallpaper_filter_tags.clone(),
         wallpaper_skip_content_ratings: g.wallpaper_skip_content_ratings.clone(),
         disable_plugin_update_notifications: !g.plugin_update_notifications,
+        duplicate_renderers_for_same_wallpaper: g.duplicate_renderers_for_same_wallpaper,
     }
 }
 
@@ -2250,185 +2251,27 @@ async fn dispatch_inner(
         }
 
         Req::WallpaperApply(r) => {
-            let entry = match r.wallpaper_id.parse::<i64>() {
-                Ok(iid) => repo::get_entry(&state.db, iid).await?,
-                Err(_) => None,
-            };
-            let entry = entry.ok_or_else(|| Error::WallpaperNotFound(r.wallpaper_id.clone()))?;
             let _ = crate::playlist::engine::Engine::deactivate(&state, &r.display_ids).await;
-            if state.router.display_count().await == 0 {
-                return Err(Error::NoDisplayRegistered);
-            }
-            // Empty renderer_name uses priority resolve; explicit names must
-            // resolve to a renderer that supports this wallpaper type.
-            let registry = state.renderer_manager.registry_snapshot();
-            let plugin_name: String = if r.renderer_name.is_empty() {
-                registry
-                    .resolve(&entry.wp_type)
-                    .map(|def| def.name.clone())
-                    .ok_or_else(|| Error::NoRendererForType(entry.wp_type.clone()))?
-            } else {
-                let def = registry
-                    .resolve_by_name(&r.renderer_name)
-                    .ok_or_else(|| Error::RendererNotFound(r.renderer_name.clone()))?;
-                if !def.types.iter().any(|t| t == &entry.wp_type) {
-                    return Err(Error::RendererTypeMismatch {
-                        renderer: r.renderer_name.clone(),
-                        ty: entry.wp_type.clone(),
-                    });
-                }
-                def.name.clone()
-            };
-            // Render-target size is the renderer's decision from content
-            // native size and plugin settings.
-            let plugin_kv = state.settings.plugin(&plugin_name).unwrap_or_default();
-
-            // Renderer-owned per-item user-property overrides ride as
-            // a separate JSON payload in `Init.user_properties`.
-            let (user_properties_json, wallpaper_layout_override) =
-                repo::get_wallpaper_render_properties(&state.db, entry.item_id).await?;
-
-            // Source plugin extras supply canonical path and allowlisted CLI
-            // argv for the renderer subprocess.
-            let extras = state
-                .source_manager
-                .lock()
-                .await
-                .call_extras(&entry.plugin_name, &entry)
-                .await?;
-
-            let spawn_req = renderer_manager::SpawnRequest {
-                wp_type: entry.wp_type.clone(),
-                extras,
-                settings: plugin_kv,
-                test_pattern: false,
-                // Pin reuse and spawn to the explicit pick when requested;
-                // otherwise let the manager resolve by priority.
-                renderer_name: if r.renderer_name.is_empty() {
-                    None
-                } else {
-                    Some(plugin_name.clone())
+            let res = control::apply_wallpaper_with_options(
+                state,
+                &r.wallpaper_id,
+                control::ApplyOptions {
+                    display_ids: (!r.display_ids.is_empty()).then_some(r.display_ids),
+                    renderer_name: (!r.renderer_name.is_empty()).then_some(r.renderer_name),
+                    first_frame_timeout: Some(control::APPLY_FIRST_FRAME_TIMEOUT),
+                    require_display: true,
                 },
-                user_properties_json,
-            };
-
-            // Reuse a live renderer whose spawn identity matches.
-            // Settings changes are pushed by SettingsSet, not by apply.
-            let renderer_id = match state.renderer_manager.find_reusable(&spawn_req).await {
-                Some(existing_id) => {
-                    log::info!(
-                        "wallpaper_apply: reusing renderer {existing_id} for wallpaper {}",
-                        entry.item_id
-                    );
-                    existing_id
-                }
-                None => {
-                    // No reuse — a fresh renderer is about to spawn.
-                    // Stop fully replaced renderers first to cap peak GPU use.
-                    let target: Option<&[u64]> = if r.display_ids.is_empty() {
-                        None
-                    } else {
-                        Some(&r.display_ids)
-                    };
-                    let to_stop = state.router.renderers_fully_replaced_by(target).await;
-                    if !to_stop.is_empty() {
-                        log::info!(
-                            "wallpaper_apply: stopping {} fully-replaced renderer(s) before spawn: {:?}",
-                            to_stop.len(),
-                            to_stop,
-                        );
-                        // Orderly shutdown unbinds displays before graceful
-                        // producer shutdown.
-                        state
-                            .router
-                            .stop_renderers_orderly(&to_stop, std::time::Duration::from_secs(1))
-                            .await;
-                    }
-                    let new_id = state.renderer_manager.spawn(spawn_req).await?;
-                    if let Some(handle) = state.renderer_manager.get(&new_id).await {
-                        state.router.register_renderer(handle).await;
-                    }
-                    new_id
-                }
-            };
-
-            state
-                .router
-                .set_renderer_wallpaper_layout_override(&renderer_id, wallpaper_layout_override)
-                .await;
-
-            if r.display_ids.is_empty() {
-                state.router.relink_all_displays_to(&renderer_id).await;
-            } else {
-                state
-                    .router
-                    .relink_displays_to(&r.display_ids, &renderer_id)
-                    .await;
-            }
-
-            if let Err(e) = state
-                .renderer_manager
-                .wait_for_first_frame(&renderer_id, control::APPLY_FIRST_FRAME_TIMEOUT)
-                .await
-            {
-                state.router.unregister_renderer(&renderer_id).await;
-                let _ = state.renderer_manager.kill(&renderer_id).await;
-                return Err(e);
-            }
-
-            // Mirror control::apply_wallpaper_by_id by pinning the playlist
-            // cursor to the applied wallpaper.
-            {
-                let mut q = state.queue.lock().await;
-                q.current = Some(entry.item_id.to_string());
-                if !entry.library_root.is_empty() {
-                    if let Some(rel) =
-                        crate::queue::relative_under_root(&entry.library_root, &entry.resource)
-                    {
-                        if let Ok(Some(it)) = crate::model::repo::find_item_by_library_path(
-                            &state.db,
-                            &entry.library_root,
-                            &rel,
-                        )
-                        .await
-                        {
-                            q.last_db_id = Some(it.id);
-                        }
-                    }
-                }
-            }
-            // Per-display: empty display_ids means "all currently
-            // registered displays" (matches the relink branch above).
-            let target_ids: Vec<crate::scheduler::DisplayId> = if r.display_ids.is_empty() {
-                state
-                    .router
-                    .snapshot_displays()
-                    .await
-                    .into_iter()
-                    .map(|d| d.id)
-                    .collect()
-            } else {
-                r.display_ids.clone()
-            };
-            let keys = state.router.display_settings_keys(&target_ids).await;
-            let wp_id = entry.item_id.to_string();
-            state.settings.update(|s| {
-                for (_did, key) in &keys {
-                    let prefs = s.displays.entry(key.clone()).or_default();
-                    prefs.last_wallpaper = Some(wp_id.clone());
-                }
-                s.global.last_wallpaper = Some(wp_id);
-            });
-            state.settings.flush_now().await;
+            )
+            .await?;
             // Reset the rotator deadline so a manual apply gets the
             // full quiet window before the next auto tick.
             state.rotation.kick();
 
             Res::WallpaperApply(pb::WallpaperApplyResponse {
-                renderer_id,
-                wallpaper_id: entry.item_id.to_string(),
-                wp_type: entry.wp_type,
-                name: entry.name,
+                renderer_id: res.renderer_id,
+                wallpaper_id: res.entry.item_id.to_string(),
+                wp_type: res.entry.wp_type,
+                name: res.entry.name,
             })
         }
 
@@ -2534,6 +2377,8 @@ async fn dispatch_inner(
                     s.global.audio_fade_ms =
                         g.audio_fade_ms.min(crate::settings::MAX_AUDIO_FADE_MS);
                     s.global.plugin_update_notifications = !g.disable_plugin_update_notifications;
+                    s.global.duplicate_renderers_for_same_wallpaper =
+                        g.duplicate_renderers_for_same_wallpaper;
                 }
                 s.plugins = new_plugins.clone();
             });

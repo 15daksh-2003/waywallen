@@ -1032,6 +1032,10 @@ message GlobalSettings {
   // Negative form preserves the default enabled behavior for older
   // clients that never send this field.
   bool disable_plugin_update_notifications = 18;
+
+  // When enabled, one wallpaper applied to multiple displays gets one
+  // renderer per display instead of sharing a single renderer instance.
+  bool duplicate_renderers_for_same_wallpaper = 19;
 }
 
 enum AutoAction {

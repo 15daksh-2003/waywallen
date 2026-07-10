@@ -203,6 +203,8 @@ pub struct GlobalSettings {
     pub auto_attach_playlist_id: Option<i64>,
 
     pub plugin_update_notifications: bool,
+
+    pub duplicate_renderers_for_same_wallpaper: bool,
 }
 
 impl Default for GlobalSettings {
@@ -222,6 +224,7 @@ impl Default for GlobalSettings {
             wallpaper_skip_content_ratings: Vec::new(),
             auto_attach_playlist_id: None,
             plugin_update_notifications: true,
+            duplicate_renderers_for_same_wallpaper: false,
         }
     }
 }
@@ -939,7 +942,21 @@ mod tests {
         assert_eq!(s.global.audio_fade_ms, DEFAULT_AUDIO_FADE_MS);
         assert!(!s.global.manual_muted);
         assert!(s.global.plugin_update_notifications);
+        assert!(!s.global.duplicate_renderers_for_same_wallpaper);
         assert!(s.plugins.is_empty());
+    }
+
+    #[test]
+    fn duplicate_renderers_setting_roundtrip() {
+        let src = r#"
+[global]
+duplicate_renderers_for_same_wallpaper = true
+"#;
+        let s: Settings = toml::from_str(src).unwrap();
+        assert!(s.global.duplicate_renderers_for_same_wallpaper);
+        assert!(toml::to_string(&s)
+            .unwrap()
+            .contains("duplicate_renderers_for_same_wallpaper = true"));
     }
 
     #[test]
