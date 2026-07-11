@@ -387,9 +387,8 @@ message WallpaperListRequest {
   repeated WallpaperFilterRule filters = 5;
   repeated FilterLogic filter_logics = 6;
   repeated WallpaperSortRule sorts = 7;
-  // Free-text search. Daemon-side this is synthesized into an extra
-  // `name CONTAINS <text>` filter rule placed in its own group, which
-  // is AND-ed with the existing filter expression.
+  // Free-text search across wallpaper text, tags, and external_id. The
+  // daemon ANDs it with the existing filter expression.
   string search_text = 8;
   // Wallpaper types to exclude outright (quick type toggles in the UI,
   // independent of the structured filter rules). An entry whose

@@ -476,8 +476,17 @@ pub async fn list_item_keys_by_wallpaper_filters(
     filters: &[crate::control_proto::WallpaperFilterRule],
     logics: &[crate::control_proto::FilterLogic],
 ) -> Result<Vec<(String, String)>> {
+    list_item_keys_by_wallpaper_query(db, filters, logics, "").await
+}
+
+pub async fn list_item_keys_by_wallpaper_query(
+    db: &DatabaseConnection,
+    filters: &[crate::control_proto::WallpaperFilterRule],
+    logics: &[crate::control_proto::FilterLogic],
+    search_text: &str,
+) -> Result<Vec<(String, String)>> {
     let mut query = item::Entity::find().find_also_related(library::Entity);
-    if let Some(condition) = filter::wallpaper_filters_to_condition(filters, logics) {
+    if let Some(condition) = filter::wallpaper_query_to_condition(filters, logics, search_text) {
         query = query.filter(condition);
     }
     let rows = query
@@ -485,7 +494,7 @@ pub async fn list_item_keys_by_wallpaper_filters(
         .order_by_asc(item::Column::Path)
         .all(db)
         .await
-        .context("select filtered item keys")?;
+        .context("select wallpaper query item keys")?;
     Ok(rows
         .into_iter()
         .filter_map(|(it, lib)| lib.map(|lib| (lib.path, it.path)))

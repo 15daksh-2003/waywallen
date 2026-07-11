@@ -1524,39 +1524,19 @@ async fn dispatch_inner(
                 raw_entries.retain(|e| !r.skip_types.iter().any(|t| t == &e.wp_type));
             }
 
-            // Inject free-text search as its own filter group so it ANDs
-            // with any user-authored rule graph.
-            let mut filters_with_search = r.filters.clone();
+            let mut effective_filters = r.filters.clone();
             let search_text = r.search_text.trim();
-            if !search_text.is_empty() {
-                let next_group = filters_with_search
-                    .iter()
-                    .map(|f| f.group)
-                    .max()
-                    .map(|g| g + 1)
-                    .unwrap_or(0);
-                filters_with_search.push(pb::WallpaperFilterRule {
-                    r#type: pb::WallpaperFilterType::Name as i32,
-                    group: next_group,
-                    payload: Some(pb::wallpaper_filter_rule::Payload::StringFilter(
-                        pb::WallpaperStringFilter {
-                            value: search_text.to_owned(),
-                            condition: pb::StringCondition::Contains as i32,
-                        },
-                    )),
-                });
-            }
 
             // Quick tag filter: keep only wallpapers having any of the
             // selected tags, AND-ed in via its own fresh group.
             if !r.filter_tags.is_empty() {
-                let next_group = filters_with_search
+                let next_group = effective_filters
                     .iter()
                     .map(|f| f.group)
                     .max()
                     .map(|g| g + 1)
                     .unwrap_or(0);
-                filters_with_search.push(pb::WallpaperFilterRule {
+                effective_filters.push(pb::WallpaperFilterRule {
                     r#type: pb::WallpaperFilterType::Tag as i32,
                     group: next_group,
                     payload: Some(pb::wallpaper_filter_rule::Payload::TagFilter(
@@ -1571,13 +1551,13 @@ async fn dispatch_inner(
             // Quick content-rating toggles: drop the unselected ratings,
             // each as its own AND-ed group.
             for rating in &r.skip_content_ratings {
-                let next_group = filters_with_search
+                let next_group = effective_filters
                     .iter()
                     .map(|f| f.group)
                     .max()
                     .map(|g| g + 1)
                     .unwrap_or(0);
-                filters_with_search.push(pb::WallpaperFilterRule {
+                effective_filters.push(pb::WallpaperFilterRule {
                     r#type: pb::WallpaperFilterType::ContentRating as i32,
                     group: next_group,
                     payload: Some(pb::wallpaper_filter_rule::Payload::StringFilter(
@@ -1589,14 +1569,15 @@ async fn dispatch_inner(
                 });
             }
 
-            let matched_keys = if filters_with_search.is_empty() {
+            let matched_keys = if effective_filters.is_empty() && search_text.is_empty() {
                 None
             } else {
                 Some(
-                    repo::list_item_keys_by_wallpaper_filters(
+                    repo::list_item_keys_by_wallpaper_query(
                         &state.db,
-                        &filters_with_search,
+                        &effective_filters,
                         &r.filter_logics,
+                        search_text,
                     )
                     .await?
                     .into_iter()

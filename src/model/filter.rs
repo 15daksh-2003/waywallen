@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use sea_orm::{sea_query::Expr, Condition};
+use sea_orm::{
+    sea_query::{Expr, LikeExpr},
+    Condition,
+};
 
 use crate::control_proto as pb;
 
@@ -79,6 +82,35 @@ pub fn wallpaper_filters_to_condition(
         wallpaper_filter_to_condition,
         logics,
     )
+}
+
+pub fn wallpaper_query_to_condition(
+    filters: &[pb::WallpaperFilterRule],
+    logics: &[pb::FilterLogic],
+    search_text: &str,
+) -> Option<Condition> {
+    match (
+        wallpaper_filters_to_condition(filters, logics),
+        wallpaper_search_to_condition(search_text),
+    ) {
+        (Some(filters), Some(search)) => Some(Condition::all().add(filters).add(search)),
+        (Some(filters), None) => Some(filters),
+        (None, Some(search)) => Some(search),
+        (None, None) => None,
+    }
+}
+
+fn wallpaper_search_to_condition(search_text: &str) -> Option<Condition> {
+    let search_text = search_text.trim();
+    if search_text.is_empty() {
+        return None;
+    }
+
+    let text = text_contains_condition(search_text)?;
+    let pattern = literal_contains_pattern(search_text);
+    let external_id = Expr::col((item::Entity, item::Column::ExternalId))
+        .like(LikeExpr::new(pattern).escape('\\'));
+    Some(Condition::any().add(text).add(external_id))
 }
 
 pub fn wallpaper_filter_to_condition(filter: &pb::WallpaperFilterRule) -> Option<Condition> {
@@ -220,7 +252,8 @@ fn name_condition_to_condition(filter: &pb::WallpaperStringFilter) -> Option<Con
     let cond =
         pb::StringCondition::try_from(filter.condition).unwrap_or(pb::StringCondition::Unspecified);
     match cond {
-        pb::StringCondition::Contains | pb::StringCondition::ContainsNot => {
+        pb::StringCondition::Contains => text_contains_condition(&filter.value),
+        pb::StringCondition::ContainsNot => {
             let fts_query = build_fts_match_query(&filter.value)?;
             let quoted = sqlite_quote(&fts_query);
             let esc = filter.value.replace('\'', "''");
@@ -228,26 +261,14 @@ fn name_condition_to_condition(filter: &pb::WallpaperStringFilter) -> Option<Con
                 "EXISTS (SELECT 1 FROM item_tag JOIN tag ON tag.id = item_tag.tag_id \
                  WHERE item_tag.item_id = item.id AND tag.name LIKE '%{esc}%' COLLATE NOCASE)"
             );
-            let out = match cond {
-                pb::StringCondition::Contains => {
-                    let fts = format!(
-                        "item.id IN (SELECT rowid FROM item_fts WHERE item_fts MATCH {quoted})"
-                    );
-                    Condition::any()
-                        .add(Expr::cust(fts))
-                        .add(Expr::cust(tag_exists))
-                }
-                pb::StringCondition::ContainsNot => {
-                    let fts = format!(
-                        "item.id NOT IN (SELECT rowid FROM item_fts WHERE item_fts MATCH {quoted})"
-                    );
-                    Condition::all()
-                        .add(Expr::cust(fts))
-                        .add(Expr::cust(format!("NOT {tag_exists}")))
-                }
-                _ => unreachable!(),
-            };
-            Some(out)
+            let fts = format!(
+                "item.id NOT IN (SELECT rowid FROM item_fts WHERE item_fts MATCH {quoted})"
+            );
+            Some(
+                Condition::all()
+                    .add(Expr::cust(fts))
+                    .add(Expr::cust(format!("NOT {tag_exists}"))),
+            )
         }
         _ => string_condition_to_condition(
             || Expr::col((item::Entity, item::Column::DisplayName)),
@@ -256,6 +277,35 @@ fn name_condition_to_condition(filter: &pb::WallpaperStringFilter) -> Option<Con
             false,
         ),
     }
+}
+
+fn text_contains_condition(value: &str) -> Option<Condition> {
+    let fts_query = build_fts_match_query(value)?;
+    let quoted = sqlite_quote(&fts_query);
+    let esc = value.replace('\'', "''");
+    let fts = format!("item.id IN (SELECT rowid FROM item_fts WHERE item_fts MATCH {quoted})");
+    let tag_exists = format!(
+        "EXISTS (SELECT 1 FROM item_tag JOIN tag ON tag.id = item_tag.tag_id \
+         WHERE item_tag.item_id = item.id AND tag.name LIKE '%{esc}%' COLLATE NOCASE)"
+    );
+    Some(
+        Condition::any()
+            .add(Expr::cust(fts))
+            .add(Expr::cust(tag_exists)),
+    )
+}
+
+fn literal_contains_pattern(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('%');
+    for ch in value.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped.push('%');
+    escaped
 }
 
 fn build_fts_match_query(input: &str) -> Option<String> {
@@ -353,7 +403,7 @@ mod tests {
                 display_name: "City",
                 preview_path: None,
                 description: Some("sunset skyline"),
-                external_id: None,
+                external_id: Some("wallhaven-Ab_C%42"),
                 size: Some(2048),
                 width: Some(1920),
                 height: Some(1080),
@@ -372,7 +422,7 @@ mod tests {
                 display_name: "Portrait",
                 preview_path: None,
                 description: None,
-                external_id: None,
+                external_id: Some("wallhaven-AbXCDY42"),
                 size: Some(4096),
                 width: Some(900),
                 height: Some(1600),
@@ -486,6 +536,63 @@ mod tests {
         ));
 
         let condition = wallpaper_filters_to_condition(&[name], &[]).unwrap();
+        let rows = item::Entity::find()
+            .find_also_related(library::Entity)
+            .filter(condition)
+            .all(&db)
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0.display_name, "City");
+    }
+
+    #[tokio::test]
+    async fn wallpaper_search_matches_external_id_literal_substring() {
+        let db = seed().await;
+
+        let condition = wallpaper_query_to_condition(&[], &[], "B_C%4").unwrap();
+        let rows = item::Entity::find()
+            .find_also_related(library::Entity)
+            .filter(condition)
+            .all(&db)
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0.display_name, "City");
+    }
+
+    #[tokio::test]
+    async fn wallpaper_search_ands_with_structured_filters() {
+        let db = seed().await;
+        let video = pb::WallpaperFilterRule {
+            r#type: pb::WallpaperFilterType::WpType as i32,
+            group: 0,
+            payload: Some(pb::wallpaper_filter_rule::Payload::StringFilter(
+                pb::WallpaperStringFilter {
+                    value: "video".into(),
+                    condition: pb::StringCondition::Is as i32,
+                },
+            )),
+        };
+
+        let condition = wallpaper_query_to_condition(&[video], &[], "B_C%4").unwrap();
+        let rows = item::Entity::find()
+            .find_also_related(library::Entity)
+            .filter(condition)
+            .all(&db)
+            .await
+            .unwrap();
+
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn wallpaper_search_keeps_existing_text_matches() {
+        let db = seed().await;
+
+        let condition = wallpaper_query_to_condition(&[], &[], "skyline").unwrap();
         let rows = item::Entity::find()
             .find_also_related(library::Entity)
             .filter(condition)
