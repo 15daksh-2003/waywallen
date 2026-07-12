@@ -184,9 +184,10 @@ export class WallpaperPropertySetQuery
     Q_PROPERTY(
         QString propertyKey READ propertyKey WRITE setPropertyKey NOTIFY propertyKeyChanged FINAL)
     /// Serialized value: color → "r g b" / "r g b a"; slider → number;
-    /// bool → "true"/"false"; string → raw. Empty clears the override.
+    /// bool → "true"/"false"; string → raw. Empty is a valid string value.
     Q_PROPERTY(QString propertyValue READ propertyValue WRITE setPropertyValue NOTIFY
                    propertyValueChanged FINAL)
+    Q_PROPERTY(bool reset READ reset WRITE setReset NOTIFY resetChanged FINAL)
 
 public:
     WallpaperPropertySetQuery(QObject* parent = nullptr);
@@ -200,16 +201,21 @@ public:
     auto propertyValue() const -> const QString&;
     void setPropertyValue(const QString&);
 
+    auto reset() const -> bool;
+    void setReset(bool);
+
     void reload() override;
 
     Q_SIGNAL void wallpaperIdChanged();
     Q_SIGNAL void propertyKeyChanged();
     Q_SIGNAL void propertyValueChanged();
+    Q_SIGNAL void resetChanged();
 
 private:
     QString m_wallpaper_id;
     QString m_property_key;
     QString m_property_value;
+    bool    m_reset { false };
 };
 
 export class WallpaperLayoutSetQuery

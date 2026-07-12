@@ -418,16 +418,17 @@ message WallpaperGetResponse {
   WallpaperEntry entry = 1;
 }
 
-// Commit one user-property edit for a wallpaper. The daemon persists
-// the (key, value) pair to the item's `user_property_overrides`
-// column and, if the wallpaper is currently being rendered, pushes a
-// `setting_changed` event to the renderer subprocess so the change
-// takes effect immediately. Empty `value` clears the override (revert
-// to project.json default).
+// Commit or reset one user-property override for a wallpaper. The daemon
+// persists the operation and pushes the effective value to a live renderer.
 message WallpaperPropertySetRequest {
   string wallpaper_id = 1;
   string key = 2;
-  string value = 3;
+  oneof operation {
+    // Empty text is a valid override value.
+    string value = 3;
+    // Presence requests reset; the boolean value is ignored.
+    bool reset = 4;
+  }
 }
 message WallpaperPropertySetResponse {}
 

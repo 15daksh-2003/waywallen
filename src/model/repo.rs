@@ -1099,21 +1099,19 @@ pub async fn set_wallpaper_layout_override(
     Ok(())
 }
 
-/// Merge `kv` into the item's override map and rewrite the column.
-/// Empty values remove keys; other existing keys are preserved.
-pub async fn merge_user_property_overrides(
+/// Set or reset one item user-property override and rewrite the column.
+pub async fn set_user_property_override(
     db: &DatabaseConnection,
     item_id: i64,
-    kv: &[(String, String)],
+    key: &str,
+    value: Option<&str>,
 ) -> Result<()> {
     let mut current = get_user_property_overrides(db, item_id).await?;
-    for (k, v) in kv {
-        let key = crate::wallpaper::properties::canonical_user_property_key(k);
-        if v.is_empty() {
-            current.remove(key);
-        } else {
-            current.insert(key.to_string(), v.clone());
-        }
+    let key = crate::wallpaper::properties::canonical_user_property_key(key);
+    if let Some(value) = value {
+        current.insert(key.to_string(), value.to_string());
+    } else {
+        current.remove(key);
     }
     let serialized = if current.is_empty() {
         None
@@ -1558,6 +1556,23 @@ mod tests {
     async fn count_items_by_filter_with_no_filter_counts_all() {
         let (db, _) = seed_queue_db().await;
         assert_eq!(count_items_by_filter(&db, &[], &[]).await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn user_property_override_distinguishes_empty_value_from_reset() {
+        let (db, ids) = seed_queue_db().await;
+
+        set_user_property_override(&db, ids[0], "text", Some(""))
+            .await
+            .unwrap();
+        let overrides = get_user_property_overrides(&db, ids[0]).await.unwrap();
+        assert_eq!(overrides.get("text").map(String::as_str), Some(""));
+
+        set_user_property_override(&db, ids[0], "text", None)
+            .await
+            .unwrap();
+        let overrides = get_user_property_overrides(&db, ids[0]).await.unwrap();
+        assert!(!overrides.contains_key("text"));
     }
 
     #[tokio::test]

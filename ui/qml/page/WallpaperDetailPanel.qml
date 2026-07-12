@@ -197,6 +197,14 @@ Item {
         property string wallpaperId: ""
         property var entries: ({})
 
+        function queue(key, value, reset) {
+            const e = entries;
+            e[key] = { value: value, reset: reset };
+            entries = e;
+            if (!restartFlush())
+                entries = {};
+        }
+
         function restartFlush() {
             wallpaperId = root.wallpaperId;
             if (wallpaperId.length === 0)
@@ -214,9 +222,11 @@ Item {
             const wallpaperId = m_pending_writes.wallpaperId;
             const e = m_pending_writes.entries;
             for (const k in e) {
+                const operation = e[k];
                 setQuery.wallpaperId = wallpaperId;
                 setQuery.propertyKey = k;
-                setQuery.propertyValue = e[k];
+                setQuery.propertyValue = operation.value;
+                setQuery.reset = operation.reset;
                 setQuery.reload();
             }
             m_pending_writes.entries = {};
@@ -226,11 +236,10 @@ Item {
     Connections {
         target: propertyModel
         function onValueChanged(key, value) {
-            const e = m_pending_writes.entries;
-            e[key] = value;
-            m_pending_writes.entries = e;
-            if (!m_pending_writes.restartFlush())
-                m_pending_writes.entries = {};
+            m_pending_writes.queue(key, value, false);
+        }
+        function onResetRequested(key) {
+            m_pending_writes.queue(key, "", true);
         }
     }
 
@@ -857,6 +866,35 @@ Item {
                     target: m_combo
                     property: "currentIndex"
                     value: m_prop_delegate.optionIndex(m_prop_delegate.currentValue)
+                }
+
+                MD.TextField {
+                    id: m_text_input
+                    visible: m_prop_delegate.type === "textinput"
+                    Layout.fillWidth: true
+                    text: m_prop_delegate.currentValue
+                    mdState.dense: true
+                    onAccepted: submit()
+
+                    function submit() {
+                        if (text === m_prop_delegate.currentValue)
+                            return;
+                        propertyModel.setValue(m_prop_delegate.key, text);
+                    }
+
+                    trailing: MD.SmallIconButton {
+                        anchors.right: parent?.right
+                        anchors.verticalCenter: parent?.verticalCenter
+                        anchors.rightMargin: 8
+                        icon.name: MD.Token.icon.check
+                        enabled: m_text_input.text !== m_prop_delegate.currentValue
+                        onClicked: m_text_input.submit()
+
+                        MD.ToolTip {
+                            visible: parent.hovered
+                            text: "Apply"
+                        }
+                    }
                 }
 
                 MD.Text {

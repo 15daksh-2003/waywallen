@@ -1728,13 +1728,14 @@ async fn dispatch_inner(
                 Err(_) => None,
             };
             let entry = entry.ok_or_else(|| Error::WallpaperNotFound(r.wallpaper_id.clone()))?;
-            // Persist to DB.
-            repo::merge_user_property_overrides(
-                &state.db,
-                entry.item_id,
-                &[(r.key.clone(), r.value.clone())],
-            )
-            .await?;
+            use pb::wallpaper_property_set_request::Operation;
+            let value = match r.operation {
+                Some(Operation::Value(value)) => Some(value),
+                // Older clients encoded an empty reset value as no field.
+                Some(Operation::Reset(_)) | None => None,
+            };
+            repo::set_user_property_override(&state.db, entry.item_id, &r.key, value.as_deref())
+                .await?;
             let persist_tag = format!("item={}", entry.item_id);
             let live_renderer = state
                 .renderer_manager
@@ -1757,7 +1758,7 @@ async fn dispatch_inner(
                 // Push live; unknown keys are left for renderer-side property
                 // dispatch to accept or ignore.
                 if let Some(h) = live_renderer {
-                    let value = if r.value.is_empty() {
+                    let effective_value = if value.is_none() {
                         let schema = state
                             .source_manager
                             .lock()
@@ -1775,12 +1776,12 @@ async fn dispatch_inner(
                                     r.key,
                                     r.wallpaper_id
                                 );
-                                r.value.clone()
+                                String::new()
                             })
                     } else {
-                        r.value.clone()
+                        value.clone().unwrap_or_default()
                     };
-                    let kv = vec![(r.key.clone(), value)];
+                    let kv = vec![(r.key.clone(), effective_value)];
                     let id = h.id.clone();
                     state
                         .renderer_manager
@@ -1797,10 +1798,11 @@ async fn dispatch_inner(
                     String::from("offline")
                 }
             };
+            let operation = value.as_deref().unwrap_or("<reset>");
             log::debug!(
                 "WallpaperPropertySet: {}={} on {} persist={} push={}",
                 r.key,
-                r.value,
+                operation,
                 r.wallpaper_id,
                 persist_tag,
                 push_tag

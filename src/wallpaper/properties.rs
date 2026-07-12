@@ -418,7 +418,8 @@ mod tests {
             "waywallen.scheme_color": { "type": "color", "value": [0.1, 0.2, 0.3, 1.0] },
             "speed": { "type": "slider", "value": 1.5 },
             "enabled": { "type": "bool", "value": true },
-            "mode": { "type": "combo", "value": "pulse" }
+            "mode": { "type": "combo", "value": "pulse" },
+            "text": { "type": "textinput", "value": "" }
         }"#;
         assert_eq!(
             user_property_default_wire_value(raw, "waywallen.scheme_color").as_deref(),
@@ -435,6 +436,10 @@ mod tests {
         assert_eq!(
             user_property_default_wire_value(raw, "mode").as_deref(),
             Some("pulse")
+        );
+        assert_eq!(
+            user_property_default_wire_value(raw, "text").as_deref(),
+            Some("")
         );
     }
 

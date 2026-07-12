@@ -80,8 +80,7 @@ public:
     // overrides rebuilds.
     Q_INVOKABLE void setValue(const QString& key, const QString& value);
 
-    // Clear each matching override. One empty `valueChanged` per key,
-    // in order.
+    // Clear each matching override. One `resetRequested` per key, in order.
     Q_INVOKABLE void resetAll();
     Q_INVOKABLE void resetPredefinedProperties();
     Q_INVOKABLE void resetUserProperties();
@@ -90,6 +89,7 @@ public:
     // schema/overrides updates. Drives the QML-side debounced query
     // flush.
     Q_SIGNAL void valueChanged(const QString& key, const QString& value);
+    Q_SIGNAL void resetRequested(const QString& key);
 
 private:
     struct Entry {

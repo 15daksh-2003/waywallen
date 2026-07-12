@@ -398,6 +398,14 @@ void WallpaperPropertySetQuery::setPropertyValue(const QString& v) {
     }
 }
 
+auto WallpaperPropertySetQuery::reset() const -> bool { return m_reset; }
+void WallpaperPropertySetQuery::setReset(bool v) {
+    if (m_reset != v) {
+        m_reset = v;
+        Q_EMIT resetChanged();
+    }
+}
+
 void WallpaperPropertySetQuery::reload() {
     if (m_wallpaper_id.isEmpty() || m_property_key.isEmpty()) return;
     setStatus(Status::Querying);
@@ -407,7 +415,10 @@ void WallpaperPropertySetQuery::reload() {
     auto inner = proto::WallpaperPropertySetRequest {};
     inner.setWallpaperId(m_wallpaper_id);
     inner.setKey(m_property_key);
-    inner.setValue(m_property_value);
+    if (m_reset)
+        inner.setReset(true);
+    else
+        inner.setValue(m_property_value);
     req.setWallpaperPropertySet(std::move(inner));
 
     auto self = QWatcher { this };

@@ -12,7 +12,8 @@ namespace
 
 bool isSupported(const QString& type, bool has_options) {
     return type == QLatin1String("color") || type == QLatin1String("slider") ||
-           type == QLatin1String("bool") || (type == QLatin1String("combo") && has_options);
+           type == QLatin1String("bool") || type == QLatin1String("textinput") ||
+           type == QLatin1String("text") || (type == QLatin1String("combo") && has_options);
 }
 
 QString propertiesSection() { return QStringLiteral("Properties"); }
@@ -119,7 +120,7 @@ QVariant UserPropertyListModel::data(const QModelIndex& index, int role) const {
 QString UserPropertyListModel::currentValueFor_(qsizetype row) const {
     const auto& e  = m_entries.at(row);
     const auto  it = m_overrides.constFind(e.key);
-    if (it != m_overrides.constEnd() && ! it.value().isEmpty()) return it.value();
+    if (it != m_overrides.constEnd()) return it.value();
     return e.default_wire;
 }
 
@@ -261,11 +262,7 @@ void UserPropertyListModel::appendPredefinedEntries_(const QJsonObject& schema) 
 }
 
 void UserPropertyListModel::setValue(const QString& key, const QString& value) {
-    if (value.isEmpty()) {
-        m_overrides.remove(key);
-    } else {
-        m_overrides.insert(key, value);
-    }
+    m_overrides.insert(key, value);
     notifyCurrentChanged_(key);
     Q_EMIT overrideStateChanged();
     Q_EMIT valueChanged(key, value);
@@ -276,7 +273,7 @@ void UserPropertyListModel::resetAll() {
         if (! m_overrides.contains(e.key)) continue;
         m_overrides.remove(e.key);
         notifyCurrentChanged_(e.key);
-        Q_EMIT valueChanged(e.key, QString {});
+        Q_EMIT resetRequested(e.key);
     }
     Q_EMIT overrideStateChanged();
 }
@@ -287,7 +284,7 @@ void UserPropertyListModel::resetPredefinedProperties() {
         if (! m_overrides.contains(e.key)) continue;
         m_overrides.remove(e.key);
         notifyCurrentChanged_(e.key);
-        Q_EMIT valueChanged(e.key, QString {});
+        Q_EMIT resetRequested(e.key);
     }
     Q_EMIT overrideStateChanged();
 }
@@ -298,7 +295,7 @@ void UserPropertyListModel::resetUserProperties() {
         if (! m_overrides.contains(e.key)) continue;
         m_overrides.remove(e.key);
         notifyCurrentChanged_(e.key);
-        Q_EMIT valueChanged(e.key, QString {});
+        Q_EMIT resetRequested(e.key);
     }
     Q_EMIT overrideStateChanged();
 }
