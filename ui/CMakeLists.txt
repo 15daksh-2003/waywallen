@@ -55,6 +55,7 @@ qt_add_protobuf(waywallen-control
 )
 
 set(SOURCES_NO_MOC
+  src/entry.cpp
   src/action.cpp
   src/util.cpp
   src/backend.cpp
@@ -128,6 +129,7 @@ set(MOC_SOURCE_FILES
   src/thumb/service.cppm
 )
 set(MODULES
+    src/entry.cppm
     src/mod.cppm
     src/proto.cppm
     src/model/share_store.cppm
@@ -262,6 +264,7 @@ target_include_directories(
   PRIVATE . # src/
 )
 target_compile_features(waywallen-qml PUBLIC cxx_std_20)
+target_compile_definitions(waywallen-qml PRIVATE "${APP_INFO_MACROS}")
 target_link_libraries(waywallen-qml
   PUBLIC
     Qt6::DBus
@@ -280,7 +283,6 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
   CXX_SCAN_FOR_MODULES ON
   INSTALL_RPATH "${WAYWALLEN_BIN_RPATH}"
 )
-target_compile_definitions(${PROJECT_NAME} PRIVATE "${APP_INFO_MACROS}")
 target_link_libraries(${PROJECT_NAME} PRIVATE waywallen-qml)
 
 set(APP_DESKTOP assets/waywallen-ui.desktop)
