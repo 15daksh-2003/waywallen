@@ -170,7 +170,7 @@ void WallpaperListQuery::reload() {
     auto self = QWatcher { this };
     spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
-        co_await asio::post(asio::bind_executor(QAsyncResult::get_executor(), use_task));
+        if (! co_await QAsyncResult::qexecutor()) co_return;
         if (! self) co_return;
 
         self->inspect_set(result, [self](const proto::Response& rsp) {
@@ -219,7 +219,7 @@ void WallpaperListQuery::fetchMore(qint32) {
     auto         self        = QWatcher { this };
     spawn([self, backend, req = std::move(req), next_offset]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
-        co_await asio::post(asio::bind_executor(QAsyncResult::get_executor(), use_task));
+        if (! co_await QAsyncResult::qexecutor()) co_return;
         if (! self) co_return;
 
         self->inspect_set(result, [self, next_offset](const proto::Response& rsp) {
@@ -264,7 +264,7 @@ void WallpaperScanQuery::reload() {
     auto self = QWatcher { this };
     spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
-        co_await asio::post(asio::bind_executor(QAsyncResult::get_executor(), use_task));
+        if (! co_await QAsyncResult::qexecutor()) co_return;
         if (! self) co_return;
 
         self->inspect_set(result, [self](const proto::Response& rsp) {
@@ -307,7 +307,7 @@ void WallpaperGetQuery::reload() {
     auto self = QWatcher { this };
     spawn([self, backend, req = std::move(req), wallpaper_id]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
-        co_await asio::post(asio::bind_executor(QAsyncResult::get_executor(), use_task));
+        if (! co_await QAsyncResult::qexecutor()) co_return;
         if (! self) co_return;
         if (self->m_wallpaper_id != wallpaper_id) co_return;
 
@@ -357,7 +357,7 @@ void WallpaperRemoveQuery::remove(const QStringList& wallpaperIds) {
     auto self = QWatcher { this };
     spawn([self, backend, req = std::move(req), ids = std::move(ids)]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
-        co_await asio::post(asio::bind_executor(QAsyncResult::get_executor(), use_task));
+        if (! co_await QAsyncResult::qexecutor()) co_return;
         if (! self) co_return;
         self->inspect_set(result, [self, ids](const proto::Response& rsp) {
             const auto removedCount = rsp.wallpaperRemove().removedCount();
@@ -424,7 +424,7 @@ void WallpaperPropertySetQuery::reload() {
     auto self = QWatcher { this };
     spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
-        co_await asio::post(asio::bind_executor(QAsyncResult::get_executor(), use_task));
+        if (! co_await QAsyncResult::qexecutor()) co_return;
         if (! self) co_return;
         self->inspect_set(result, [](const proto::Response&) {
             // No payload; success is just the absence of an error.
@@ -479,7 +479,7 @@ void WallpaperLayoutSetQuery::reload() {
     auto self = QWatcher { this };
     spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
-        co_await asio::post(asio::bind_executor(QAsyncResult::get_executor(), use_task));
+        if (! co_await QAsyncResult::qexecutor()) co_return;
         if (! self) co_return;
         self->inspect_set(result, [](const proto::Response&) {
         });
@@ -544,7 +544,7 @@ void WallpaperApplyQuery::reload() {
     auto self = QWatcher { this };
     spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
-        co_await asio::post(asio::bind_executor(QAsyncResult::get_executor(), use_task));
+        if (! co_await QAsyncResult::qexecutor()) co_return;
         if (! self) co_return;
 
         self->inspect_set(result, [self](const proto::Response& rsp) {
@@ -584,7 +584,7 @@ void WallpaperApplyViaPortalQuery::reload() {
     auto self = QWatcher { this };
     spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
-        co_await asio::post(asio::bind_executor(QAsyncResult::get_executor(), use_task));
+        if (! co_await QAsyncResult::qexecutor()) co_return;
         if (! self) co_return;
         self->inspect_set(result, [self](const proto::Response& rsp) {
             self->m_uri = rsp.wallpaperApplyViaPortal().uri();

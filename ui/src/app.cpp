@@ -27,9 +27,6 @@ class AppPrivate {
 public:
     AppPrivate(App* self, quint16 port)
         : m_p(self),
-          m_pool(4),
-          m_gui_context(Box<QtExecutionContext>::make(QThread::currentThread(),
-                                                      (QEvent::Type)QEvent::registerEventType())),
           m_main_win(nullptr),
           m_qml_engine(Box<QQmlApplicationEngine>::make()),
           m_backend(Box<Backend>::make(port)),
@@ -39,8 +36,6 @@ public:
           m_gpu_mgr(Box<GpuManager>::make()),
           m_port(port) {}
     ~AppPrivate() {
-        // Tear managers down before m_pool / m_gui_context: their child
-        // QAsyncResult objects own asio strands/timers tied to the pool.
         m_qml_engine.reset();
         m_gpu_mgr.reset();
         m_library_mgr.reset();
@@ -52,11 +47,7 @@ public:
 
     void save_settings() {}
 
-    App* m_p;
-    // Declared first so they outlive every manager below; asio strands held
-    // by manager-owned queries must release while the pool is still alive.
-    asio::thread_pool          m_pool;
-    Box<QtExecutionContext>    m_gui_context;
+    App*                       m_p;
     QPointer<QQuickWindow>     m_main_win;
     QmlNetworkDiskCache        m_qml_network_cache;
     Box<QQmlApplicationEngine> m_qml_engine;
@@ -91,13 +82,9 @@ void App::init() {
     auto engine = this->engine();
     d->m_qml_network_cache.install(*engine);
 
-    // Initialize async executors.
-    {
-        auto qex = QtExecutor(d->m_gui_context.get());
-        QAsyncResult::initEx(qex, d->m_pool.get_executor(), [](QStringView error) {
-            qWarning("async error: %s", qPrintable(error.toString()));
-        });
-    }
+    QAsyncResult::initEx(this, 4, [](QStringView error) {
+        qWarning("async error: %s", qPrintable(error.toString()));
+    });
 
     connect(
         engine, &QQmlApplicationEngine::quit, QGuiApplication::instance(), &QGuiApplication::quit);

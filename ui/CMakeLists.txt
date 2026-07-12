@@ -13,7 +13,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(BUILD_SHARED_LIBS OFF)
 
-find_package(Qt6 REQUIRED COMPONENTS Quick DBus Protobuf ProtobufQuick ProtobufWellKnownTypes QuickPrivate)
+find_package(
+  Qt6 REQUIRED
+  COMPONENTS Quick
+             QuickControls2
+             DBus
+             Protobuf
+             ProtobufQuick
+             ProtobufWellKnownTypes
+             QuickPrivate
+             WebSockets)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/SplitMocFiles.cmake)
 
 if(QT_KNOWN_POLICY_QTP0004)

@@ -23,14 +23,14 @@ export namespace waywallen
 
 namespace detail
 {
-class BackendHelper;
+class BackendTransport;
 } // namespace detail
 
 class Backend : public QObject {
     Q_OBJECT
 
-    friend class detail::BackendHelper;
     friend class App;
+    friend class detail::BackendTransport;
 
 public:
     Backend(quint16 port);
@@ -54,22 +54,23 @@ public:
     Q_SLOT void on_retry();
 
 private:
+    Q_SIGNAL void transportDisconnected();
+
     Q_SLOT void on_error(QString);
     Q_SLOT void on_connected();
+    Q_SLOT void on_disconnected();
 
     auto serial() -> quint64;
 
-    Box<QThread>                    m_thread;
-    Box<QtExecutionContext>         m_context;
-    Box<ncrequest::WebSocketClient> m_client;
-    Box<QProtobufSerializer>        m_serializer;
-
-    std::map<quint64, std::move_only_function<void(asio::error_code, proto::Response)>> m_handlers;
+    Box<QThread>              m_thread;
+    detail::BackendTransport* m_transport;
 
     Atomic<quint64>      m_serial;
     quint16              m_port;
     QTimer*              m_reconnect_timer;
     int                  m_reconnect_delay;
+    bool                 m_disconnect_requested;
+    bool                 m_connected;
     static constexpr int kMaxReconnectDelay = 30000;
 };
 } // namespace waywallen
