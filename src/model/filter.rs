@@ -171,7 +171,7 @@ pub fn wallpaper_filter_to_condition(filter: &pb::WallpaperFilterRule) -> Option
                 pb::StringCondition::try_from(f.condition)
                     .unwrap_or(pb::StringCondition::Unspecified),
                 &f.value,
-                false,
+                true,
             ),
             _ => None,
         },
@@ -431,7 +431,54 @@ mod tests {
         )
         .await
         .unwrap();
+        repo::upsert_item(
+            &db,
+            ItemUpsertArgs {
+                plugin_id: plugin.id,
+                library_id: lib_a.id,
+                path: "unrated.png",
+                ty: "image",
+                display_name: "Unrated",
+                preview_path: None,
+                description: None,
+                external_id: None,
+                size: Some(1024),
+                width: Some(640),
+                height: Some(480),
+                content_rating: None,
+            },
+        )
+        .await
+        .unwrap();
         db
+    }
+
+    #[tokio::test]
+    async fn content_rating_exclusion_keeps_unrated_items() {
+        let db = seed().await;
+        let filter = pb::WallpaperFilterRule {
+            r#type: pb::WallpaperFilterType::ContentRating as i32,
+            group: 0,
+            payload: Some(pb::wallpaper_filter_rule::Payload::StringFilter(
+                pb::WallpaperStringFilter {
+                    value: "Mature".into(),
+                    condition: pb::StringCondition::IsNot as i32,
+                },
+            )),
+        };
+
+        let condition = wallpaper_filters_to_condition(&[filter], &[]).unwrap();
+        let rows = item::Entity::find()
+            .filter(condition)
+            .all(&db)
+            .await
+            .unwrap();
+        let names: BTreeSet<_> = rows.into_iter().map(|row| row.display_name).collect();
+
+        assert_eq!(
+            names,
+            BTreeSet::from(["City".to_owned(), "Unrated".to_owned()])
+        );
     }
 
     #[tokio::test]
