@@ -22,6 +22,7 @@ use crate::wallpaper::types::WallpaperEntry;
 use crate::AppState;
 
 pub const APPLY_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(15);
+const PLUGIN_UPDATE_NOTIFICATION_ID: &str = "org.waywallen.waywallen.plugin-updates";
 
 /// Re-export so callers that already wrote `control::QueueState`
 /// don't have to chase the move into the `playlist` module.
@@ -232,7 +233,9 @@ async fn notify_new_plugin_updates(
         .map(|pkg| (pkg.id.clone(), pkg.name.clone()))
         .collect::<HashMap<_, _>>();
     let (summary, body) = plugin_update_notification_text(&available, &plugin_names);
-    if let Err(e) = crate::notifications::notify(&summary, &body).await {
+    if let Err(e) =
+        crate::notifications::notify(PLUGIN_UPDATE_NOTIFICATION_ID, &summary, &body).await
+    {
         log::warn!("plugin update notification failed: {e}");
     }
 }
