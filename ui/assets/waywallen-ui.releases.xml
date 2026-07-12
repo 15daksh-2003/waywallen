@@ -1,3 +1,25 @@
+<release version="0.2.5" date="2026-07-12">
+  <description>
+    <p>Added:</p>
+    <ul>
+      <li>Flatpak autostart support through the desktop portal.</li>
+      <li>System notifications for available plugin updates, with a setting to disable them.</li>
+      <li>Text user properties for Wallpaper Engine wallpapers.</li>
+      <li>An option to allow duplicate renderer instances when displays share a wallpaper.</li>
+    </ul>
+    <p>Fixes:</p>
+    <ul>
+      <li>Discover pagination now continues when the initial view already reaches the end of the loaded list.</li>
+      <li>Opening wallpaper folders from Flatpak now uses the desktop portal.</li>
+      <li>Content-rating filters no longer hide wallpapers without a rating.</li>
+    </ul>
+    <p>Improved:</p>
+    <ul>
+      <li>Wallpaper search now matches external IDs.</li>
+      <li>The interface follows the system accent color.</li>
+    </ul>
+  </description>
+</release>
 <release version="0.2.4" date="2026-07-05">
   <description>
     <p>Added:</p>

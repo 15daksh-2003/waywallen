@@ -3,7 +3,7 @@
 [plugin]
 id = "org.waywallen.image"
 name = "Image"
-version = "0.2.4"
+version = "0.2.5"
 entry = "main.lua"
 entry_version = 2
 
