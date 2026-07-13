@@ -4,7 +4,6 @@ pkg_check_modules(AVCODEC  REQUIRED IMPORTED_TARGET libavcodec>=58)
 pkg_check_modules(AVUTIL   REQUIRED IMPORTED_TARGET libavutil>=56)
 pkg_check_modules(SWSCALE  REQUIRED IMPORTED_TARGET libswscale>=5)
 find_package(Vulkan REQUIRED)
-find_package(Threads REQUIRED)
 
 add_executable(waywallen-image-renderer
     src/main.cpp
@@ -15,11 +14,6 @@ set_target_properties(waywallen-image-renderer PROPERTIES
 )
 target_compile_features(waywallen-image-renderer PRIVATE cxx_std_20)
 set_target_properties(waywallen-image-renderer PROPERTIES CXX_SCAN_FOR_MODULES ON)
-target_compile_options(waywallen-image-renderer PRIVATE
-    -Wall -Wextra -Wpedantic
-    -Wno-missing-field-initializers
-)
-
 target_link_libraries(waywallen-image-renderer
     PRIVATE
         waywallen::bridge

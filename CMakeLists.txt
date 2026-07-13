@@ -16,6 +16,18 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH FALSE)
 set(CMAKE_BUILD_WITH_INSTALL_RPATH FALSE)
 
+set(WAYWALLEN_CXX_COMPILE_OPTIONS
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wno-missing-field-initializers
+    -fno-direct-access-external-data
+    -pthread
+    -D_REENTRANT)
+add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:${WAYWALLEN_CXX_COMPILE_OPTIONS}>")
+add_link_options("$<$<LINK_LANGUAGE:CXX>:-pthread>")
+
+find_package(Threads REQUIRED)
 
 set(WAYWALLEN_LIB_RPATH "$ORIGIN")
 # All ELF binaries (daemon + renderer plugins) install to <prefix>/bin —

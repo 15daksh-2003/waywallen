@@ -1,5 +1,4 @@
 find_package(Vulkan REQUIRED)
-find_package(Threads REQUIRED)
 
 add_executable(waywallen-video-renderer
     src/main.cpp
@@ -9,11 +8,6 @@ set_target_properties(waywallen-video-renderer PROPERTIES
 )
 target_compile_features(waywallen-video-renderer PRIVATE cxx_std_20)
 set_target_properties(waywallen-video-renderer PROPERTIES CXX_SCAN_FOR_MODULES ON)
-target_compile_options(waywallen-video-renderer PRIVATE
-    -Wall -Wextra -Wpedantic
-    -Wno-missing-field-initializers
-)
-
 target_link_libraries(waywallen-video-renderer
     PRIVATE
         waywallen::bridge
