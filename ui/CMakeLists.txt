@@ -86,6 +86,8 @@ set(SOURCES_NO_MOC
   src/query/autostart_query.cpp
   src/query/remote_query.cpp
   src/query/playlist_query.cpp
+  src/query/steam_login_query.cpp
+  src/query/plugin_action_query.cpp
   src/thumb/service.cpp
 )
 
@@ -125,6 +127,8 @@ set(MOC_SOURCE_FILES
   src/query/autostart_query.cppm
   src/query/remote_query.cppm
   src/query/playlist_query.cppm
+  src/query/steam_login_query.cppm
+  src/query/plugin_action_query.cppm
   src/thumb/service.cppm
 )
 set(MODULES
@@ -161,6 +165,7 @@ set(QML_FILES
   qml/dialog/DaemonNotRunDialog.qml
   qml/dialog/WallpaperFilterDialog.qml
   qml/dialog/RemoteFilterDialog.qml
+  qml/dialog/SteamLoginDialog.qml
   qml/page/WallpaperPage.qml
   qml/page/PlaylistDetailPanel.qml
   qml/page/WallpaperDetailPanel.qml

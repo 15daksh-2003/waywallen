@@ -118,6 +118,8 @@ Q_SIGNALS:
                                  quint32 errorCode, const QString& reason);
     void remoteDownloadProgress(const QString& sourceId, const QString& id, int state,
                                 const QString& error);
+    void steamLoginProgress(int state, const QString& qrImage, const QString& accountName,
+                            const QString& error);
     void playlistChanged();
     void pluginChanged();
     void pluginUpdateChanged();
