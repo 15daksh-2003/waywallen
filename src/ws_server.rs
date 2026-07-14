@@ -683,6 +683,10 @@ fn global_to_pb(g: &crate::settings::GlobalSettings) -> pb::GlobalSettings {
         wallpaper_skip_content_ratings: g.wallpaper_skip_content_ratings.clone(),
         disable_plugin_update_notifications: !g.plugin_update_notifications,
         duplicate_renderers_for_same_wallpaper: g.duplicate_renderers_for_same_wallpaper,
+        renderer: Some(pb::GlobalRendererSettings {
+            enable_audio: Some(g.renderer.enable_audio),
+            volume: Some(g.renderer.effective_volume()),
+        }),
     }
 }
 
@@ -1380,20 +1384,29 @@ async fn dispatch_inner(
         Req::RendererSpawn(r) => {
             // Low-level RPC: caller hands in a single `metadata` map.
             // Treat it as both CLI extras and Init.settings for manual use.
+            let wp_type = if r.wp_type.is_empty() {
+                "scene".into()
+            } else {
+                r.wp_type
+            };
             let mut settings = r.metadata.clone();
             if r.fps != 0 {
                 settings.insert("fps".to_string(), r.fps.to_string());
             }
+            let registry = state.renderer_manager.registry_snapshot();
+            let renderer = registry
+                .resolve(&wp_type)
+                .ok_or_else(|| Error::NoRendererForType(wp_type.clone()))?;
+            state
+                .settings
+                .apply_global_renderer_settings(renderer, &mut settings);
+            let renderer_name = renderer.name.clone();
             let spawn_req = renderer_manager::SpawnRequest {
-                wp_type: if r.wp_type.is_empty() {
-                    "scene".into()
-                } else {
-                    r.wp_type
-                },
+                wp_type,
                 extras: r.metadata,
                 settings,
                 test_pattern: false,
-                renderer_name: None,
+                renderer_name: Some(renderer_name),
                 user_properties_json: None,
             };
             // renderer_manager returns typed spawn errors directly.
@@ -2562,14 +2575,11 @@ async fn dispatch_inner(
                 }
             }
 
-            // Snapshot prior plugin settings to compute live-renderer deltas.
-            let previous_plugins = state.settings.snapshot().plugins;
-            let previous_filter = state.settings.snapshot().global.wallpaper_filter;
-            // Snapshot pre-mutation layout defaults so we know whether
-            // to re-sync display set_configs after the write.
-            let prev_layout = state.settings.snapshot().global.layout.clone();
-            let prev_queue_mode = state.settings.snapshot().global.queue_mode.clone();
-            let prev_rotation_secs = state.settings.snapshot().global.rotation_secs;
+            let previous_settings = state.settings.snapshot();
+            let previous_filter = previous_settings.global.wallpaper_filter.clone();
+            let prev_layout = previous_settings.global.layout.clone();
+            let prev_queue_mode = previous_settings.global.queue_mode.clone();
+            let prev_rotation_secs = previous_settings.global.rotation_secs;
             state.settings.update(|s| {
                 if let Some(g) = r.global.as_ref() {
                     s.global.wallpaper_filter = WallpaperFilterState::from_pb(
@@ -2609,10 +2619,20 @@ async fn dispatch_inner(
                     s.global.plugin_update_notifications = !g.disable_plugin_update_notifications;
                     s.global.duplicate_renderers_for_same_wallpaper =
                         g.duplicate_renderers_for_same_wallpaper;
+                    if let Some(renderer) = g.renderer.as_ref() {
+                        if let Some(enable_audio) = renderer.enable_audio {
+                            s.global.renderer.enable_audio = enable_audio;
+                        }
+                        if let Some(volume) = renderer.volume {
+                            s.global.renderer.volume =
+                                volume.min(crate::settings::MAX_RENDERER_VOLUME);
+                        }
+                    }
                 }
                 s.plugins = new_plugins.clone();
             });
-            let new_filter = state.settings.snapshot().global.wallpaper_filter.clone();
+            let current_settings = state.settings.snapshot();
+            let new_filter = current_settings.global.wallpaper_filter.clone();
             if new_filter != previous_filter {
                 log::debug!(
                     "wallpaper filter updated: old={:?}, new={:?}",
@@ -2623,7 +2643,7 @@ async fn dispatch_inner(
                 // the next pick materializes the new candidate set.
                 state.queue.lock().await.reset_shuffle_round();
             }
-            let new_layout = state.settings.snapshot().global.layout.clone();
+            let new_layout = current_settings.global.layout.clone();
             if new_layout != prev_layout {
                 state.router.resync_all_set_configs().await;
                 // Push fresh DisplaySnapshot so subscribers see new
@@ -2633,71 +2653,46 @@ async fn dispatch_inner(
             }
             // Hot-apply queue mode and rotation interval; auto replay re-reads
             // settings on every display state event.
-            let new_queue_mode = state.settings.snapshot().global.queue_mode.clone();
+            let new_queue_mode = current_settings.global.queue_mode.clone();
             if new_queue_mode != prev_queue_mode {
                 if let Some(m) = queue::state::Mode::from_str(&new_queue_mode) {
                     state.queue.lock().await.set_mode(m);
                 }
             }
-            let new_rotation_secs = state.settings.snapshot().global.rotation_secs;
+            let new_rotation_secs = current_settings.global.rotation_secs;
             if new_rotation_secs != prev_rotation_secs {
                 state.rotation.set_interval(new_rotation_secs);
             }
-            // Hot-reload live renderers for plugins whose settings changed.
-            let mut plugin_names_changed: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
-            for (name, values) in &new_plugins {
-                if previous_plugins.get(name) != Some(values) {
-                    plugin_names_changed.insert(name.clone());
-                }
-            }
-            for name in previous_plugins.keys() {
-                if !new_plugins.contains_key(name) {
-                    plugin_names_changed.insert(name.clone());
-                }
-            }
-            // Collect hot-reload failures and report them after publishing
-            // the persisted settings change.
             let mut apply_failures: Vec<String> = Vec::new();
-            for plugin_name in plugin_names_changed {
-                let def = state
-                    .renderer_manager
-                    .registry_snapshot()
-                    .all_renderers()
-                    .into_iter()
-                    .find(|d| d.name == plugin_name)
-                    .cloned();
-                let Some(def) = def else { continue };
-                let new_kv = new_plugins.get(&plugin_name).cloned().unwrap_or_default();
-                let old_kv = previous_plugins
-                    .get(&plugin_name)
-                    .cloned()
-                    .unwrap_or_default();
-
-                // Forward changed schema keys to live renderers of this
-                // plugin; other keys apply on next spawn.
-                let kv: Vec<(String, String)> = new_kv
-                    .iter()
-                    .filter(|(k, v)| def.settings.contains_key(*k) && old_kv.get(*k) != Some(v))
-                    .map(|(k, v)| (k.clone(), v.clone()))
+            let registry = state.renderer_manager.registry_snapshot();
+            let live_ids = state.renderer_manager.list().await;
+            for def in registry.all_renderers() {
+                let old_kv = previous_settings.resolved_renderer_settings(def);
+                let new_kv = current_settings.resolved_renderer_settings(def);
+                let kv: Vec<(String, String)> = def
+                    .settings
+                    .keys()
+                    .filter_map(|key| {
+                        let value = new_kv.get(key)?;
+                        (old_kv.get(key) != Some(value)).then(|| (key.clone(), value.clone()))
+                    })
                     .collect();
                 if kv.is_empty() {
                     continue;
                 }
-                let ids = state.renderer_manager.list().await;
-                for id in ids {
-                    let Some(handle) = state.renderer_manager.get(&id).await else {
+                for id in &live_ids {
+                    let Some(handle) = state.renderer_manager.get(id).await else {
                         continue;
                     };
-                    if handle.name != plugin_name {
+                    if handle.name != def.name {
                         continue;
                     }
                     if let Err(e) = state
                         .renderer_manager
-                        .send_setting_changed(&id, kv.clone(), None)
+                        .send_setting_changed(id, kv.clone(), None)
                         .await
                     {
-                        apply_failures.push(format!("{id} ({plugin_name}): {e}"));
+                        apply_failures.push(format!("{id} ({}): {e}", def.name));
                     }
                 }
             }

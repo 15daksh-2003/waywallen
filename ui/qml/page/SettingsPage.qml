@@ -202,6 +202,8 @@ MD.Page {
             queueMode: "sequential",
             rotationSecs: 0,
             audioFadeMs: 500,
+            "renderer.enable_audio": true,
+            "renderer.volume": 100,
             pluginUpdateNotifications: true,
             duplicateRenderers: false
         };
@@ -230,6 +232,8 @@ MD.Page {
             queueMode: g.queueMode ?? "sequential",
             rotationSecs: Number(g.rotationSecs ?? 0),
             audioFadeMs: Number(g.audioFadeMs ?? 500),
+            rendererEnableAudio: root._rendererAudioEnabled(g),
+            rendererVolume: root._rendererVolume(g),
             pluginUpdateNotifications: Boolean(g.pluginUpdateNotifications ?? true),
             duplicateRenderers: Boolean(g.duplicateRenderers ?? false)
         });
@@ -237,6 +241,16 @@ MD.Page {
 
     function _normalizedAutoReplay(policy) {
         return Object.assign(root._defaultAutoReplay(), policy || ({}));
+    }
+
+    function _rendererAudioEnabled(globalSettings) {
+        const value = globalSettings?.["renderer.enable_audio"];
+        return value === undefined ? true : Boolean(value);
+    }
+
+    function _rendererVolume(globalSettings) {
+        const value = Number(globalSettings?.["renderer.volume"] ?? 100);
+        return Math.max(0, Math.min(100, value));
     }
 
     function _maybeClearSubmittedGlobal() {
@@ -452,6 +466,74 @@ MD.Page {
 
             SettingItem {
                 first: true
+                last: false
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Enable audio")
+                    }
+
+                    MD.Switch {
+                        id: m_renderer_enable_audio
+                        onToggled: root._mut(g => {
+                            g["renderer.enable_audio"] = checked;
+                        })
+                    }
+                    Binding {
+                        target: m_renderer_enable_audio
+                        property: "checked"
+                        value: root._rendererAudioEnabled(root._currentGlobal())
+                    }
+                }
+            }
+
+            SettingItem {
+                first: false
+                last: false
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Volume")
+                    }
+
+                    W.ValueSlider {
+                        id: m_renderer_volume_slider
+                        Layout.preferredWidth: 220
+                        from: 0
+                        to: 100
+                        stepSize: 1
+                        snapMode: T.Slider.SnapAlways
+                        maxVisibleStops: 10
+                        valueText: Math.round(value).toString()
+                        valueMaxText: "100"
+                        onMoved: root._mut(g => {
+                            g["renderer.volume"] = Math.round(value);
+                        })
+                    }
+                    Binding {
+                        target: m_renderer_volume_slider
+                        property: "value"
+                        value: root._rendererVolume(root._currentGlobal())
+                    }
+
+                    MD.Text {
+                        text: qsTr("%")
+                        typescale: MD.Token.typescale.body_medium
+                        color: MD.Token.color.on_surface_variant
+                    }
+                }
+            }
+
+            SettingItem {
+                first: false
                 last: true
 
                 RowLayout {
@@ -470,6 +552,7 @@ MD.Page {
                         to: 2000
                         stepSize: 100
                         snapMode: T.Slider.SnapAlways
+                        maxVisibleStops: 10
                         valueText: Math.round(value).toString()
                         valueMaxText: "2000"
                         onMoved: root._mut(g => {

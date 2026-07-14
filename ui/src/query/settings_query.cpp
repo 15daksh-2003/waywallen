@@ -89,6 +89,11 @@ auto global_to_map(const proto::GlobalSettings& g) -> QVariantMap {
     m[u"audioFadeMs"_s]               = g.audioFadeMs();
     m[u"pluginUpdateNotifications"_s] = ! g.disablePluginUpdateNotifications();
     m[u"duplicateRenderers"_s]        = g.duplicateRenderersForSameWallpaper();
+    const auto has_renderer           = g.hasRenderer();
+    m[u"renderer.enable_audio"_s] =
+        ! has_renderer || ! g.renderer().hasEnableAudio() || g.renderer().enableAudio();
+    m[u"renderer.volume"_s] =
+        has_renderer && g.renderer().hasVolume() ? g.renderer().volume() : 100;
     QStringList wallpaper_skip_types;
     for (const auto& t : g.wallpaperSkipTypes()) {
         wallpaper_skip_types.append(t);
@@ -160,6 +165,16 @@ auto map_to_global(const QVariantMap& m) -> proto::GlobalSettings {
     }
     if (m.contains(u"duplicateRenderers"_s)) {
         g.setDuplicateRenderersForSameWallpaper(m.value(u"duplicateRenderers"_s).toBool());
+    }
+    if (m.contains(u"renderer.enable_audio"_s) || m.contains(u"renderer.volume"_s)) {
+        proto::GlobalRendererSettings renderer;
+        if (m.contains(u"renderer.enable_audio"_s)) {
+            renderer.setEnableAudio(m.value(u"renderer.enable_audio"_s).toBool());
+        }
+        if (m.contains(u"renderer.volume"_s)) {
+            renderer.setVolume(m.value(u"renderer.volume"_s).toUInt());
+        }
+        g.setRenderer(std::move(renderer));
     }
     if (m.contains(u"wallpaperSkipTypes"_s)) {
         QStringList skip;

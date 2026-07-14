@@ -15,6 +15,9 @@ use crate::display::layout::{Align, FillMode, Location, Rotation};
 const DEBOUNCE_WRITE: Duration = Duration::from_secs(2);
 pub const DEFAULT_AUDIO_FADE_MS: u32 = 500;
 pub const MAX_AUDIO_FADE_MS: u32 = 2000;
+pub const RENDERER_ENABLE_AUDIO_KEY: &str = "enable_audio";
+pub const RENDERER_VOLUME_KEY: &str = "volume";
+pub const MAX_RENDERER_VOLUME: u32 = 100;
 
 /// Daemon-wide layout defaults applied to displays that have no
 /// `[displays.<name>]` override.
@@ -147,8 +150,29 @@ impl AutoReplayPolicy {
     }
 }
 
-/// Daemon-wide defaults consumed by `WallpaperApply` when a renderer
-/// has no per-plugin override.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GlobalRendererSettings {
+    pub enable_audio: bool,
+    pub volume: u32,
+}
+
+impl Default for GlobalRendererSettings {
+    fn default() -> Self {
+        Self {
+            enable_audio: true,
+            volume: MAX_RENDERER_VOLUME,
+        }
+    }
+}
+
+impl GlobalRendererSettings {
+    pub fn effective_volume(&self) -> u32 {
+        self.volume.min(MAX_RENDERER_VOLUME)
+    }
+}
+
+/// Daemon-wide settings shared by control and rendering flows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GlobalSettings {
@@ -161,6 +185,7 @@ pub struct GlobalSettings {
     pub rotation_secs: u32,
     /// Fade duration shared by mute and unmute control messages.
     pub audio_fade_ms: u32,
+    pub renderer: GlobalRendererSettings,
     /// Manual global mute requested through daemon controls.
     pub manual_muted: bool,
     /// Default layout used when a display has no override.
@@ -217,6 +242,7 @@ impl Default for GlobalSettings {
             queue_mode: "sequential".to_string(),
             rotation_secs: 0,
             audio_fade_ms: DEFAULT_AUDIO_FADE_MS,
+            renderer: GlobalRendererSettings::default(),
             manual_muted: false,
             layout: LayoutDefaults::default(),
             auto_replay: None,
@@ -550,6 +576,60 @@ pub struct Settings {
     pub displays: HashMap<String, DisplayPrefs>,
 }
 
+impl Settings {
+    pub fn resolved_renderer_settings(
+        &self,
+        renderer: &crate::plugin::renderer_registry::RendererDef,
+    ) -> HashMap<String, String> {
+        use crate::plugin::renderer_registry::setting_default_value;
+
+        let mut values = self
+            .plugins
+            .get(&renderer.name)
+            .cloned()
+            .unwrap_or_default();
+        for (key, setting) in &renderer.settings {
+            if !values.contains_key(key) {
+                values.insert(key.clone(), setting_default_value(setting));
+            }
+        }
+        self.apply_global_renderer_settings(renderer, &mut values);
+        values
+    }
+
+    pub fn apply_global_renderer_settings(
+        &self,
+        renderer: &crate::plugin::renderer_registry::RendererDef,
+        values: &mut HashMap<String, String>,
+    ) {
+        use crate::plugin::renderer_registry::{
+            coerce_and_validate, setting_default_value, SettingType,
+        };
+
+        if !self.global.renderer.enable_audio
+            && renderer.settings.contains_key(RENDERER_ENABLE_AUDIO_KEY)
+        {
+            values.insert(RENDERER_ENABLE_AUDIO_KEY.to_string(), "false".to_string());
+        }
+        let Some(volume_setting) = renderer.settings.get(RENDERER_VOLUME_KEY) else {
+            return;
+        };
+        if volume_setting.ty != SettingType::U32 {
+            return;
+        }
+        let base_volume = values
+            .get(RENDERER_VOLUME_KEY)
+            .and_then(|value| coerce_and_validate(RENDERER_VOLUME_KEY, value, volume_setting).ok())
+            .and_then(|value| value.parse::<u32>().ok())
+            .or_else(|| setting_default_value(volume_setting).parse::<u32>().ok())
+            .unwrap_or(MAX_RENDERER_VOLUME);
+        let volume =
+            ((u64::from(base_volume) * u64::from(self.global.renderer.effective_volume())) + 50)
+                / 100;
+        values.insert(RENDERER_VOLUME_KEY.to_string(), volume.to_string());
+    }
+}
+
 /// Resolve the on-disk location. Order:
 ///   1. `$XDG_CONFIG_HOME/waywallen/config.toml`
 pub fn default_config_path() -> PathBuf {
@@ -741,6 +821,27 @@ impl SettingsStore {
             .cloned()
     }
 
+    pub fn resolved_renderer_settings(
+        &self,
+        renderer: &crate::plugin::renderer_registry::RendererDef,
+    ) -> HashMap<String, String> {
+        self.inner
+            .read()
+            .expect("settings poisoned")
+            .resolved_renderer_settings(renderer)
+    }
+
+    pub fn apply_global_renderer_settings(
+        &self,
+        renderer: &crate::plugin::renderer_registry::RendererDef,
+        values: &mut HashMap<String, String>,
+    ) {
+        self.inner
+            .read()
+            .expect("settings poisoned")
+            .apply_global_renderer_settings(renderer, values);
+    }
+
     /// Resolve the effective layout for a display name.
     /// Per-display overrides win field by field.
     pub fn resolved_layout(&self, display_name: &str) -> ResolvedLayout {
@@ -922,7 +1023,9 @@ impl SettingsStore {
     /// Bring in-memory plugin tables in line with loaded renderer
     /// manifest schemas.
     pub fn reconcile(&self, registry: &crate::plugin::renderer_registry::RendererRegistry) -> bool {
-        use crate::plugin::renderer_registry::{check_setting_bounds, SettingDef, SettingType};
+        use crate::plugin::renderer_registry::{
+            check_setting_bounds, setting_default_value, SettingDef,
+        };
 
         let mut changed = false;
         let mut g = self.inner.write().expect("settings poisoned");
@@ -973,33 +1076,7 @@ impl SettingsStore {
                     },
                 };
                 if needs_default {
-                    let default = match def.ty {
-                        SettingType::U32 => match &def.default {
-                            toml::Value::Integer(i) if *i >= 0 => i.to_string(),
-                            toml::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        },
-                        SettingType::I32 => match &def.default {
-                            toml::Value::Integer(i) => i.to_string(),
-                            toml::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        },
-                        SettingType::F32 => match &def.default {
-                            toml::Value::Float(f) => f.to_string(),
-                            toml::Value::Integer(i) => (*i as f32).to_string(),
-                            toml::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        },
-                        SettingType::Bool => match &def.default {
-                            toml::Value::Boolean(b) => b.to_string(),
-                            toml::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        },
-                        SettingType::String => match &def.default {
-                            toml::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        },
-                    };
+                    let default = setting_default_value(def);
                     if entry.get(key) != Some(&default) {
                         entry.insert(key.clone(), default);
                         changed = true;
@@ -1272,6 +1349,10 @@ baz = "7"
                 ..schema_setting(SettingType::U32, toml::Value::Integer(100), false)
             },
         );
+        s.insert(
+            RENDERER_ENABLE_AUDIO_KEY.into(),
+            schema_setting(SettingType::Bool, toml::Value::Boolean(true), false),
+        );
         r.register(RendererDef {
             name: "waywallen-video".into(),
             plugin_id: "test.plugin".to_string(),
@@ -1312,6 +1393,10 @@ baz = "7"
         let video = snap.plugins.get("waywallen-video").expect("video table");
         assert_eq!(video.get("loop_file").map(String::as_str), Some("inf"));
         assert_eq!(video.get("volume").map(String::as_str), Some("100"));
+        assert_eq!(
+            video.get(RENDERER_ENABLE_AUDIO_KEY).map(String::as_str),
+            Some("true")
+        );
     }
 
     #[test]
@@ -1354,6 +1439,7 @@ baz = "7"
         let mut video = HashMap::new();
         video.insert("loop_file".into(), "inf".into());
         video.insert("volume".into(), "100".into());
+        video.insert(RENDERER_ENABLE_AUDIO_KEY.into(), "true".into());
         plugins.insert("waywallen-video".into(), video);
 
         let store = make_store_with(plugins);
@@ -1381,5 +1467,77 @@ baz = "7"
                 .map(String::as_str),
             Some("bar")
         );
+    }
+
+    #[test]
+    fn renderer_audio_settings_compose_without_mutating_plugin_values() {
+        let registry = registry_with_video();
+        let renderer = registry.resolve_by_name("waywallen-video").unwrap();
+        let mut settings = Settings::default();
+        settings.plugins.insert(
+            renderer.name.clone(),
+            HashMap::from([
+                (RENDERER_ENABLE_AUDIO_KEY.to_string(), "true".to_string()),
+                (RENDERER_VOLUME_KEY.to_string(), "75".to_string()),
+            ]),
+        );
+
+        assert_eq!(
+            settings
+                .resolved_renderer_settings(renderer)
+                .get(RENDERER_ENABLE_AUDIO_KEY)
+                .map(String::as_str),
+            Some("true")
+        );
+
+        settings.global.renderer.enable_audio = false;
+        settings.global.renderer.volume = 50;
+        let effective = settings.resolved_renderer_settings(renderer);
+        assert_eq!(
+            effective.get(RENDERER_ENABLE_AUDIO_KEY).map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(
+            effective.get(RENDERER_VOLUME_KEY).map(String::as_str),
+            Some("38")
+        );
+
+        settings.global.renderer.enable_audio = true;
+        settings.global.renderer.volume = MAX_RENDERER_VOLUME;
+        let restored = settings.resolved_renderer_settings(renderer);
+        assert_eq!(
+            restored.get(RENDERER_ENABLE_AUDIO_KEY).map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            restored.get(RENDERER_VOLUME_KEY).map(String::as_str),
+            Some("75")
+        );
+        assert_eq!(
+            settings.plugins[&renderer.name][RENDERER_ENABLE_AUDIO_KEY],
+            "true"
+        );
+        assert_eq!(settings.plugins[&renderer.name][RENDERER_VOLUME_KEY], "75");
+    }
+
+    #[test]
+    fn renderer_global_settings_roundtrip_toml() {
+        let settings: Settings = toml::from_str(
+            r#"
+[global.renderer]
+enable_audio = false
+volume = 35
+"#,
+        )
+        .unwrap();
+        assert!(!settings.global.renderer.enable_audio);
+        assert_eq!(settings.global.renderer.volume, 35);
+
+        let encoded = toml::to_string(&settings).unwrap();
+        let decoded: Settings = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded.global.renderer, settings.global.renderer);
+
+        let legacy: Settings = toml::from_str("[global]\nrotation_secs = 10\n").unwrap();
+        assert_eq!(legacy.global.renderer, GlobalRendererSettings::default());
     }
 }

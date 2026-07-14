@@ -1064,6 +1064,13 @@ message LibraryRemoved {
 // Settings
 // ---------------------------------------------------------------------------
 
+message GlobalRendererSettings {
+  // Master audio gate for renderers that declare an `enable_audio` setting.
+  optional bool enable_audio = 1;
+  // Percentage factor multiplied with each renderer's `volume` setting.
+  optional uint32 volume = 2;
+}
+
 message GlobalSettings {
   // Tag 1 / 2 used to be `default_width`/`default_height`; replaced by
   // `target_extent` + `render_size_policy` in v7. Both were dropped in
@@ -1120,6 +1127,9 @@ message GlobalSettings {
   // When enabled, one wallpaper applied to multiple displays gets one
   // renderer per display instead of sharing a single renderer instance.
   bool duplicate_renderers_for_same_wallpaper = 19;
+
+  // Daemon-wide gates applied over renderer-specific settings.
+  GlobalRendererSettings renderer = 20;
 }
 
 enum AutoAction {

@@ -12,7 +12,9 @@ use tokio::io::AsyncWriteExt;
 use crate::error::{Error, Result};
 use crate::events::GlobalEvent;
 use crate::model::{repo, sync};
-use crate::plugin::renderer_registry::{PluginPackageMeta, PluginScan, RendererRegistry};
+use crate::plugin::renderer_registry::{
+    PluginPackageMeta, PluginScan, RendererDef, RendererRegistry,
+};
 use crate::plugin::update::{PluginUpdateInfo, PluginUpdateState};
 use crate::queue::rotator::RotationConfig;
 use crate::queue::Mode;
@@ -833,11 +835,11 @@ async fn apply_via_portal_inner(app: &Arc<AppState>, id: &str) -> Result<PortalA
     })
 }
 
-fn resolve_renderer_plugin_name(
+fn resolve_renderer(
     app: &Arc<AppState>,
     entry: &WallpaperEntry,
     renderer_name: Option<&str>,
-) -> Result<String> {
+) -> Result<RendererDef> {
     let registry = app.renderer_manager.registry_snapshot();
     match renderer_name {
         Some(name) if !name.is_empty() => {
@@ -850,11 +852,11 @@ fn resolve_renderer_plugin_name(
                     ty: entry.wp_type.clone(),
                 });
             }
-            Ok(def.name.clone())
+            Ok(def.clone())
         }
         _ => registry
             .resolve(&entry.wp_type)
-            .map(|def| def.name.clone())
+            .cloned()
             .ok_or_else(|| Error::NoRendererForType(entry.wp_type.clone())),
     }
 }
@@ -986,18 +988,15 @@ pub async fn apply_wallpaper_with_options(
         return Err(Error::NoDisplayRegistered);
     }
 
-    let renderer_plugin_name =
-        resolve_renderer_plugin_name(app, &entry, options.renderer_name.as_deref())?;
+    let renderer = resolve_renderer(app, &entry, options.renderer_name.as_deref())?;
+    let renderer_plugin_name = renderer.name.clone();
     let extras = app
         .source_manager
         .lock()
         .await
         .call_extras(&entry.plugin_name, &entry)
         .await?;
-    let spawn_settings = app
-        .settings
-        .plugin(&renderer_plugin_name)
-        .unwrap_or_default();
+    let spawn_settings = app.settings.resolved_renderer_settings(&renderer);
     let (user_properties_json, wallpaper_layout_override) =
         repo::get_wallpaper_render_properties(&app.db, entry.item_id).await?;
     let spawn_req = renderer_manager::SpawnRequest {
@@ -1005,11 +1004,7 @@ pub async fn apply_wallpaper_with_options(
         extras,
         settings: spawn_settings,
         test_pattern: false,
-        renderer_name: options
-            .renderer_name
-            .as_ref()
-            .filter(|name| !name.is_empty())
-            .map(|_| renderer_plugin_name.clone()),
+        renderer_name: Some(renderer_plugin_name.clone()),
         user_properties_json,
     };
     let target = options.display_ids.as_deref();

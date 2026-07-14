@@ -142,6 +142,7 @@ using proto::AutostartGetRequest;
 using proto::AutostartGetResponse;
 using proto::AutostartSetRequest;
 using proto::AutostartSetResponse;
+using proto::GlobalRendererSettings;
 using proto::GlobalSettings;
 using proto::LayoutPrefs;
 using proto::PluginSettings;

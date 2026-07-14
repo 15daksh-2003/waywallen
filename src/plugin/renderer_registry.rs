@@ -471,28 +471,34 @@ fn coerce_setting(raw: &str, ty: SettingType) -> Option<String> {
     }
 }
 
-/// Stringify a `toml::Value` default coerced to `ty`.
-/// Returns `None` when the default is structurally incompatible.
-fn toml_default_to_string(value: &toml::Value, ty: SettingType) -> Option<String> {
-    match (value, ty) {
-        (toml::Value::Integer(i), SettingType::U32) => {
-            if *i >= 0 {
-                Some(i.to_string())
-            } else {
-                None
-            }
-        }
-        (toml::Value::Integer(i), SettingType::I32) => {
-            i32::try_from(*i).ok().map(|v| v.to_string())
-        }
-        (toml::Value::Integer(i), SettingType::F32) => Some((*i as f32).to_string()),
-        (toml::Value::Float(f), SettingType::F32) => Some(f.to_string()),
-        (toml::Value::Boolean(b), SettingType::Bool) => Some(b.to_string()),
-        (toml::Value::String(s), SettingType::String) => Some(s.clone()),
-        // Common manifest mistake: declaring `default = "30"` for a
-        // u32 setting. Be lenient — try to parse the string.
-        (toml::Value::String(s), other) => coerce_setting(s, other),
-        _ => None,
+/// Return a setting's manifest default in its canonical wire form.
+pub fn setting_default_value(setting: &SettingDef) -> String {
+    match setting.ty {
+        SettingType::U32 => match &setting.default {
+            toml::Value::Integer(i) if *i >= 0 => i.to_string(),
+            toml::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        },
+        SettingType::I32 => match &setting.default {
+            toml::Value::Integer(i) => i.to_string(),
+            toml::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        },
+        SettingType::F32 => match &setting.default {
+            toml::Value::Float(f) => f.to_string(),
+            toml::Value::Integer(i) => (*i as f32).to_string(),
+            toml::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        },
+        SettingType::Bool => match &setting.default {
+            toml::Value::Boolean(b) => b.to_string(),
+            toml::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        },
+        SettingType::String => match &setting.default {
+            toml::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        },
     }
 }
 
