@@ -23,6 +23,11 @@ namespace detail
 
 using ResponseHandle = rstd::async::CompletionHandle<proto::Response, QString>;
 
+auto as_byte_array_view(slice<rstd::byte> bytes) -> QByteArrayView {
+    return { reinterpret_cast<const char*>(bytes.as_raw_ptr()),
+             static_cast<qsizetype>(bytes.len()) };
+}
+
 class BackendTransport : public QObject {
 public:
     explicit BackendTransport(Backend* backend): m_backend(backend) {}
@@ -31,7 +36,7 @@ public:
         m_serializer = std::make_unique<QProtobufSerializer>();
         m_client     = std::make_unique<ncrequest::WebSocketClient>();
 
-        m_client->set_on_error_callback([this](auto error) {
+        m_client->set_on_error_callback([this](ref<str> error) {
             auto message = QString::fromUtf8(reinterpret_cast<const char*>(error.data()),
                                              static_cast<qsizetype>(error.size()));
             qWarning("ws error: %s", qPrintable(message));
@@ -46,20 +51,20 @@ public:
             Q_EMIT m_backend->transportDisconnected();
         });
         m_client->set_on_message_callback(
-            [this, cache = std::make_shared<std::vector<rstd::byte>>()](
-                std::span<const rstd::byte> bytes, bool last) {
+            [this, cache = QByteArray {}](slice<rstd::byte> bytes, bool last) mutable {
+                auto chunk = as_byte_array_view(bytes);
                 if (! last) {
-                    std::ranges::copy(bytes, std::back_inserter(*cache));
+                    cache.append(chunk);
                     return;
                 }
 
                 proto::ServerFrame frame;
-                if (cache->empty()) {
-                    frame.deserialize(m_serializer.get(), bytes);
+                if (cache.isEmpty()) {
+                    frame.deserialize(m_serializer.get(), chunk);
                 } else {
-                    std::ranges::copy(bytes, std::back_inserter(*cache));
-                    frame.deserialize(m_serializer.get(), *cache);
-                    cache->clear();
+                    cache.append(chunk);
+                    frame.deserialize(m_serializer.get(), cache);
+                    cache.clear();
                 }
 
                 if (frame.hasResponse()) {
@@ -99,10 +104,9 @@ public:
     void send_untracked(proto::Request request) {
         if (! m_client || ! m_client->is_connected()) return;
         auto bytes = request.serialize(m_serializer.get());
-        m_client->send(std::span<const rstd::byte> {
+        m_client->send(slice<rstd::byte>::from_raw_parts(
             reinterpret_cast<const rstd::byte*>(bytes.constData()),
-            static_cast<usize>(bytes.size()),
-        });
+            static_cast<usize>(bytes.size())));
     }
 
     void cancel(quint64 request_id) { m_handlers.erase(request_id); }
