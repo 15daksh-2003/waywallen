@@ -48,7 +48,6 @@ pub struct State {
     pub last_flags: u32,
     pub raw: Decision,
     pub requested: Decision,
-    pub gen: u64,
     pub stop_applied: bool,
 }
 

@@ -8,7 +8,10 @@ use tokio::task::JoinHandle;
 /// Grace period an orphan renderer keeps running before it is killed.
 /// Only granted to the last renderer while the daemon has zero displays.
 const ORPHAN_REAP_TIMEOUT: Duration = Duration::from_secs(5);
-const AUTO_REPLAY_RESUME_DELAY: Duration = Duration::from_millis(500);
+const RESUME_RETRY_INITIAL: Duration = Duration::from_millis(100);
+const RESUME_RETRY_SECOND: Duration = Duration::from_secs(2);
+const RESUME_RETRY_THIRD: Duration = Duration::from_secs(5);
+const RESUME_RETRY_MAX: Duration = Duration::from_secs(10);
 
 use crate::display::layout::{FillMode, LayoutInput};
 use crate::ipc::proto::{ControlMsg, EventMsg};
@@ -54,8 +57,53 @@ pub struct AutoStopEvent {
 
 enum AutoStateAction {
     Reconcile,
-    ScheduleResume { display_id: DisplayId, gen: u64 },
     Noop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResumeControl {
+    Play { fade_ms: u32 },
+    Unmute { fade_ms: u32 },
+}
+
+impl ResumeControl {
+    fn from_message(message: &ControlMsg) -> Option<Self> {
+        match message {
+            ControlMsg::Play { fade_ms } => Some(Self::Play { fade_ms: *fade_ms }),
+            ControlMsg::Unmute { fade_ms } => Some(Self::Unmute { fade_ms: *fade_ms }),
+            _ => None,
+        }
+    }
+
+    fn into_message(self) -> ControlMsg {
+        match self {
+            Self::Play { fade_ms } => ControlMsg::Play { fade_ms },
+            Self::Unmute { fade_ms } => ControlMsg::Unmute { fade_ms },
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Play { .. } => "play",
+            Self::Unmute { .. } => "unmute",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResumeRetry {
+    control: ResumeControl,
+    failures: u32,
+    generation: u64,
+}
+
+fn resume_retry_delay(failures: u32) -> Duration {
+    match failures {
+        0 | 1 => RESUME_RETRY_INITIAL,
+        2 => RESUME_RETRY_SECOND,
+        3 => RESUME_RETRY_THIRD,
+        _ => RESUME_RETRY_MAX,
+    }
 }
 
 /// Initial-registration payload from `display::endpoint::do_handshake`.
@@ -232,6 +280,8 @@ struct Inner {
     /// The states of the paused renderers we know about.
     /// Used to compute play/pause and mute/unmute state.
     renderer_states: HashMap<RendererId, PausedRendererStatus>,
+    resume_retries: HashMap<RendererId, ResumeRetry>,
+    next_resume_retry_generation: u64,
     /// Set when the screen-saver / lock-screen is active.
     session_locked: bool,
     /// Set when the current login session is inactive.
@@ -253,6 +303,7 @@ struct Inner {
 
 pub struct Router {
     inner: TokioMutex<Inner>,
+    lifecycle_lock: TokioMutex<()>,
     /// Renderer manager used for pause/play lifecycle control.
     mgr: Arc<RendererManager>,
     /// Fan-out channel for `RouterEvent`s. Always present; `send` errors
@@ -283,6 +334,8 @@ impl Router {
                 displays: HashMap::new(),
                 renderer_tasks: HashMap::new(),
                 renderer_states: HashMap::new(),
+                resume_retries: HashMap::new(),
+                next_resume_retry_generation: 0,
                 orphan_timers: HashMap::new(),
                 unbind_acks_pending: HashMap::new(),
                 wallpaper_layout_overrides: HashMap::new(),
@@ -293,6 +346,7 @@ impl Router {
                 manual_paused: false,
                 manual_muted: false,
             }),
+            lifecycle_lock: TokioMutex::new(()),
             mgr,
             events_tx,
             auto_stop_tx,
@@ -636,6 +690,7 @@ impl Router {
                 task.abort();
             }
             inner.renderer_states.remove(id);
+            inner.resume_retries.remove(id);
             removed.into_iter().map(|(_, did)| did).collect()
         };
         self.emit(RouterEvent::RendererRemoved(id.to_string()));
@@ -1046,7 +1101,6 @@ impl Router {
         }
         state.auto_replay.raw = new_raw;
         if new_raw.is_active() {
-            state.auto_replay.gen = state.auto_replay.gen.wrapping_add(1);
             if state.auto_replay.requested != new_raw {
                 state.auto_replay.requested = new_raw;
                 AutoStateAction::Reconcile
@@ -1054,11 +1108,8 @@ impl Router {
                 AutoStateAction::Noop
             }
         } else if state.auto_replay.requested.is_active() {
-            state.auto_replay.gen = state.auto_replay.gen.wrapping_add(1);
-            AutoStateAction::ScheduleResume {
-                display_id,
-                gen: state.auto_replay.gen,
-            }
+            state.auto_replay.requested = new_raw;
+            AutoStateAction::Reconcile
         } else {
             state.auto_replay.requested = new_raw;
             AutoStateAction::Noop
@@ -1071,31 +1122,6 @@ impl Router {
             AutoStateAction::Reconcile => {
                 self.apply_auto_stop_links().await;
                 self.reconcile_lifecycle().await;
-            }
-            AutoStateAction::ScheduleResume { display_id, gen } => {
-                let router = Arc::clone(self);
-                tokio::spawn(async move {
-                    tokio::time::sleep(AUTO_REPLAY_RESUME_DELAY).await;
-                    let need_reconcile = {
-                        let mut inner = router.inner.lock().await;
-                        let Some(state) = inner.displays.get_mut(&display_id) else {
-                            return;
-                        };
-                        if state.auto_replay.gen != gen || state.auto_replay.raw.is_active() {
-                            return;
-                        }
-                        if state.auto_replay.requested.is_active() {
-                            state.auto_replay.requested = state.auto_replay.raw;
-                            true
-                        } else {
-                            false
-                        }
-                    };
-                    if need_reconcile {
-                        router.apply_auto_stop_links().await;
-                        router.reconcile_lifecycle().await;
-                    }
-                });
             }
         }
     }
@@ -1873,6 +1899,7 @@ impl Router {
     /// Compute the current Pause/Play diff and dispatch control
     /// messages outside the inner lock after lifecycle mutations.
     async fn reconcile_lifecycle(self: &Arc<Self>) {
+        let _lifecycle = self.lifecycle_lock.lock().await;
         let audio_fade_ms = self.resolved_audio_fade_ms();
         let actions: Vec<(RendererId, ControlMsg, &'static str)> = {
             let mut inner = self.inner.lock().await;
@@ -1927,6 +1954,9 @@ impl Router {
                 } else {
                     RendererStatus::Playing
                 };
+                if target_state != RendererStatus::Playing {
+                    inner.resume_retries.remove(&rid);
+                }
                 if previous_state == target_state {
                     continue;
                 }
@@ -2038,6 +2068,7 @@ impl Router {
             }
         }
         for (id, msg, cause) in actions {
+            let resume_control = ResumeControl::from_message(&msg);
             let label = match msg {
                 ControlMsg::Pause { .. } => "pause",
                 ControlMsg::Play { .. } => "play",
@@ -2045,13 +2076,145 @@ impl Router {
             };
             if let Err(e) = self.mgr.send_control(&id, msg).await {
                 log::warn!("router: {label} {id}: {e}");
+                if let Some(control) = resume_control {
+                    self.schedule_resume_retry(&id, control).await;
+                }
             } else {
                 log::info!("router: {label} renderer {id} ({cause})");
+                if resume_control.is_some() {
+                    self.clear_resume_retry(&id).await;
+                }
             }
         }
         for id in changed_ids {
             if let Some(snap) = self.snapshot_renderer(&id).await {
                 self.emit(RouterEvent::RendererUpsert(snap));
+            }
+        }
+    }
+
+    async fn clear_resume_retry(&self, renderer_id: &str) {
+        self.inner.lock().await.resume_retries.remove(renderer_id);
+    }
+
+    async fn schedule_resume_retry(self: &Arc<Self>, renderer_id: &str, control: ResumeControl) {
+        let scheduled = {
+            let mut inner = self.inner.lock().await;
+            if inner.renderer_states.contains_key(renderer_id)
+                || inner.table.get_renderer(renderer_id).is_none()
+            {
+                inner.resume_retries.remove(renderer_id);
+                None
+            } else if inner.resume_retries.contains_key(renderer_id) {
+                None
+            } else {
+                inner.next_resume_retry_generation =
+                    inner.next_resume_retry_generation.wrapping_add(1);
+                let generation = inner.next_resume_retry_generation;
+                inner.resume_retries.insert(
+                    renderer_id.to_string(),
+                    ResumeRetry {
+                        control,
+                        failures: 1,
+                        generation,
+                    },
+                );
+                Some(generation)
+            }
+        };
+        let Some(generation) = scheduled else {
+            return;
+        };
+        let delay = resume_retry_delay(1);
+        log::warn!(
+            "router: {} {renderer_id} failed 1 time(s); retrying in {delay:?}",
+            control.label()
+        );
+        let router = Arc::clone(self);
+        let renderer_id = renderer_id.to_string();
+        tokio::spawn(async move {
+            router
+                .run_renderer_resume_retry(renderer_id, generation)
+                .await;
+        });
+    }
+
+    async fn run_renderer_resume_retry(self: &Arc<Self>, renderer_id: RendererId, generation: u64) {
+        loop {
+            let (control, failures) = {
+                let mut inner = self.inner.lock().await;
+                let Some(retry) = inner.resume_retries.get(&renderer_id).copied() else {
+                    return;
+                };
+                if retry.generation != generation {
+                    return;
+                }
+                if inner.renderer_states.contains_key(&renderer_id)
+                    || inner.table.get_renderer(&renderer_id).is_none()
+                {
+                    inner.resume_retries.remove(&renderer_id);
+                    return;
+                }
+                (retry.control, retry.failures)
+            };
+
+            tokio::time::sleep(resume_retry_delay(failures)).await;
+
+            let _lifecycle = self.lifecycle_lock.lock().await;
+            {
+                let mut inner = self.inner.lock().await;
+                let Some(retry) = inner.resume_retries.get(&renderer_id).copied() else {
+                    return;
+                };
+                if retry.generation != generation {
+                    return;
+                }
+                if inner.renderer_states.contains_key(&renderer_id)
+                    || inner.table.get_renderer(&renderer_id).is_none()
+                {
+                    inner.resume_retries.remove(&renderer_id);
+                    return;
+                }
+            }
+
+            match self
+                .mgr
+                .send_control(&renderer_id, control.into_message())
+                .await
+            {
+                Ok(()) => {
+                    let mut inner = self.inner.lock().await;
+                    if inner
+                        .resume_retries
+                        .get(&renderer_id)
+                        .is_some_and(|retry| retry.generation == generation)
+                    {
+                        inner.resume_retries.remove(&renderer_id);
+                    }
+                    log::info!(
+                        "router: {} renderer {renderer_id} retry succeeded",
+                        control.label()
+                    );
+                    return;
+                }
+                Err(e) => {
+                    let failures = {
+                        let mut inner = self.inner.lock().await;
+                        let Some(retry) = inner.resume_retries.get_mut(&renderer_id) else {
+                            return;
+                        };
+                        if retry.generation != generation {
+                            return;
+                        }
+                        retry.failures = retry.failures.saturating_add(1);
+                        retry.failures
+                    };
+                    let delay = resume_retry_delay(failures);
+                    log::warn!(
+                        "router: {} {renderer_id} failed {failures} time(s): {e}; retrying in {delay:?}",
+                        control.label()
+                    );
+                }
             }
         }
     }
@@ -3509,11 +3672,6 @@ mod tests {
         router
             .update_display_window_state(h.id, ar::FLAG_NON_MINIMIZED)
             .await;
-        tokio::task::yield_now().await;
-        tokio::time::advance(AUTO_REPLAY_RESUME_DELAY + Duration::from_millis(50)).await;
-        for _ in 0..50 {
-            tokio::task::yield_now().await;
-        }
 
         assert!(!router.is_paused("r1").await);
         assert!(!router.is_muted("r1").await);
@@ -3573,11 +3731,6 @@ mod tests {
         router
             .update_display_window_state(h.id, ar::FLAG_NON_MINIMIZED)
             .await;
-        tokio::task::yield_now().await;
-        tokio::time::advance(AUTO_REPLAY_RESUME_DELAY + Duration::from_millis(50)).await;
-        for _ in 0..50 {
-            tokio::task::yield_now().await;
-        }
 
         assert!(!router.is_paused("r1").await);
         assert!(!router.is_muted("r1").await);
@@ -3626,7 +3779,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn auto_replay_resume_is_debounced() {
+    async fn auto_replay_resume_is_immediate() {
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
         router.attach_settings(
@@ -3636,7 +3789,7 @@ mod tests {
             )]))
             .await,
         );
-        let r = RendererHandle::test_stub("r1", "scene");
+        let (r, _peer) = RendererHandle::test_stub_with_peer("r1", "scene");
         mgr.register_test_handle(r.clone()).await;
         router.register_renderer(r.clone()).await;
         let h = router.register_display(reg("HDMI-A-1", 1920, 1080)).await;
@@ -3647,33 +3800,54 @@ mod tests {
             .await;
         assert!(router.is_paused("r1").await);
 
-        // Flag drops -> state machine schedules a delayed resume. Still
-        // paused immediately afterwards.
+        // Flag drops -> state machine resumes immediately.
         router
             .update_display_window_state(h.id, ar::FLAG_NON_MINIMIZED)
             .await;
-        assert!(router.is_paused("r1").await);
-
-        tokio::task::yield_now().await;
-        // Advance past the resume window. The spawned timer fires and
-        // flips `requested`, then reconcile_lifecycle sends Play.
-        tokio::time::advance(AUTO_REPLAY_RESUME_DELAY + std::time::Duration::from_millis(50)).await;
-        let mut flipped = false;
-        for _ in 0..50 {
-            tokio::task::yield_now().await;
-            if !router.is_paused("r1").await {
-                flipped = true;
-                break;
-            }
-        }
-        assert!(
-            flipped,
-            "resume timer did not flip renderer back to playing"
-        );
+        assert!(!router.is_paused("r1").await);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn auto_replay_resume_cancelled_by_new_pause() {
+    async fn auto_replay_pause_reapplies_after_immediate_resume() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        router.attach_settings(
+            settings_with_auto_replay(auto_replay(&[(
+                AutoCondition::Fullscreen,
+                AutoAction::Pause,
+            )]))
+            .await,
+        );
+        let (r, _peer) = RendererHandle::test_stub_with_peer("r1", "scene");
+        mgr.register_test_handle(r.clone()).await;
+        router.register_renderer(r.clone()).await;
+        let h = router.register_display(reg("HDMI-A-1", 1920, 1080)).await;
+
+        // Pause, resume, then immediately re-enter fullscreen.
+        router
+            .update_display_window_state(h.id, ar::FLAG_NON_MINIMIZED | ar::FLAG_FULLSCREEN)
+            .await;
+        router
+            .update_display_window_state(h.id, ar::FLAG_NON_MINIMIZED)
+            .await;
+        assert!(!router.is_paused("r1").await);
+        router
+            .update_display_window_state(h.id, ar::FLAG_NON_MINIMIZED | ar::FLAG_FULLSCREEN)
+            .await;
+        assert!(router.is_paused("r1").await);
+    }
+
+    #[test]
+    fn renderer_resume_retry_delay_increases_and_caps() {
+        assert_eq!(resume_retry_delay(1), Duration::from_millis(100));
+        assert_eq!(resume_retry_delay(2), Duration::from_secs(2));
+        assert_eq!(resume_retry_delay(3), Duration::from_secs(5));
+        assert_eq!(resume_retry_delay(4), Duration::from_secs(10));
+        assert_eq!(resume_retry_delay(32), RESUME_RETRY_MAX);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn renderer_resume_failures_increase_retry_count() {
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
         router.attach_settings(
@@ -3685,28 +3859,90 @@ mod tests {
         );
         let r = RendererHandle::test_stub("r1", "scene");
         mgr.register_test_handle(r.clone()).await;
-        router.register_renderer(r.clone()).await;
+        router.register_renderer(r).await;
         let h = router.register_display(reg("HDMI-A-1", 1920, 1080)).await;
 
-        // Pause, then start a resume window, then immediately re-enter
-        // fullscreen - the pending resume timer must be invalidated.
         router
             .update_display_window_state(h.id, ar::FLAG_NON_MINIMIZED | ar::FLAG_FULLSCREEN)
             .await;
         router
             .update_display_window_state(h.id, ar::FLAG_NON_MINIMIZED)
             .await;
-        router
-            .update_display_window_state(h.id, ar::FLAG_NON_MINIMIZED | ar::FLAG_FULLSCREEN)
-            .await;
+        assert_eq!(
+            router
+                .inner
+                .lock()
+                .await
+                .resume_retries
+                .get("r1")
+                .map(|retry| retry.failures),
+            Some(1)
+        );
 
-        tokio::time::advance(AUTO_REPLAY_RESUME_DELAY + std::time::Duration::from_millis(50)).await;
-        // Give any in-flight tasks a chance to run; renderer must
-        // remain paused because the middle resume timer was invalidated.
+        tokio::task::yield_now().await;
+        tokio::time::advance(RESUME_RETRY_INITIAL).await;
         for _ in 0..50 {
+            tokio::task::yield_now().await;
+            if router
+                .inner
+                .lock()
+                .await
+                .resume_retries
+                .get("r1")
+                .is_some_and(|retry| retry.failures == 2)
+            {
+                return;
+            }
+        }
+        panic!("second resume failure was not recorded");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn renderer_resume_retry_clears_after_success() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        let (r, _peer) = RendererHandle::test_stub_with_peer("r1", "scene");
+        mgr.register_test_handle(r.clone()).await;
+        router.register_renderer(r).await;
+        let _display = router.register_display(reg("HDMI-A-1", 1920, 1080)).await;
+
+        router
+            .schedule_resume_retry("r1", ResumeControl::Play { fade_ms: 0 })
+            .await;
+        assert!(router.inner.lock().await.resume_retries.contains_key("r1"));
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(RESUME_RETRY_INITIAL).await;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+            if !router.inner.lock().await.resume_retries.contains_key("r1") {
+                return;
+            }
+        }
+        panic!("successful resume retry did not clear backoff state");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn renderer_resume_retry_is_cancelled_by_pause() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        let (r, _peer) = RendererHandle::test_stub_with_peer("r1", "scene");
+        mgr.register_test_handle(r.clone()).await;
+        router.register_renderer(r).await;
+        let _display = router.register_display(reg("HDMI-A-1", 1920, 1080)).await;
+
+        router
+            .schedule_resume_retry("r1", ResumeControl::Play { fade_ms: 0 })
+            .await;
+        router.set_manual_pause(true).await;
+        assert!(!router.inner.lock().await.resume_retries.contains_key("r1"));
+
+        tokio::time::advance(RESUME_RETRY_INITIAL).await;
+        for _ in 0..10 {
             tokio::task::yield_now().await;
         }
         assert!(router.is_paused("r1").await);
+        assert!(!router.inner.lock().await.resume_retries.contains_key("r1"));
     }
 
     #[tokio::test]
