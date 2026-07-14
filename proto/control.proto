@@ -83,6 +83,9 @@ message Request {
     PluginUpdateInstallRequest plugin_update_install = 64;
     AutostartGetRequest       autostart_get = 65;
     AutostartSetRequest       autostart_set = 66;
+    SteamLoginStartRequest    steam_login_start = 67;
+    SteamLoginCancelRequest   steam_login_cancel = 68;
+    PluginActionRequest       plugin_action = 69;
   }
 }
 
@@ -153,6 +156,9 @@ message Response {
     PluginUpdateInstallResponse plugin_update_install = 64;
     AutostartGetResponse       autostart_get = 65;
     AutostartSetResponse       autostart_set = 66;
+    SteamLoginStartResponse    steam_login_start = 67;
+    SteamLoginCancelResponse   steam_login_cancel = 68;
+    PluginActionResponse       plugin_action = 69;
   }
 }
 
@@ -476,6 +482,12 @@ message SourcePluginInfo {
   // Longer helper text describing what kind of path to choose. May
   // contain newlines. Empty = no hint shown.
   string library_hint = 5;
+  // Domain id of the owning plugin (e.g. org.waywallen.workshop), so the
+  // UI can address its `[plugin."<id>"]` config table for SettingsSet.
+  string plugin_id = 6;
+  // User-configurable settings the plugin declares via `info().settings`,
+  // rendered by the generic plugin-settings page.
+  repeated SettingSchema settings = 7;
 }
 
 message WallpaperApplyRequest {
@@ -666,6 +678,43 @@ message RemoteSourceInfo {
   repeated RemoteSortOption sorts = 4;
   repeated string tags = 5;
   string content_dir = 6;
+  // Domain id of the owning plugin (e.g. org.waywallen.workshop) — the key of
+  // its `[plugin."<id>"]` config table for SettingsSet.
+  string owner_plugin_id = 7;
+  // Settings the source plugin declares via `info().settings`, so the UI can
+  // offer a config affordance for this source.
+  repeated SettingSchema settings = 8;
+  // Human-readable display name (falls back to `name`/`id`).
+  string display_name = 9;
+  // Action buttons (`info().actions`) rendered in the config page.
+  repeated PluginActionDef actions = 10;
+  // Read-only status rows (`info().status`) with daemon-computed values.
+  repeated PluginStatusRow status = 11;
+}
+
+message PluginActionDef {
+  string id = 1;
+  string label = 2;
+  string group = 3;
+  int32 order = 4;
+}
+message PluginStatusRow {
+  string id = 1;
+  string label = 2;
+  string group = 3;
+  int32 order = 4;
+  string value = 5;
+}
+
+// Trigger a plugin-declared action (e.g. the workshop Steam sign-in/out). The
+// daemon routes `action_id` to plugin-specific handling.
+message PluginActionRequest {
+  string plugin_id = 1;
+  string action_id = 2;
+}
+message PluginActionResponse {
+  bool accepted = 1;
+  string error = 2;
 }
 
 message RemoteAvailabilityResponse {
@@ -739,6 +788,36 @@ message RemoteDownloadProgress {
   string source_id = 1;
   string id = 2;
   RemoteDownloadState state = 3;
+  string error = 4;
+}
+
+// In-UI Steam login: the daemon drives DepotDownloader's own `-qr` flow and
+// relays its ASCII-art QR (DepotDownloader never prints the challenge URL) plus
+// status to the UI. Used by the org.waywallen.workshop plugin's downloads.
+message SteamLoginStartRequest {}
+message SteamLoginStartResponse {
+  bool   accepted = 1;
+  string error = 2;
+}
+message SteamLoginCancelRequest {}
+message SteamLoginCancelResponse {
+  bool cancelled = 1;
+}
+enum SteamLoginState {
+  STEAM_LOGIN_STATE_UNSPECIFIED = 0;
+  STEAM_LOGIN_STATE_STARTING = 1;
+  STEAM_LOGIN_STATE_AWAITING_SCAN = 2;
+  STEAM_LOGIN_STATE_SUCCESS = 3;
+  STEAM_LOGIN_STATE_FAILED = 4;
+  STEAM_LOGIN_STATE_CANCELLED = 5;
+}
+message SteamLoginProgress {
+  SteamLoginState state = 1;
+  // QR image (SVG `data:` URL) to render for scanning, set when
+  // state == AWAITING_SCAN.
+  string qr_image = 2;
+  // Steam account name, set when state == SUCCESS.
+  string account_name = 3;
   string error = 4;
 }
 
@@ -843,6 +922,7 @@ message Event {
     TaskProgress           task_progress             = 19;
     PluginRestartFailed    plugin_restart_failed     = 20;
     Empty                  plugin_changed            = 21;
+    SteamLoginProgress     steam_login_progress      = 22;
   }
 }
 
