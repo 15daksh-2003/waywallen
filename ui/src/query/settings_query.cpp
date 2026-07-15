@@ -94,6 +94,7 @@ auto global_to_map(const proto::GlobalSettings& g) -> QVariantMap {
         ! has_renderer || ! g.renderer().hasEnableAudio() || g.renderer().enableAudio();
     m[u"renderer.volume"_s] =
         has_renderer && g.renderer().hasVolume() ? g.renderer().volume() : 100;
+    m[u"hideTrayIcon"_s]              = g.hideTrayIcon();
     QStringList wallpaper_skip_types;
     for (const auto& t : g.wallpaperSkipTypes()) {
         wallpaper_skip_types.append(t);
@@ -175,6 +176,9 @@ auto map_to_global(const QVariantMap& m) -> proto::GlobalSettings {
             renderer.setVolume(m.value(u"renderer.volume"_s).toUInt());
         }
         g.setRenderer(std::move(renderer));
+    }
+    if (m.contains(u"hideTrayIcon"_s)) {
+        g.setHideTrayIcon(m.value(u"hideTrayIcon"_s).toBool());
     }
     if (m.contains(u"wallpaperSkipTypes"_s)) {
         QStringList skip;

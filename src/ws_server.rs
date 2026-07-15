@@ -687,6 +687,7 @@ fn global_to_pb(g: &crate::settings::GlobalSettings) -> pb::GlobalSettings {
             enable_audio: Some(g.renderer.enable_audio),
             volume: Some(g.renderer.effective_volume()),
         }),
+        hide_tray_icon: g.hide_tray_icon,
     }
 }
 
@@ -2580,6 +2581,7 @@ async fn dispatch_inner(
             let prev_layout = previous_settings.global.layout.clone();
             let prev_queue_mode = previous_settings.global.queue_mode.clone();
             let prev_rotation_secs = previous_settings.global.rotation_secs;
+            let prev_hide_tray = previous_settings.global.hide_tray_icon;
             state.settings.update(|s| {
                 if let Some(g) = r.global.as_ref() {
                     s.global.wallpaper_filter = WallpaperFilterState::from_pb(
@@ -2628,6 +2630,7 @@ async fn dispatch_inner(
                                 volume.min(crate::settings::MAX_RENDERER_VOLUME);
                         }
                     }
+                    s.global.hide_tray_icon = g.hide_tray_icon;
                 }
                 s.plugins = new_plugins.clone();
             });
@@ -2662,6 +2665,18 @@ async fn dispatch_inner(
             let new_rotation_secs = current_settings.global.rotation_secs;
             if new_rotation_secs != prev_rotation_secs {
                 state.rotation.set_interval(new_rotation_secs);
+            }
+            let new_hide_tray = current_settings.global.hide_tray_icon;
+            if new_hide_tray != prev_hide_tray {
+                if state.no_tray {
+                    log::info!(
+                        "--no-tray active; hide_tray_icon={new_hide_tray} takes effect next run"
+                    );
+                } else if new_hide_tray {
+                    crate::tray::ensure_stopped(state).await;
+                } else {
+                    crate::tray::ensure_started(state.clone()).await;
+                }
             }
             let mut apply_failures: Vec<String> = Vec::new();
             let registry = state.renderer_manager.registry_snapshot();

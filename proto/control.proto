@@ -1130,6 +1130,10 @@ message GlobalSettings {
 
   // Daemon-wide gates applied over renderer-specific settings.
   GlobalRendererSettings renderer = 20;
+
+  // Hide the tray icon. The daemon applies this live; the window can
+  // be reopened by launching waywallen again. `--no-tray` overrides.
+  bool hide_tray_icon = 21;
 }
 
 enum AutoAction {
