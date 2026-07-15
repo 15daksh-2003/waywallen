@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <pthread.h>
 
 #define WW_POOL_MAX_SLOTS  8
 #define WW_POOL_MAX_PLANES 4
@@ -55,6 +56,22 @@ typedef struct ww_pool_caps {
 
 struct ww_pool_backend_ops;
 
+typedef struct ww_pool_release_proof {
+    uint64_t                  bind_generation;
+    uint64_t                  release_point;
+    ww_pool_release_outcome_t outcome;
+    bool                      known;
+} ww_pool_release_proof_t;
+
+typedef struct ww_pool_pending_submit {
+    uint64_t                  bind_generation;
+    uint64_t                  release_point;
+    uint32_t                  slot_index;
+    ww_pool_release_outcome_t outcome;
+    bool                      active;
+    bool                      outcome_known;
+} ww_pool_pending_submit_t;
+
 /* The backend may store its own state in `backend_data`. */
 struct ww_pool {
     ww_pool_backend_t                 backend;
@@ -65,10 +82,17 @@ struct ww_pool {
      * pool — closed in destroy. Source: EGL/GBM backend dups the
      * plugin's render-node fd; Vulkan backend dups the plugin-supplied
      * fd or opens its own. */
-    int      drm_fd;
-    uint32_t release_syncobj_handle;
-    uint64_t release_point;
-    uint64_t last_release_point[WW_POOL_MAX_SLOTS];
+    int                      drm_fd;
+    uint32_t                 release_syncobj_handle;
+    uint64_t                 release_point;
+    uint64_t                 last_release_point[WW_POOL_MAX_SLOTS];
+    ww_pool_release_proof_t  release_proofs[WW_POOL_MAX_SLOTS];
+    ww_pool_pending_submit_t pending_submit;
+    pthread_mutex_t          release_mutex;
+    pthread_cond_t           release_cond;
+    bool                     release_sync_initialized;
+    bool                     session_lost;
+    uint32_t                 release_slot_count;
 
     /* Producer-side advertised caps (filled by backend->advertise_caps).
      * Stable across the pool's lifetime once advertise has run. */

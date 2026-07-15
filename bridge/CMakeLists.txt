@@ -42,6 +42,7 @@ target_include_directories(waywallen-bridge
 # that use the EGL/GBM backend pull this in transitively via
 # waywallen::bridge.
 find_package(PkgConfig REQUIRED)
+find_package(Threads REQUIRED)
 pkg_check_modules(WW_BRIDGE_EGL REQUIRED egl)
 pkg_check_modules(WW_BRIDGE_GBM REQUIRED gbm)
 find_package(Vulkan REQUIRED)
@@ -52,6 +53,7 @@ target_include_directories(waywallen-bridge SYSTEM PRIVATE
 )
 target_link_libraries(waywallen-bridge PRIVATE
     ${WW_BRIDGE_GBM_LIBRARIES}
+    Threads::Threads
 )
 
 target_compile_features(waywallen-bridge PUBLIC c_std_99)

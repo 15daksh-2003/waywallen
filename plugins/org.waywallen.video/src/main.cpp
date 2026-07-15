@@ -400,6 +400,22 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
         break;
     }
     case WW_EVT_IN_SHUTDOWN: signal_shutdown(host); break;
+    case WW_EVT_IN_RELEASE_RESOLVED: {
+        const auto& release = c.u.release_resolved;
+        int         rc      = release.outcome <= WW_POOL_RELEASE_FORCED
+                                  ? ww_bridge_pool_report_release(
+                                        host.pool,
+                                        release.buffer_generation,
+                                        release.buffer_index,
+                                        release.release_point,
+                                        static_cast<ww_pool_release_outcome_t>(release.outcome))
+                                  : -EPROTO;
+        if (rc != 0) {
+            rstd_warn("waywallen-video-renderer: release_resolved rejected: {}", rc);
+            if (rc == -EPIPE) signal_shutdown(host);
+        }
+        break;
+    }
     case WW_EVT_IN_NEGOTIATE_BUFFERS: {
         const auto&         nb = c.u.negotiate_buffers;
         ww_pool_directive_t d {};
@@ -1183,38 +1199,31 @@ int main(int argc, char** argv) {
         // PTS pacing: sleep until this frame is due. Drop if too late.
         if (! presenter.present_frame(frame_pts)) continue;
 
-        /* Wait timeout (600 ms) intentionally exceeds the daemon reaper's
-         * BUCKET_TIMEOUT (500 ms — see src/sync/reaper.rs); the reaper
-         * force-signals stragglers in that window, so a true -ETIME here
-         * means the safety-net itself didn't fire — backpressure is
-         * persistent, not transient. In that case drop this frame
-         * instead of racing past the consumer (writing into a slot the
-         * display still owns desyncs the pipeline and snowballs into
-         * post-resize stutter). Don't advance `slot` so we retry the
-         * same slot once it actually releases. */
-        {
-            int rc = ww_bridge_pool_wait_slot_release(host.pool, slot, 600);
-            if (rc == -ETIME) {
-                if ((stall_warn_counter++ % 30) == 0) {
-                    rstd_warn("waywallen-video-renderer: slot {} stalled (ETIME), dropping frame",
-                              slot);
-                }
-                continue;
-            }
-            if (rc != 0) {
-                rstd_warn("waywallen-video-renderer: wait_slot_release({}) rc={}", slot, rc);
-                // Hard error (not timeout) — proceed anyway, same as before.
-            } else {
-                stall_warn_counter = 0;
-            }
-        }
-
-        ww_pool_slot_t s {};
-        if (int rc = ww_bridge_pool_acquire_slot(host.pool, slot, &s); rc != 0) {
-            rstd_error("waywallen-video-renderer: acquire_slot({}) failed: {}", slot, rc);
+        ww_pool_slot_acquire_result_t acquired {};
+        int acquire_rc = ww_bridge_pool_acquire_slot_for_render(host.pool, slot, 600, &acquired);
+        if (acquire_rc != 0) {
+            rstd_error("waywallen-video-renderer: acquire slot contract failed: {}", acquire_rc);
             signal_shutdown(host);
             break;
         }
+        if (acquired.status == WW_POOL_SLOT_ACQUIRE_BUSY) {
+            if ((stall_warn_counter++ % 30) == 0) {
+                rstd_warn("waywallen-video-renderer: slot {} stalled, dropping frame", slot);
+            }
+            continue;
+        }
+        stall_warn_counter = 0;
+        if (acquired.status == WW_POOL_SLOT_ACQUIRE_FORCED_RELEASE ||
+            acquired.status == WW_POOL_SLOT_ACQUIRE_SESSION_LOST ||
+            acquired.status == WW_POOL_SLOT_ACQUIRE_ERROR) {
+            rstd_error("waywallen-video-renderer: slot {} cannot be reused (status={}, error={})",
+                       slot,
+                       static_cast<int>(acquired.status),
+                       acquired.error_code);
+            signal_shutdown(host);
+            break;
+        }
+        const auto& s = acquired.slot;
         if (! s.vk_image) {
             rstd_error("waywallen-video-renderer: slot {} has no VkImage handle", slot);
             signal_shutdown(host);
@@ -1281,9 +1290,15 @@ int main(int argc, char** argv) {
             break;
         }
         sync_fd = std::move(cv_res).unwrap();
-        std::lock_guard<std::mutex> send_lk(host.send_mu);
-        if (int rc = ww_bridge_pool_submit_slot(host.pool, host.sock, slot, sync_fd); rc != 0) {
-            rstd_error("waywallen-video-renderer: submit_slot rc={}", rc);
+        std::lock_guard<std::mutex>  send_lk(host.send_mu);
+        ww_pool_slot_submit_result_t submitted {};
+        int                          submit_rc =
+            ww_bridge_pool_submit_slot_for_render(host.pool, host.sock, slot, sync_fd, &submitted);
+        if (submit_rc != 0 || submitted.status != WW_POOL_SLOT_SUBMIT_SUBMITTED) {
+            rstd_error("waywallen-video-renderer: submit slot failed (rc={}, status={}, error={})",
+                       submit_rc,
+                       static_cast<int>(submitted.status),
+                       submitted.error_code);
             signal_shutdown(host);
             break;
         }

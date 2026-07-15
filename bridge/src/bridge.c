@@ -513,6 +513,9 @@ int ww_bridge_recv_control(int sock, ww_bridge_control_t* out) {
     case WW_EVT_IN_NEGOTIATE_BUFFERS:
         rc = ww_evt_in_negotiate_buffers_decode(body, body_len, &out->u.negotiate_buffers);
         break;
+    case WW_EVT_IN_RELEASE_RESOLVED:
+        rc = ww_evt_in_release_resolved_decode(body, body_len, &out->u.release_resolved);
+        break;
     default: rc = WW_ERR_UNKNOWN_OPCODE; break;
     }
 
@@ -537,6 +540,9 @@ void ww_bridge_control_free(ww_bridge_control_t* msg) {
     case WW_EVT_IN_SHUTDOWN: ww_evt_in_shutdown_free(&msg->u.shutdown); break;
     case WW_EVT_IN_NEGOTIATE_BUFFERS:
         ww_evt_in_negotiate_buffers_free(&msg->u.negotiate_buffers);
+        break;
+    case WW_EVT_IN_RELEASE_RESOLVED:
+        ww_evt_in_release_resolved_free(&msg->u.release_resolved);
         break;
     default: break;
     }

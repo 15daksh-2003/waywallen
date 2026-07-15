@@ -329,6 +329,20 @@ mod tests {
         assert_eq!(sent, got);
     }
 
+    #[test]
+    fn roundtrip_release_resolved() {
+        let (a, b) = pair();
+        let sent = EventIn::ReleaseResolved {
+            buffer_generation: 7,
+            buffer_index: 2,
+            release_point: 19,
+            outcome: 2,
+        };
+        send_control(&a, &sent, &[]).unwrap();
+        let (got, _) = recv_control(&b).unwrap();
+        assert_eq!(sent, got);
+    }
+
     fn make_memfd() -> OwnedFd {
         let name = CString::new("waywallen-ipc-test").unwrap();
         memfd_create(&name, MemFdCreateFlag::MFD_CLOEXEC).expect("memfd_create")

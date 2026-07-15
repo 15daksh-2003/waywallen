@@ -15,7 +15,7 @@
     <event_in> — daemon → subprocess (inbound to the renderer). All
                  control-plane notifications: init, setting_changed,
                  play, pause, set_fps, shutdown, pointer_*,
-                 mpris, negotiate_buffers.
+                 mpris, negotiate_buffers, release_resolved.
     <event>    — subprocess → daemon (outbound from the renderer):
                  ready, bind_buffers, frame_ready, error,
                  release_syncobj, format_caps, bind_failed, init_nack.
@@ -63,6 +63,10 @@
       The subprocess MUST `vkSemaphoreWait` (or equivalent) on
       `release_syncobj@release_point` before re-recording into the same
       `image_index`.
+    - Before signaling a `release_point`, the daemon MUST send exactly one
+      `release_resolved` carrying the matching bind generation, image index,
+      point, and resolution outcome. A producer may reuse the slot only when
+      both the timeline point and a non-forced outcome have arrived.
 
   Surface (consolidated; pre-1.0, internal testing — no compat shims):
 
@@ -129,7 +133,7 @@
     proprietary where every modifier is external_only), forcing the
     daemon to pick a COMPAT_LINEAR path regardless of consumer caps.
 
-  Version: 1 (file); spawn payload = SPAWN_VERSION 4
+  Version: 1 (file); spawn payload = SPAWN_VERSION 7
 -->
 <protocol name="waywallen_ipc" version="1">
 
@@ -138,7 +142,7 @@
        ================================================================== -->
 
   <!--
-    Spawn-time `init` (SPAWN_VERSION 5): typed payload sent by the
+    Spawn-time `init` (SPAWN_VERSION 7): typed payload sent by the
     daemon immediately after accept(). Carries the resolved L1
     `[renderer.settings]` kv list and user-property overrides.
     Render-target size is the renderer's own decision — it combines
@@ -152,7 +156,7 @@
     Fields:
       `spawn_version` — protocol version of the Init payload itself.
                         Renderer MUST send `init_nack` if it does not
-                        recognise the value. Current = 5.
+                        recognise the value. Current = 7.
       `settings`      — manifest-declared tunables, fully resolved
                         (L1 = per-instance override || plugin default ||
                         schema default). All scalar settings — `fps`,
@@ -339,6 +343,22 @@
     <arg name="album_artist" type="string"/>
     <arg name="art_url" type="string"/>
     <arg name="previous_art_url" type="string"/>
+  </event_in>
+
+  <!--
+    Sideband result for one producer release timeline point. The daemon
+    sends this before signaling `release_syncobj@release_point` so the
+    producer can distinguish a real consumer release from timeout recovery.
+
+    outcome: 0=all subscribed consumers released the buffer
+             1=the frame had no subscribed consumers
+             2=daemon timeout/error forced the release point
+  -->
+  <event_in name="release_resolved" opcode="15">
+    <arg name="buffer_generation" type="u64"/>
+    <arg name="buffer_index" type="u32"/>
+    <arg name="release_point" type="u64"/>
+    <arg name="outcome" type="u32"/>
   </event_in>
 
 

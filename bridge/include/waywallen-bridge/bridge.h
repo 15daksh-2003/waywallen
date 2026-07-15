@@ -383,6 +383,7 @@ typedef struct ww_bridge_control {
         ww_evt_in_set_fps_t           set_fps;
         ww_evt_in_shutdown_t          shutdown;
         ww_evt_in_negotiate_buffers_t negotiate_buffers;
+        ww_evt_in_release_resolved_t  release_resolved;
     } u;
 } ww_bridge_control_t;
 
@@ -423,7 +424,7 @@ void ww_bridge_control_free(ww_bridge_control_t* msg);
  * Bump when the daemon/renderer wire contract changes; `ww_bridge_recv_init`
  * validates the value sent by the daemon matches and returns -EPROTO
  * otherwise. */
-#define WW_BRIDGE_SUPPORTED_SPAWN_VERSION 6u
+#define WW_BRIDGE_SUPPORTED_SPAWN_VERSION 7u
 
 /* Caller-friendly view of the typed Init payload. The kv list is
  * heap-owned (transferred from the underlying `ww_evt_in_init_t`

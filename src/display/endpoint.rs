@@ -697,6 +697,8 @@ async fn forward_frame_ready(
     // Hand off to the renderer's reaper. If the channel is closed
     // because the renderer was evicted, dropping the handle cleans up.
     if let Err(e) = renderer.submit_frame_record(FrameRecord {
+        buffer_generation,
+        buffer_index,
         release_point,
         consumer_handle: Some(consumer_handle),
         expected_count,

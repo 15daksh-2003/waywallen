@@ -1873,6 +1873,8 @@ impl Router {
             // No enabled recipients: still hand the producer's release
             // timeline a synthetic signal at this point.
             if let Err(e) = renderer.submit_frame_record(crate::sync::FrameRecord {
+                buffer_generation: gen,
+                buffer_index,
                 release_point,
                 consumer_handle: None,
                 expected_count: 0,
@@ -1882,6 +1884,19 @@ impl Router {
                      advance-only FrameRecord (point {release_point}): {e}"
                 );
             }
+            return;
+        }
+        if let Err(e) = renderer.submit_frame_record(crate::sync::FrameRecord {
+            buffer_generation: gen,
+            buffer_index,
+            release_point,
+            consumer_handle: None,
+            expected_count,
+        }) {
+            log::warn!(
+                "router: renderer {renderer_id}: failed to register release point \
+                 {release_point} before fan-out: {e}"
+            );
             return;
         }
         for state in recipients {

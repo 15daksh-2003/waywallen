@@ -102,6 +102,7 @@ typedef enum ww_event_in_op {
     WW_EVT_IN_POINTER_BUTTON = 10,
     WW_EVT_IN_POINTER_AXIS = 11,
     WW_EVT_IN_MPRIS = 14,
+    WW_EVT_IN_RELEASE_RESOLVED = 15,
 } ww_event_in_op_t;
 
 typedef enum ww_event_op {
@@ -197,6 +198,13 @@ typedef struct ww_evt_in_mpris_t {
     char *art_url;
     char *previous_art_url;
 } ww_evt_in_mpris_t;
+
+typedef struct ww_evt_in_release_resolved_t {
+    uint64_t buffer_generation;
+    uint32_t buffer_index;
+    uint64_t release_point;
+    uint32_t outcome;
+} ww_evt_in_release_resolved_t;
 
 typedef struct ww_evt_ready_t {
     uint32_t drm_render_major;
@@ -336,6 +344,11 @@ int  ww_evt_in_mpris_encode(const ww_evt_in_mpris_t *m, ww_buf_t *out);
 int  ww_evt_in_mpris_decode(const uint8_t *buf, size_t len, ww_evt_in_mpris_t *out);
 void ww_evt_in_mpris_free(ww_evt_in_mpris_t *m);
 uint32_t ww_evt_in_mpris_expected_fds(const ww_evt_in_mpris_t *m);
+
+int  ww_evt_in_release_resolved_encode(const ww_evt_in_release_resolved_t *m, ww_buf_t *out);
+int  ww_evt_in_release_resolved_decode(const uint8_t *buf, size_t len, ww_evt_in_release_resolved_t *out);
+void ww_evt_in_release_resolved_free(ww_evt_in_release_resolved_t *m);
+uint32_t ww_evt_in_release_resolved_expected_fds(const ww_evt_in_release_resolved_t *m);
 
 int  ww_evt_ready_encode(const ww_evt_ready_t *m, ww_buf_t *out);
 int  ww_evt_ready_decode(const uint8_t *buf, size_t len, ww_evt_ready_t *out);

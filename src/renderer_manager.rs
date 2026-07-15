@@ -16,7 +16,7 @@ use crate::ipc::uds::{recv_event, send_control, CodecError};
 
 /// Renderer IPC compatibility version the daemon currently emits. Bump
 /// this when the daemon/renderer wire contract changes.
-pub const SPAWN_VERSION: u32 = 6;
+pub const SPAWN_VERSION: u32 = 7;
 use crate::plugin::renderer_registry::{
     RendererDef, RendererRegistry, EVENT_KIND_MPRIS, EVENT_KIND_POINTER,
 };
@@ -131,6 +131,36 @@ impl DrmNode {
 /// Upper bound on the number of per-seq sync_fd entries the reader
 /// keeps around before evicting the oldest.
 const SYNC_FD_RETENTION: usize = 16;
+
+struct RendererReleaseResolutionPublisher {
+    sock: StdWeak<StdMutex<StdUnixStream>>,
+}
+
+impl crate::sync::ReleaseResolutionPublisher for RendererReleaseResolutionPublisher {
+    fn publish(
+        &self,
+        resolution: crate::sync::ReleaseResolution,
+    ) -> std::result::Result<(), String> {
+        let sock = self
+            .sock
+            .upgrade()
+            .ok_or_else(|| "renderer transport no longer exists".to_string())?;
+        let guard = sock
+            .lock()
+            .map_err(|_| "renderer transport mutex poisoned".to_string())?;
+        send_control(
+            &guard,
+            &ControlMsg::ReleaseResolved {
+                buffer_generation: resolution.buffer_generation,
+                buffer_index: resolution.buffer_index,
+                release_point: resolution.release_point,
+                outcome: resolution.outcome as u32,
+            },
+            &[],
+        )
+        .map_err(|error| error.to_string())
+    }
+}
 
 /// Per-renderer state. Cheap to clone via `Arc`; the inner fields are
 /// shared across HTTP handlers and the reader thread.
@@ -635,6 +665,9 @@ impl RendererManager {
                 drm,
                 id.clone(),
                 Arc::clone(&handle.release_syncobj),
+                Arc::new(RendererReleaseResolutionPublisher {
+                    sock: Arc::downgrade(&handle.sock),
+                }),
                 frame_rx,
             );
         }

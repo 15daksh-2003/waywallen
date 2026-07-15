@@ -253,6 +253,31 @@ typedef struct ww_pool_slot {
     uint32_t size;
 } ww_pool_slot_t;
 
+typedef enum ww_pool_slot_acquire_status
+{
+    /* The slot has never been submitted in this pool generation. */
+    WW_POOL_SLOT_ACQUIRE_READY_UNUSED = 0,
+    /* The daemon release timeline proves the previous use completed. */
+    WW_POOL_SLOT_ACQUIRE_READY_RELEASED = 1,
+    /* The previous use did not complete before the requested deadline. */
+    WW_POOL_SLOT_ACQUIRE_BUSY = 2,
+    /* Pool state, wait, or backend snapshot failed. See `error_code`. */
+    WW_POOL_SLOT_ACQUIRE_ERROR = 3,
+    /* Daemon advanced the point without proof from every consumer. */
+    WW_POOL_SLOT_ACQUIRE_FORCED_RELEASE = 4,
+    /* The renderer transport failed; no further pool work is valid. */
+    WW_POOL_SLOT_ACQUIRE_SESSION_LOST = 5,
+} ww_pool_slot_acquire_status_t;
+
+typedef struct ww_pool_slot_acquire_result {
+    ww_pool_slot_acquire_status_t status;
+    /* Negative errno-style value for ERROR, otherwise zero. */
+    int32_t        error_code;
+    uint64_t       bind_generation;
+    uint64_t       previous_release_point;
+    ww_pool_slot_t slot;
+} ww_pool_slot_acquire_result_t;
+
 /* Acquire any free slot. Iter 1: no internal queueing — caller picks
  * a slot index it knows is free (e.g. round-robin via libmpv's
  * `mpv_render_context_update` low bits). The returned struct is a
@@ -261,6 +286,61 @@ typedef struct ww_pool_slot {
  * Returns 0 on success. Returns -EINVAL when the pool has no
  * directive applied yet, or when `slot_index` is out of range. */
 int ww_bridge_pool_acquire_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_t* out_slot);
+
+/* Wait for the selected slot's previous consumer use and acquire its
+ * backend snapshot as one owner operation. READY_* results contain a
+ * writable `slot`. BUSY and ERROR never expose a backend handle.
+ *
+ * `bind_generation + slot.index + previous_release_point` identifies
+ * the exact reuse proof consumed by this acquisition. The producer
+ * should add its own monotonically increasing acquire serial when it
+ * permits only one outstanding acquisition.
+ *
+ * Returns 0 when `out_result` contains a typed outcome. Returns
+ * -EINVAL only when `pool` or `out_result` itself is null. */
+int ww_bridge_pool_acquire_slot_for_render(ww_pool_t* pool, uint32_t slot_index,
+                                           uint32_t                       timeout_ms,
+                                           ww_pool_slot_acquire_result_t* out_result);
+
+typedef enum ww_pool_release_outcome
+{
+    WW_POOL_RELEASE_CONSUMER_RELEASED = 0,
+    WW_POOL_RELEASE_NO_CONSUMERS      = 1,
+    WW_POOL_RELEASE_FORCED            = 2,
+} ww_pool_release_outcome_t;
+
+/* Record the daemon's sideband result for one release point. This is
+ * thread-safe and may be called by the control-reader thread while the
+ * render thread waits in `acquire_slot_for_render`.
+ *
+ * Exact duplicate notifications are accepted. Stale generation/point
+ * notifications return -ESTALE; conflicting duplicates return
+ * -EPROTO. The pool never upgrades FORCED to a writable reuse proof. */
+int ww_bridge_pool_report_release(ww_pool_t* pool, uint64_t bind_generation, uint32_t slot_index,
+                                  uint64_t release_point, ww_pool_release_outcome_t outcome);
+
+typedef enum ww_pool_slot_submit_status
+{
+    WW_POOL_SLOT_SUBMIT_SUBMITTED    = 0,
+    WW_POOL_SLOT_SUBMIT_SESSION_LOST = 1,
+    WW_POOL_SLOT_SUBMIT_ERROR        = 2,
+} ww_pool_slot_submit_status_t;
+
+typedef struct ww_pool_slot_submit_result {
+    ww_pool_slot_submit_status_t status;
+    int32_t                      error_code;
+    uint64_t                     bind_generation;
+    uint32_t                     slot_index;
+    uint64_t                     release_point;
+} ww_pool_slot_submit_result_t;
+
+/* Publish one rendered slot transactionally. The release point remains
+ * private while `frame_ready` is sent and is committed to the slot only
+ * after send success. A transport failure marks the entire pool session
+ * lost; subsequent acquire/submit calls return SESSION_LOST. */
+int ww_bridge_pool_submit_slot_for_render(ww_pool_t* pool, int sock, uint32_t slot_index,
+                                          int                           acquire_sync_fd,
+                                          ww_pool_slot_submit_result_t* out_result);
 
 /* Submit a rendered slot. Bridge:
  *   - Takes ownership of `acquire_sync_fd` (closes after sendmsg).
@@ -287,15 +367,16 @@ int ww_bridge_pool_acquire_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_sl
  * call. Pass -1 only on shutdown (consumers will see no acquire
  * fence and the daemon may stall briefly).
  *
- * Returns 0 on success. */
+ * Returns 0 on success. This is the legacy integer wrapper around
+ * `ww_bridge_pool_submit_slot_for_render`. */
 int ww_bridge_pool_submit_slot(ww_pool_t* pool, int sock, uint32_t slot_index, int acquire_sync_fd);
 
 /* Block until the slot's last release_point has been signaled by the
  * daemon's reaper, with a wall-clock timeout. Plugin SHOULD call
  * this before re-rendering into the same `slot_index`. Returns 0 on
- * signal, negative on timeout/error. Treat non-zero as "consumer is
- * still using the buffer; render anyway" — the plugin is encouraged
- * to proceed (running ahead is preferable to a stuck producer). */
+ * signal, negative on timeout/error. This is the legacy split API;
+ * new producers should use `ww_bridge_pool_acquire_slot_for_render`
+ * so a busy slot is never exposed as writable by accident. */
 int ww_bridge_pool_wait_slot_release(ww_pool_t* pool, uint32_t slot_index, uint32_t timeout_ms);
 
 #ifdef __cplusplus

@@ -877,6 +877,45 @@ uint32_t ww_evt_in_mpris_expected_fds(const ww_evt_in_mpris_t *m) {
     return 0;
 }
 
+int ww_evt_in_release_resolved_encode(const ww_evt_in_release_resolved_t *m, ww_buf_t *out) {
+    int rc;
+    (void)m;
+    if ((rc = w_u64(out, m->buffer_generation))) return rc;
+    if ((rc = w_u32(out, m->buffer_index))) return rc;
+    if ((rc = w_u64(out, m->release_point))) return rc;
+    if ((rc = w_u32(out, m->outcome))) return rc;
+    return WW_OK;
+}
+
+int ww_evt_in_release_resolved_decode(const uint8_t *buf, size_t len, ww_evt_in_release_resolved_t *out) {
+    memset(out, 0, sizeof(*out));
+    ww_rd_t r = { buf, 0, len };
+    int rc;
+    if ((rc = rd_u64(&r, &out->buffer_generation))) goto fail;
+    if ((rc = rd_u32(&r, &out->buffer_index))) goto fail;
+    if ((rc = rd_u64(&r, &out->release_point))) goto fail;
+    if ((rc = rd_u32(&r, &out->outcome))) goto fail;
+    if (r.pos != r.len) {
+        int rc2 = WW_ERR_TRAILING;
+        (void)rc2;
+        ww_evt_in_release_resolved_free(out);
+        return WW_ERR_TRAILING;
+    }
+    return WW_OK;
+fail:
+    ww_evt_in_release_resolved_free(out);
+    return rc;
+}
+
+void ww_evt_in_release_resolved_free(ww_evt_in_release_resolved_t *m) {
+    (void)m;
+}
+
+uint32_t ww_evt_in_release_resolved_expected_fds(const ww_evt_in_release_resolved_t *m) {
+    (void)m;
+    return 0;
+}
+
 int ww_evt_ready_encode(const ww_evt_ready_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
