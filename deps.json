@@ -38,16 +38,6 @@
     }
   },
   {
-    "dest": "build/_flatpak_deps/nlohmann_json-src",
-    "type": "archive",
-    "url": "https://github.com/nlohmann/json/archive/refs/tags/v3.12.0.tar.gz",
-    "sha256": "4b92eb0c06d10683f7447ce9406cb97cd4b453be18d7279320f7b2f025c10187",
-    "x-cmake": {
-      "name": "nlohmann_json",
-      "exclude_from_all": true
-    }
-  },
-  {
     "commit": "030f89bd21d6d26e9698fcdb103f42fe616f993b",
     "dest": "build/_flatpak_deps/rstd-src",
     "disable-shallow-clone": true,

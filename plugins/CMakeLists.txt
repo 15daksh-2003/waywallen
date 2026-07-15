@@ -5,19 +5,24 @@ option(WAYWALLEN_INSTALL_WALLHAVEN_PLUGIN "Install the Wallhaven source plugin" 
 
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 include(${CMAKE_SOURCE_DIR}/cmake/FetchDeps.cmake)
-set(JSON_BuildTests OFF CACHE INTERNAL "")
-set(JSON_Install    OFF CACHE INTERNAL "")
-fetchdeps(${CMAKE_SOURCE_DIR}/deps.json NAMES rstd wavsen nlohmann_json)
+fetchdeps(${CMAKE_SOURCE_DIR}/deps.json NAMES rstd wavsen)
 
 add_subdirectory(../bridge waywallen-bridge-build)
 
-add_library(waywallen-plugin-json STATIC)
-target_sources(waywallen-plugin-json
+add_library(waywallen-plugin-common STATIC)
+target_sources(waywallen-plugin-common
     PUBLIC FILE_SET cxx_modules TYPE CXX_MODULES FILES
-        nlohmann_json.cppm
+        Bridge.cppm
 )
-target_link_libraries(waywallen-plugin-json PUBLIC nlohmann_json::nlohmann_json)
-set_target_properties(waywallen-plugin-json PROPERTIES CXX_SCAN_FOR_MODULES ON)
+target_link_libraries(waywallen-plugin-common
+    PUBLIC
+        waywallen::bridge
+        wavsen::ffi::vulkan
+        rstd.cppstd
+        rstd::json
+)
+target_compile_features(waywallen-plugin-common PUBLIC cxx_std_20)
+set_target_properties(waywallen-plugin-common PROPERTIES CXX_SCAN_FOR_MODULES ON)
 
 if(WAYWALLEN_BUILD_IMAGE_PLUGIN)
     add_subdirectory(org.waywallen.image)

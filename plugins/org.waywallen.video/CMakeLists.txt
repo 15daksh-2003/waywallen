@@ -2,6 +2,11 @@ find_package(Vulkan REQUIRED)
 
 add_executable(waywallen-video-renderer
     src/main.cpp
+    src/entry.cpp
+)
+target_sources(waywallen-video-renderer
+    PRIVATE FILE_SET cxx_modules TYPE CXX_MODULES FILES
+        src/entry.cppm
 )
 set_target_properties(waywallen-video-renderer PROPERTIES
     INSTALL_RPATH "${WAYWALLEN_BIN_RPATH}"
@@ -10,12 +15,10 @@ target_compile_features(waywallen-video-renderer PRIVATE cxx_std_20)
 set_target_properties(waywallen-video-renderer PROPERTIES CXX_SCAN_FOR_MODULES ON)
 target_link_libraries(waywallen-video-renderer
     PRIVATE
-        waywallen::bridge
+        waywallen-plugin-common
         wavsen::video
         wavsen::audio
-        waywallen-plugin-json
         rstd::log
-        Vulkan::Vulkan
         Threads::Threads
 )
 

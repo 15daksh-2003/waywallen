@@ -7,7 +7,12 @@ find_package(Vulkan REQUIRED)
 
 add_executable(waywallen-image-renderer
     src/main.cpp
+    src/entry.cpp
     src/av_image.cpp
+)
+target_sources(waywallen-image-renderer
+    PRIVATE FILE_SET cxx_modules TYPE CXX_MODULES FILES
+        src/entry.cppm
 )
 set_target_properties(waywallen-image-renderer PROPERTIES
     INSTALL_RPATH "${WAYWALLEN_BIN_RPATH}"
@@ -16,16 +21,13 @@ target_compile_features(waywallen-image-renderer PRIVATE cxx_std_20)
 set_target_properties(waywallen-image-renderer PROPERTIES CXX_SCAN_FOR_MODULES ON)
 target_link_libraries(waywallen-image-renderer
     PRIVATE
-        waywallen::bridge
+        waywallen-plugin-common
         wavsen::video
-        waywallen-plugin-json
         rstd::log
-        rstd.cppstd
         PkgConfig::AVFORMAT
         PkgConfig::AVCODEC
         PkgConfig::AVUTIL
         PkgConfig::SWSCALE
-        Vulkan::Vulkan
         Threads::Threads
 )
 
