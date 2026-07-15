@@ -69,6 +69,10 @@ constexpr const char* kEnableAudioKey = "waywallen.enable_audio";
     std::exit(1);
 }
 
+std::string to_std_string(const rstd::string::String& value) {
+    return { value.data(), value.size() };
+}
+
 float clamp01(float v) {
     if (v < 0.0f) return 0.0f;
     if (v > 1.0f) return 1.0f;
@@ -565,9 +569,9 @@ int run_selftest(const Options& opt) {
     uint32_t even_h = opt.height + (opt.height & 1u);
 
     auto producer_res =
-        wavsen::video::Producer::create_with_render_node(even_w, even_h, opt.render_node);
+        wavsen::video::Producer::create_with_render_node(even_w, even_h, opt.render_node.c_str());
     if (producer_res.is_err()) {
-        rstd_error("selftest vk: {}", std::move(producer_res).unwrap_err().message);
+        rstd_error("selftest vk: {}", std::move(producer_res).unwrap_err().message.as_str());
         return 1;
     }
     auto producer = std::move(producer_res).unwrap();
@@ -580,19 +584,19 @@ int run_selftest(const Options& opt) {
                                                     even_w,
                                                     even_h);
     if (yuv_res.is_err()) {
-        rstd_error("selftest yuv: {}", std::move(yuv_res).unwrap_err().message);
+        rstd_error("selftest yuv: {}", std::move(yuv_res).unwrap_err().message.as_str());
         return 1;
     }
     auto yuv = std::move(yuv_res).unwrap();
 
     wavsen::video::OpenOpts dec_opts {
         parse_hwdec(opt.hwdec.empty() ? nullptr : opt.hwdec.c_str()),
-        opt.render_node,
+        rstd::string::String::make(opt.render_node.c_str()),
     };
     auto decoder_res = wavsen::video::VideoDecoder::open_with_vk(
         opt.video_path, even_w, even_h, /*loop=*/false, *producer, dec_opts);
     if (decoder_res.is_err()) {
-        rstd_error("selftest decode: {}", std::move(decoder_res).unwrap_err().message);
+        rstd_error("selftest decode: {}", std::move(decoder_res).unwrap_err().message.as_str());
         return 1;
     }
     auto decoder = std::move(decoder_res).unwrap();
@@ -654,7 +658,8 @@ int run_selftest(const Options& opt) {
         wavsen::video::VkFrameView vkv {};
         auto                       fs_res = decoder->next_vk_frame(vkv);
         if (fs_res.is_err()) {
-            rstd_error("selftest next_vk_frame: {}", std::move(fs_res).unwrap_err().message);
+            rstd_error("selftest next_vk_frame: {}",
+                       std::move(fs_res).unwrap_err().message.as_str());
             return 1;
         }
         if (std::move(fs_res).unwrap() != wavsen::video::NextFrame::Ok) return 1;
@@ -677,7 +682,7 @@ int run_selftest(const Options& opt) {
         im.bit_depth         = vkv.bit_depth;
         auto cv_res          = yuv->convert_av_vk_frame(im, dst_img, even_w, even_h, cm);
         if (cv_res.is_err()) {
-            rstd_error("selftest convert: {}", std::move(cv_res).unwrap_err().message);
+            rstd_error("selftest convert: {}", std::move(cv_res).unwrap_err().message.as_str());
             sync_fd = -1;
         } else {
             sync_fd = std::move(cv_res).unwrap();
@@ -686,7 +691,8 @@ int run_selftest(const Options& opt) {
         wavsen::video::DrmFrameView drmv {};
         auto                        fs_res = decoder->next_drm_frame(drmv);
         if (fs_res.is_err()) {
-            rstd_error("selftest next_drm_frame: {}", std::move(fs_res).unwrap_err().message);
+            rstd_error("selftest next_drm_frame: {}",
+                       std::move(fs_res).unwrap_err().message.as_str());
             return 1;
         }
         if (std::move(fs_res).unwrap() != wavsen::video::NextFrame::Ok) return 1;
@@ -701,7 +707,8 @@ int run_selftest(const Options& opt) {
             static_cast<wavsen::video::ColorRange>(drmv.color_range));
         auto cv_res = yuv->convert_drm_prime(drmv, dst_img, even_w, even_h, cm);
         if (cv_res.is_err()) {
-            rstd_error("selftest convert (drm): {}", std::move(cv_res).unwrap_err().message);
+            rstd_error("selftest convert (drm): {}",
+                       std::move(cv_res).unwrap_err().message.as_str());
             sync_fd = -1;
         } else {
             sync_fd = std::move(cv_res).unwrap();
@@ -710,7 +717,7 @@ int run_selftest(const Options& opt) {
         wavsen::video::Nv12Frame frame;
         auto                     fs_res = decoder->next_frame(frame);
         if (fs_res.is_err()) {
-            rstd_error("selftest next_frame: {}", std::move(fs_res).unwrap_err().message);
+            rstd_error("selftest next_frame: {}", std::move(fs_res).unwrap_err().message.as_str());
             return 1;
         }
         if (std::move(fs_res).unwrap() != wavsen::video::NextFrame::Ok) return 1;
@@ -718,9 +725,9 @@ int run_selftest(const Options& opt) {
             static_cast<wavsen::video::ColorSpace>(frame.colorspace),
             static_cast<wavsen::video::ColorRange>(frame.color_range));
         auto cv_res =
-            yuv->convert_nv12(dst_img, even_w, even_h, frame.data.data(), frame.data.size(), cm);
+            yuv->convert_nv12(dst_img, even_w, even_h, frame.data.data(), frame.data.len(), cm);
         if (cv_res.is_err()) {
-            rstd_error("selftest convert: {}", std::move(cv_res).unwrap_err().message);
+            rstd_error("selftest convert: {}", std::move(cv_res).unwrap_err().message.as_str());
             sync_fd = -1;
         } else {
             sync_fd = std::move(cv_res).unwrap();
@@ -854,7 +861,7 @@ int main(int argc, char** argv) {
         auto probe_res = wavsen::video::VideoDecoder::probe_native(opt.video_path);
         if (probe_res.is_err()) {
             die("probe_native " + opt.video_path + ": " +
-                std::move(probe_res).unwrap_err().message);
+                to_std_string(std::move(probe_res).unwrap_err().message));
         }
         auto probe = std::move(probe_res).unwrap();
         native_w   = probe.width;
@@ -871,9 +878,9 @@ int main(int argc, char** argv) {
 
     /* --- Vulkan device first, so the decoder can share it --- */
     auto producer_res =
-        wavsen::video::Producer::create_with_render_node(even_w, even_h, opt.render_node);
+        wavsen::video::Producer::create_with_render_node(even_w, even_h, opt.render_node.c_str());
     if (producer_res.is_err()) {
-        die("vk producer: " + std::move(producer_res).unwrap_err().message);
+        die("vk producer: " + to_std_string(std::move(producer_res).unwrap_err().message));
     }
     auto producer = std::move(producer_res).unwrap();
 
@@ -882,12 +889,13 @@ int main(int argc, char** argv) {
      *   per-frame mapping failure we fall through to sw via the helper. */
     wavsen::video::OpenOpts dec_opts {
         hwaccel,
-        opt.render_node,
+        rstd::string::String::make(opt.render_node.c_str()),
     };
     auto decoder_res = wavsen::video::VideoDecoder::open_with_vk(
         opt.video_path, even_w, even_h, opt.loop_file, *producer, dec_opts);
     if (decoder_res.is_err()) {
-        die("decode " + opt.video_path + ": " + std::move(decoder_res).unwrap_err().message);
+        die("decode " + opt.video_path + ": " +
+            to_std_string(std::move(decoder_res).unwrap_err().message));
     }
     auto decoder = std::move(decoder_res).unwrap();
     host.loop_value.store(opt.loop_file, std::memory_order_release);
@@ -940,7 +948,7 @@ int main(int argc, char** argv) {
                                                     even_w,
                                                     even_h);
     if (yuv_res.is_err()) {
-        die("yuv_to_rgba: " + std::move(yuv_res).unwrap_err().message);
+        die("yuv_to_rgba: " + to_std_string(std::move(yuv_res).unwrap_err().message));
     }
     auto yuv = std::move(yuv_res).unwrap();
 
@@ -1115,8 +1123,10 @@ int main(int argc, char** argv) {
                               hwdec_label(hwaccel),
                               hwdec_label(new_h));
                     decoder.reset();
-                    wavsen::video::OpenOpts new_opts { new_h, opt.render_node };
-                    auto                    re_res = wavsen::video::VideoDecoder::open_with_vk(
+                    wavsen::video::OpenOpts new_opts {
+                        new_h, rstd::string::String::make(opt.render_node.c_str())
+                    };
+                    auto re_res = wavsen::video::VideoDecoder::open_with_vk(
                         opt.video_path,
                         even_w,
                         even_h,
@@ -1125,7 +1135,7 @@ int main(int argc, char** argv) {
                         new_opts);
                     if (re_res.is_err()) {
                         rstd_error("waywallen-video-renderer: reopen failed: {}",
-                                   std::move(re_res).unwrap_err().message);
+                                   std::move(re_res).unwrap_err().message.as_str());
                         signal_shutdown(host);
                         break;
                     }
@@ -1167,7 +1177,7 @@ int main(int argc, char** argv) {
         if (fs_res.is_err()) {
             rstd_error("waywallen-video-renderer: decode error (hwdec={}): {}",
                        hwdec_label(hwaccel),
-                       std::move(fs_res).unwrap_err().message);
+                       std::move(fs_res).unwrap_err().message.as_str());
             signal_shutdown(host);
             break;
         }
@@ -1279,13 +1289,13 @@ int main(int argc, char** argv) {
                                        s.width,
                                        s.height,
                                        frame.data.data(),
-                                       frame.data.size(),
+                                       frame.data.len(),
                                        color_matrix);
             break;
         }
         if (cv_res.is_err()) {
             rstd_error("waywallen-video-renderer: yuv conversion failed: {}",
-                       std::move(cv_res).unwrap_err().message);
+                       std::move(cv_res).unwrap_err().message.as_str());
             signal_shutdown(host);
             break;
         }

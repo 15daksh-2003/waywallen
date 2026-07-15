@@ -20,6 +20,7 @@ target_link_libraries(waywallen-image-renderer
         wavsen::video
         waywallen-plugin-json
         rstd::log
+        rstd.cppstd
         PkgConfig::AVFORMAT
         PkgConfig::AVCODEC
         PkgConfig::AVUTIL

@@ -66,6 +66,10 @@ constexpr const char* kSchemeColorKey = "waywallen.scheme_color";
     std::exit(1);
 }
 
+std::string to_std_string(const rstd::string::String& value) {
+    return { value.data(), value.size() };
+}
+
 float clamp01(float v) {
     if (v < 0.0f) return 0.0f;
     if (v > 1.0f) return 1.0f;
@@ -276,7 +280,7 @@ bool upload_to_slot(HostState& host, wavsen::video::Producer& producer,
         reinterpret_cast<VkImage>(s.vk_image), s.width, s.height, host.rgba_data, host.rgba_size);
     if (upload_res.is_err()) {
         rstd_error("waywallen-image-renderer: upload_into failed: {}",
-                   std::move(upload_res).unwrap_err().message);
+                   std::move(upload_res).unwrap_err().message.as_str());
         return false;
     }
     int                          sync_fd = std::move(upload_res).unwrap();
@@ -478,7 +482,7 @@ static int print_caps_json(const Options& opt) {
     auto producer_res = wavsen::video::Producer::create(opt.width, opt.height);
     if (producer_res.is_err()) {
         rstd_error("waywallen-image-renderer: vk_producer: {}",
-                   std::move(producer_res).unwrap_err().message);
+                   std::move(producer_res).unwrap_err().message.as_str());
         return 1;
     }
     auto producer = std::move(producer_res).unwrap();
@@ -668,7 +672,7 @@ int main(int argc, char** argv) {
         auto prod_res = wavsen::video::Producer::create(opt.width, opt.height);
         if (prod_res.is_err()) {
             rstd_error("waywallen-image-renderer: vk_producer: {}",
-                       std::move(prod_res).unwrap_err().message);
+                       std::move(prod_res).unwrap_err().message.as_str());
             return 1;
         }
         auto prod = std::move(prod_res).unwrap();
@@ -759,9 +763,9 @@ int main(int argc, char** argv) {
     auto producer_res = opt.render_node.empty()
                             ? wavsen::video::Producer::create(opt.width, opt.height)
                             : wavsen::video::Producer::create_with_render_node(
-                                  opt.width, opt.height, opt.render_node);
+                                  opt.width, opt.height, opt.render_node.c_str());
     if (producer_res.is_err()) {
-        die("vk_producer: " + std::move(producer_res).unwrap_err().message);
+        die("vk_producer: " + to_std_string(std::move(producer_res).unwrap_err().message));
     }
     auto producer = std::move(producer_res).unwrap();
 
