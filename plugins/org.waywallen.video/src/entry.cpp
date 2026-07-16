@@ -893,18 +893,19 @@ int run(int argc, char** argv) {
               hwdec_label(hwaccel),
               kind_label(decoder->kind()));
 
-    /* --- Audio: open same file via PosixFile, attach AvPlayer.
+    /* --- Audio: open the same file as an rstd byte stream and attach AvPlayer.
      *   Failure (missing audio stream, unsupported codec, no audio device)
      *   is non-fatal: log and continue without audio (presenter falls
      *   back to wall-clock pacing). */
     std::unique_ptr<wavsen::audio::AvPlayer> av_player;
     {
-        auto audio_file_res = wavsen::audio::PosixFile::open(opt.video_path);
+        auto audio_file_res = wavsen::audio::open_file(
+            rstd::ref<rstd::path::Path>(rstd::ref<rstd::str>(opt.video_path)));
         if (audio_file_res.is_err()) {
             rstd_warn("waywallen-video-renderer: audio file open failed");
         } else {
-            std::shared_ptr<wavsen::audio::IByteStream> src = std::move(audio_file_res).unwrap();
-            auto p_res = wavsen::audio::AvPlayer::open(std::move(src), false);
+            auto p_res = wavsen::audio::AvPlayer::open(
+                rstd::move(audio_file_res).unwrap_unchecked(), false);
             if (p_res.is_err()) {
                 rstd_warn("waywallen-video-renderer: audio open failed: {}",
                           std::move(p_res).unwrap_err().message);

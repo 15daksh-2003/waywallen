@@ -24,7 +24,7 @@
     }
   },
   {
-    "commit": "030f89bd21d6d26e9698fcdb103f42fe616f993b",
+    "commit": "d9bf41b0f4019b6b57452803a17e4fae0e6e60c0",
     "dest": "build/_flatpak_deps/rstd-src",
     "disable-shallow-clone": true,
     "type": "git",
@@ -46,7 +46,7 @@
     }
   },
   {
-    "commit": "fa39c3a25b4d1bc599ad04c7c813bbaa01eaee44",
+    "commit": "74af7911a7a0480bd859302f22cefa3939b3144b",
     "dest": "build/_flatpak_deps/wavsen-src",
     "disable-shallow-clone": true,
     "type": "git",
