@@ -5,7 +5,10 @@ option(WAYWALLEN_INSTALL_WALLHAVEN_PLUGIN "Install the Wallhaven source plugin" 
 
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 include(${CMAKE_SOURCE_DIR}/cmake/FetchDeps.cmake)
-fetchdeps(${CMAKE_SOURCE_DIR}/deps.json NAMES rstd wavsen)
+set(VMA_BUILD_DOCUMENTATION OFF CACHE INTERNAL "")
+set(VMA_BUILD_SAMPLES       OFF CACHE INTERNAL "")
+set(VMA_ENABLE_INSTALL      OFF CACHE INTERNAL "")
+fetchdeps(${CMAKE_SOURCE_DIR}/deps.json NAMES vma rstd wavsen)
 
 add_subdirectory(../bridge waywallen-bridge-build)
 
