@@ -18,6 +18,7 @@ target_link_libraries(waywallen-video-renderer
         waywallen-plugin-common
         wavsen::video
         wavsen::audio
+        rstd::argparse
         rstd::log
         Threads::Threads
 )

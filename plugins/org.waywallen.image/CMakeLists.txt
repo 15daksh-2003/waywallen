@@ -23,6 +23,7 @@ target_link_libraries(waywallen-image-renderer
     PRIVATE
         waywallen-plugin-common
         wavsen::video
+        rstd::argparse
         rstd::log
         PkgConfig::AVFORMAT
         PkgConfig::AVCODEC

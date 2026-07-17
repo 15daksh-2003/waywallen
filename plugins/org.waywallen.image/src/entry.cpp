@@ -19,6 +19,7 @@ module;
 module waywallen.image.entry;
 
 import rstd.cppstd;
+import rstd.argparse;
 import rstd.json;
 import rstd.log;
 import wavsen.video;
@@ -42,6 +43,12 @@ struct Options {
     std::string render_node;
 };
 
+struct ParseArgsResult {
+    Options options;
+    int     exit_code { 0 };
+    bool    should_run { false };
+};
+
 struct ClearColor {
     float r { 0.0f };
     float g { 0.0f };
@@ -58,6 +65,32 @@ constexpr const char* kSchemeColorKey = "waywallen.scheme_color";
 
 std::string to_std_string(const rstd::string::String& value) {
     return { value.data(), value.size() };
+}
+
+void write_cli_output(rstd::ref<rstd::str> text, rstd::argparse::OutputTarget::Tag target) {
+    FILE* stream = target == rstd::argparse::OutputTarget::Tag::Stderr ? stderr : stdout;
+    std::fwrite(text.data(), 1, text.size(), stream);
+}
+
+rstd::prelude::Vec<rstd::ffi::OsString> cli_argv(int argc, char** argv) {
+    auto values =
+        rstd::prelude::Vec<rstd::ffi::OsString>::with_capacity(static_cast<rstd::usize>(argc));
+    for (int i = 0; i < argc; ++i) {
+        values.push(rstd::ffi::OsString::from(rstd::ref<rstd::ffi::OsStr>(argv[i])));
+    }
+    return values;
+}
+
+template<typename T>
+auto get_arg(const rstd::argparse::Matches& matches, const rstd::argparse::ArgKey<T>& key)
+    -> rstd::Option<rstd::ref<T>> {
+    auto value = matches.get_one(key);
+    if (value.is_err()) {
+        rstd_error("waywallen-image-renderer: argparse match access failed: {}",
+                   std::move(value).unwrap_err());
+        std::exit(1);
+    }
+    return std::move(value).unwrap();
 }
 
 float clamp01(float v) {
@@ -101,34 +134,72 @@ bool parse_color_wire(const char* raw, ClearColor& out) {
 // resource plus `--ipc`. Per-plugin runtime settings (fps, etc.) come
 // in via `Init.settings` kv. Standalone-debug flags (`--decode-only`,
 // `--vulkan-probe`, `--print-caps`) are still parsed here.
-Options parse_args(int argc, char** argv) {
-    Options o;
-    for (int i = 1; i < argc; ++i) {
-        std::string a    = argv[i];
-        auto        next = [&]() -> std::string {
-            if (i + 1 >= argc) return {};
-            return argv[++i];
-        };
-        if (a == "--ipc")
-            o.ipc_path = next();
-        else if (a == "--path")
-            o.image_path = next();
-        else if (a == "--decode-only")
-            o.decode_only = true;
-        else if (a == "--vulkan-probe")
-            o.vulkan_probe = true;
-        else if (a == "--print-caps")
-            o.print_caps = true;
-        else if (a == "--render-node")
-            o.render_node = next();
-        // Tolerate other `--key value` extras (none defined for image
-        // today) by skipping their value.
-        else if (a.size() >= 2 && a[0] == '-' && a[1] == '-' && i + 1 < argc) {
-            std::string nxt = argv[i + 1];
-            if (! (nxt.size() >= 2 && nxt[0] == '-' && nxt[1] == '-')) ++i;
-        }
+ParseArgsResult parse_args(int argc, char** argv) {
+    using namespace rstd::argparse;
+
+    auto command = Command::make("waywallen-image-renderer");
+    command.about("Render image wallpapers for waywallen");
+    auto ipc  = command.add_arg(Arg<rstd::string::String>::value("ipc", string_parser())
+                                    .long_name("ipc")
+                                    .value_name("SOCKET")
+                                    .help("Connect to the renderer IPC socket"));
+    auto path = command.add_arg(Arg<rstd::string::String>::value("path", string_parser())
+                                    .long_name("path")
+                                    .value_name("IMAGE")
+                                    .help("Image wallpaper path"));
+    command.add_arg(Arg<bool>::flag("decode-only")
+                        .long_name("decode-only")
+                        .help("Decode the image without starting the renderer"));
+    command.add_arg(Arg<bool>::flag("vulkan-probe")
+                        .long_name("vulkan-probe")
+                        .help("Probe Vulkan renderer initialization"));
+    command.add_arg(Arg<bool>::flag("print-caps")
+                        .long_name("print-caps")
+                        .help("Print renderer capabilities as JSON"));
+    auto render_node =
+        command.add_arg(Arg<rstd::string::String>::value("render-node", string_parser())
+                            .long_name("render-node")
+                            .value_name("DEVICE")
+                            .help("Use a specific DRM render node"));
+
+    auto built = std::move(command).build();
+    if (built.is_err()) {
+        rstd_error("waywallen-image-renderer: invalid CLI definition: {}",
+                   std::move(built).unwrap_err());
+        return { .exit_code = 1 };
     }
-    return o;
+    auto parser = std::move(built).unwrap();
+    auto parsed = parser.parse_known_from(cli_argv(argc, argv));
+    if (parsed.is_err()) {
+        auto error  = std::move(parsed).unwrap_err();
+        auto report = parser.render_error(error);
+        write_cli_output(report.text(), report.target());
+        return { .exit_code = report.exit_code() };
+    }
+
+    auto outcome = std::move(parsed).unwrap();
+    if (outcome.is_Display()) {
+        const auto& request = outcome.as_Display().request;
+        write_cli_output(request.text(), request.target());
+        return { .exit_code = request.exit_code() };
+    }
+
+    auto    known   = std::move(outcome).as_Parsed().value;
+    auto    matches = known.matches();
+    Options options;
+    if (auto value = get_arg(*matches, ipc); value.is_some()) {
+        options.ipc_path = to_std_string(**value);
+    }
+    if (auto value = get_arg(*matches, path); value.is_some()) {
+        options.image_path = to_std_string(**value);
+    }
+    if (auto value = get_arg(*matches, render_node); value.is_some()) {
+        options.render_node = to_std_string(**value);
+    }
+    options.decode_only  = matches->contains("decode-only");
+    options.vulkan_probe = matches->contains("vulkan-probe");
+    options.print_caps   = matches->contains("print-caps");
+    return { .options = std::move(options), .should_run = true };
 }
 
 struct HostState {
@@ -649,7 +720,9 @@ int run(int argc, char** argv) {
         },
         nullptr);
 
-    Options opt = parse_args(argc, argv);
+    auto parsed_args = parse_args(argc, argv);
+    if (! parsed_args.should_run) return parsed_args.exit_code;
+    Options opt = std::move(parsed_args.options);
 
     if (opt.print_caps) {
         return print_caps_json(opt);
@@ -670,7 +743,7 @@ int run(int argc, char** argv) {
     }
 
     if (opt.decode_only) {
-        if (opt.image_path.empty()) die("--decode-only requires --image");
+        if (opt.image_path.empty()) die("--decode-only requires --path");
         ww_image::DecodeError derr;
         ww_image::RgbaBuf     buf = ww_image::decode_to_rgba(opt.image_path,
                                                              /* resolution = */ 0,

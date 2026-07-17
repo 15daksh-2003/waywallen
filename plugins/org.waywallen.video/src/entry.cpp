@@ -20,6 +20,7 @@ module;
 module waywallen.video.entry;
 
 import rstd.cppstd;
+import rstd.argparse;
 import rstd.json;
 import rstd.log;
 import wavsen.video;
@@ -42,6 +43,12 @@ struct Options {
     bool        selftest { false };
 };
 
+struct ParseArgsResult {
+    Options options;
+    int     exit_code { 0 };
+    bool    should_run { false };
+};
+
 struct ClearColor {
     float r { 0.0f };
     float g { 0.0f };
@@ -59,6 +66,32 @@ constexpr const char* kEnableAudioKey = "waywallen.enable_audio";
 
 std::string to_std_string(const rstd::string::String& value) {
     return { value.data(), value.size() };
+}
+
+void write_cli_output(rstd::ref<rstd::str> text, rstd::argparse::OutputTarget::Tag target) {
+    FILE* stream = target == rstd::argparse::OutputTarget::Tag::Stderr ? stderr : stdout;
+    std::fwrite(text.data(), 1, text.size(), stream);
+}
+
+rstd::prelude::Vec<rstd::ffi::OsString> cli_argv(int argc, char** argv) {
+    auto values =
+        rstd::prelude::Vec<rstd::ffi::OsString>::with_capacity(static_cast<rstd::usize>(argc));
+    for (int i = 0; i < argc; ++i) {
+        values.push(rstd::ffi::OsString::from(rstd::ref<rstd::ffi::OsStr>(argv[i])));
+    }
+    return values;
+}
+
+template<typename T>
+auto get_arg(const rstd::argparse::Matches& matches, const rstd::argparse::ArgKey<T>& key)
+    -> rstd::Option<rstd::ref<T>> {
+    auto value = matches.get_one(key);
+    if (value.is_err()) {
+        rstd_error("waywallen-video-renderer: argparse match access failed: {}",
+                   std::move(value).unwrap_err());
+        std::exit(1);
+    }
+    return std::move(value).unwrap();
 }
 
 float clamp01(float v) {
@@ -123,35 +156,78 @@ bool parse_bool_wire(const char* raw, bool& out) {
 // (loop_file, hwdec, render_node, fps, volume) rides on Init.settings
 // kv. Keep `--no-loop` / `--render-node` as standalone-debug escape
 // hatches (set them before init; daemon doesn't emit them).
-Options parse_args(int argc, char** argv) {
-    Options o;
-    for (int i = 1; i < argc; ++i) {
-        std::string a    = argv[i];
-        auto        next = [&]() -> std::string {
-            if (i + 1 >= argc) return {};
-            return argv[++i];
-        };
-        if (a == "--ipc")
-            o.ipc_path = next();
-        else if (a == "--path")
-            o.video_path = next();
-        else if (a == "--no-loop")
-            o.loop_file = false;
-        else if (a == "--render-node")
-            o.render_node = next();
-        else if (a == "--hwdec")
-            o.hwdec = next();
-        else if (a == "--selftest") {
-            o.selftest   = true;
-            o.video_path = next();
-        }
-        // Tolerate other `--key value` extras by skipping the value.
-        else if (a.size() >= 2 && a[0] == '-' && a[1] == '-' && i + 1 < argc) {
-            std::string nxt = argv[i + 1];
-            if (! (nxt.size() >= 2 && nxt[0] == '-' && nxt[1] == '-')) ++i;
-        }
+ParseArgsResult parse_args(int argc, char** argv) {
+    using namespace rstd::argparse;
+
+    auto command = Command::make("waywallen-video-renderer");
+    command.about("Render video wallpapers for waywallen");
+    auto ipc  = command.add_arg(Arg<rstd::string::String>::value("ipc", string_parser())
+                                    .long_name("ipc")
+                                    .value_name("SOCKET")
+                                    .help("Connect to the renderer IPC socket"));
+    auto path = command.add_arg(Arg<rstd::string::String>::value("path", string_parser())
+                                    .long_name("path")
+                                    .value_name("VIDEO")
+                                    .help("Video wallpaper path"));
+    command.add_arg(
+        Arg<bool>::flag("no-loop").long_name("no-loop").help("Disable playback looping"));
+    auto render_node =
+        command.add_arg(Arg<rstd::string::String>::value("render-node", string_parser())
+                            .long_name("render-node")
+                            .value_name("DEVICE")
+                            .help("Use a specific DRM render node"));
+    auto hwdec    = command.add_arg(Arg<rstd::string::String>::value("hwdec", string_parser())
+                                        .long_name("hwdec")
+                                        .value_name("MODE")
+                                        .help("Select the hardware decoding mode"));
+    auto selftest = command.add_arg(Arg<rstd::string::String>::value("selftest", string_parser())
+                                        .long_name("selftest")
+                                        .value_name("VIDEO")
+                                        .help("Run the standalone decoder self-test"));
+
+    auto built = std::move(command).build();
+    if (built.is_err()) {
+        rstd_error("waywallen-video-renderer: invalid CLI definition: {}",
+                   std::move(built).unwrap_err());
+        return { .exit_code = 1 };
     }
-    return o;
+    auto parser = std::move(built).unwrap();
+    auto parsed = parser.parse_known_from(cli_argv(argc, argv));
+    if (parsed.is_err()) {
+        auto error  = std::move(parsed).unwrap_err();
+        auto report = parser.render_error(error);
+        write_cli_output(report.text(), report.target());
+        return { .exit_code = report.exit_code() };
+    }
+
+    auto outcome = std::move(parsed).unwrap();
+    if (outcome.is_Display()) {
+        const auto& request = outcome.as_Display().request;
+        write_cli_output(request.text(), request.target());
+        return { .exit_code = request.exit_code() };
+    }
+
+    auto    known   = std::move(outcome).as_Parsed().value;
+    auto    matches = known.matches();
+    Options options;
+    if (auto value = get_arg(*matches, ipc); value.is_some()) {
+        options.ipc_path = to_std_string(**value);
+    }
+    if (auto value = get_arg(*matches, path); value.is_some()) {
+        options.video_path = to_std_string(**value);
+    }
+    if (auto value = get_arg(*matches, render_node); value.is_some()) {
+        options.render_node = to_std_string(**value);
+    }
+    if (auto value = get_arg(*matches, hwdec); value.is_some()) {
+        options.hwdec = to_std_string(**value);
+    }
+    if (auto value = get_arg(*matches, selftest); value.is_some()) {
+        options.selftest   = true;
+        options.video_path = to_std_string(**value);
+    }
+    options.loop_file = ! matches->contains("no-loop");
+    return { .options = std::move(options), .should_run = true };
 }
 
 const char* kv_get(const ww_kv_list_t& kv, const char* key) {
@@ -782,7 +858,9 @@ int run(int argc, char** argv) {
         },
         nullptr);
 
-    Options opt = parse_args(argc, argv);
+    auto parsed_args = parse_args(argc, argv);
+    if (! parsed_args.should_run) return parsed_args.exit_code;
+    Options opt = std::move(parsed_args.options);
     if (opt.selftest) return run_selftest(opt);
     if (opt.ipc_path.empty()) die("--ipc <socket_path> is required");
 
