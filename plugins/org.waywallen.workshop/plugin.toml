@@ -1,6 +1,0 @@
-[plugin]
-id = "org.waywallen.workshop"
-name = "Steam Workshop"
-version = "0.1.0"
-entry = "main.lua"
-entry_version = 2

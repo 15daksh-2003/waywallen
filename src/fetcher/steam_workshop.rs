@@ -74,6 +74,10 @@ pub async fn write_token(state: &Arc<AppState>, account: &str, refresh_token: &s
     let bin = resolve_bin(state);
     let _guard = FETCH_LOCK.lock().await;
     let assemfiles = ensure_isolated_storage(&bin).await?;
+    log::info!(
+        "workshop: seeding DepotDownloader token for '{account}' -> {}",
+        assemfiles.join("account.config").display()
+    );
     tokio::fs::write(assemfiles.join("account.config"), bytes)
         .await
         .map_err(|e| Error::WorkshopFetch(format!("write account.config: {e}")))?;
@@ -121,6 +125,11 @@ pub async fn fetch(
             write_token(state, &username, &refresh_token).await?;
         }
     }
+    log::info!(
+        "workshop: fetch pubfile {id} as '{username}' via {bin} (token present: {}, storage: {:?})",
+        has_token(),
+        find_assemfiles()
+    );
     run(&bin, &username, id, dir).await
 }
 
@@ -183,6 +192,11 @@ async fn run(bin: &str, username: &str, id: &str, dir: &Path) -> Result<PathBuf>
     );
 
     if !output.status.success() || needs_auth(&combined) {
+        log::warn!(
+            "workshop: DepotDownloader failed for pubfile {id} (exit {:?}); output:\n{}",
+            output.status.code(),
+            combined.trim()
+        );
         let _ = tokio::fs::remove_dir_all(&staging).await;
         return Err(classify(&combined, bin, id, username).into());
     }

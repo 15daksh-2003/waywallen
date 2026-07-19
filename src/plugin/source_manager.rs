@@ -135,8 +135,8 @@ pub struct DiscoverSourceInfo {
     pub sorts: Vec<DiscoverSort>,
     pub tags: Vec<String>,
     /// Domain id of the owning installable plugin (e.g.
-    /// `org.waywallen.workshop`): the key of its `[plugin."<id>"]` config
-    /// table, so the UI can address settings for this source.
+    /// `org.waywallen.open-wallpaper-engine`): the key of its `[plugin."<id>"]`
+    /// config table, so the UI can address settings for this source.
     pub owner_plugin_id: String,
     /// User-configurable settings the plugin declares via `info().settings`.
     pub settings: Vec<SourceSetting>,
@@ -2413,49 +2413,6 @@ return M
         item.set("id", "abc").unwrap();
         let mapped: LuaTable = search_item.call(item).unwrap();
         assert_eq!(mapped.get::<String>("wp_type").unwrap(), "image");
-    }
-
-    #[test]
-    fn workshop_plugin_is_discover_only() {
-        let plugin_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("plugins/org.waywallen.workshop/main.lua");
-
-        let mut mgr = SourceManager::new().unwrap();
-        let name = mgr
-            .load_plugin(&plugin_path, "test.plugin", "1.0", ENTRY_VERSION)
-            .unwrap();
-        assert_eq!(name, "workshop");
-        assert!(mgr.plugins().unwrap().is_empty());
-
-        let sources = mgr.discover_sources().unwrap();
-        assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].plugin_id, "workshop");
-        assert!(sources[0].supports_search);
-        // Static fallback tags; the full taxonomy is fetched at runtime via
-        // discover.tags(ctx) and swapped in by refresh_dynamic_tags.
-        assert!(sources[0].tags.iter().any(|tag| tag == "Scene"));
-        // Sign-in is a plugin action + status row the daemon renders in the config
-        // page; browsing/downloads authorize off the Steam sign-in, not a key.
-        assert_eq!(sources[0].owner_plugin_id, "test.plugin");
-        assert!(sources[0].settings.is_empty());
-        assert!(sources[0].actions.iter().any(|a| a.id == "steam_sign_in"));
-        assert!(sources[0].status.iter().any(|s| s.id == "steam_account"));
-
-        // map.search_item derives wp_type from the item's workshop type tag.
-        let env = mgr.plugin_lua_env(plugin_path.parent().unwrap()).unwrap();
-        let import: LuaFunction = env.get("import").unwrap();
-        let map: LuaTable = import.call("workshop.map").unwrap();
-        let search_item: LuaFunction = map.get("search_item").unwrap();
-        let item = mgr.lua.create_table().unwrap();
-        item.set("publishedfileid", "123").unwrap();
-        let tags = mgr.lua.create_table().unwrap();
-        let scene = mgr.lua.create_table().unwrap();
-        scene.set("tag", "Scene").unwrap();
-        tags.set(1, scene).unwrap();
-        item.set("tags", tags).unwrap();
-        let mapped: LuaTable = search_item.call(item).unwrap();
-        assert_eq!(mapped.get::<String>("id").unwrap(), "123");
-        assert_eq!(mapped.get::<String>("wp_type").unwrap(), "scene");
     }
 
     #[test]

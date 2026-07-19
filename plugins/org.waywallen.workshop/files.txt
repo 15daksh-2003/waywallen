@@ -1,8 +1,0 @@
-main.lua
-plugin.toml
-workshop/api.lua
-workshop/discover.lua
-workshop/map.lua
-workshop/project.lua
-workshop/source.lua
-workshop/wallpaper.lua

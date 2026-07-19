@@ -1023,7 +1023,7 @@ fn publish_steam_login(
 /// isolated here so the wire/UI stay generic.
 fn compute_source_status(_state: &Arc<AppState>, source_id: &str, status_id: &str) -> String {
     match (source_id, status_id) {
-        ("workshop", "steam_account") => match crate::steam_login::account_name() {
+        ("wallpaper_engine", "steam_account") => match crate::steam_login::account_name() {
             Some(user) if !user.trim().is_empty() => format!("Signed in as {user}"),
             Some(_) => "Signed in".to_string(),
             None => "Not signed in".to_string(),
@@ -2195,8 +2195,8 @@ async fn dispatch_inner(
                             .actions
                             .iter()
                             .filter(|a| match (s.plugin_id.as_str(), a.id.as_str()) {
-                                ("workshop", "steam_sign_in") => !signed_in,
-                                ("workshop", "steam_sign_out") => signed_in,
+                                ("wallpaper_engine", "steam_sign_in") => !signed_in,
+                                ("wallpaper_engine", "steam_sign_out") => signed_in,
                                 _ => true,
                             })
                             .map(crate::control_proto::source_action_to_proto)
@@ -2489,7 +2489,7 @@ async fn dispatch_inner(
         }
 
         Req::PluginAction(r) => match (r.plugin_id.as_str(), r.action_id.as_str()) {
-            ("workshop", "steam_sign_in") => {
+            ("wallpaper_engine", "steam_sign_in") => {
                 let task_state = state.clone();
                 state.tasks.spawn_async_unique(
                     tasks::TaskKind::Generic,
@@ -2510,7 +2510,7 @@ async fn dispatch_inner(
                     error: String::new(),
                 })
             }
-            ("workshop", "steam_sign_out") => match crate::steam_login::sign_out().await {
+            ("wallpaper_engine", "steam_sign_out") => match crate::steam_login::sign_out().await {
                 Ok(()) => {
                     // Nudge the UI to re-read the "signed in" status.
                     state.events.publish(GlobalEvent::SettingsChanged);

@@ -482,7 +482,7 @@ message SourcePluginInfo {
   // Longer helper text describing what kind of path to choose. May
   // contain newlines. Empty = no hint shown.
   string library_hint = 5;
-  // Domain id of the owning plugin (e.g. org.waywallen.workshop), so the
+  // Domain id of the owning plugin (e.g. org.waywallen.open-wallpaper-engine), so the
   // UI can address its `[plugin."<id>"]` config table for SettingsSet.
   string plugin_id = 6;
   // User-configurable settings the plugin declares via `info().settings`,
@@ -678,7 +678,7 @@ message RemoteSourceInfo {
   repeated RemoteSortOption sorts = 4;
   repeated string tags = 5;
   string content_dir = 6;
-  // Domain id of the owning plugin (e.g. org.waywallen.workshop) — the key of
+  // Domain id of the owning plugin (e.g. org.waywallen.open-wallpaper-engine) — the key of
   // its `[plugin."<id>"]` config table for SettingsSet.
   string owner_plugin_id = 7;
   // Settings the source plugin declares via `info().settings`, so the UI can
@@ -793,7 +793,7 @@ message RemoteDownloadProgress {
 
 // In-UI Steam login: the daemon drives DepotDownloader's own `-qr` flow and
 // relays its ASCII-art QR (DepotDownloader never prints the challenge URL) plus
-// status to the UI. Used by the org.waywallen.workshop plugin's downloads.
+// status to the UI. Used by the org.waywallen.open-wallpaper-engine plugin's downloads.
 message SteamLoginStartRequest {}
 message SteamLoginStartResponse {
   bool   accepted = 1;
