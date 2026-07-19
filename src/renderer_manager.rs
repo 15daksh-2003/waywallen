@@ -16,7 +16,7 @@ use crate::ipc::uds::{recv_event, send_control, CodecError};
 
 /// Renderer IPC compatibility version the daemon currently emits. Bump
 /// this when the daemon/renderer wire contract changes.
-pub const SPAWN_VERSION: u32 = 7;
+pub const SPAWN_VERSION: u32 = 8;
 use crate::plugin::renderer_registry::{
     RendererDef, RendererRegistry, EVENT_KIND_MPRIS, EVENT_KIND_POINTER,
 };
@@ -132,36 +132,6 @@ impl DrmNode {
 /// keeps around before evicting the oldest.
 const SYNC_FD_RETENTION: usize = 16;
 
-struct RendererReleaseResolutionPublisher {
-    sock: StdWeak<StdMutex<StdUnixStream>>,
-}
-
-impl crate::sync::ReleaseResolutionPublisher for RendererReleaseResolutionPublisher {
-    fn publish(
-        &self,
-        resolution: crate::sync::ReleaseResolution,
-    ) -> std::result::Result<(), String> {
-        let sock = self
-            .sock
-            .upgrade()
-            .ok_or_else(|| "renderer transport no longer exists".to_string())?;
-        let guard = sock
-            .lock()
-            .map_err(|_| "renderer transport mutex poisoned".to_string())?;
-        send_control(
-            &guard,
-            &ControlMsg::ReleaseResolved {
-                buffer_generation: resolution.buffer_generation,
-                buffer_index: resolution.buffer_index,
-                release_point: resolution.release_point,
-                outcome: resolution.outcome as u32,
-            },
-            &[],
-        )
-        .map_err(|error| error.to_string())
-    }
-}
-
 /// Per-renderer state. Cheap to clone via `Arc`; the inner fields are
 /// shared across HTTP handlers and the reader thread.
 pub struct RendererHandle {
@@ -216,8 +186,7 @@ pub struct RendererHandle {
     /// NegotiateBuffers to this renderer, used for idempotence.
     last_dispatched_scheme: Arc<StdMutex<Option<crate::dma::negotiate::NegotiatedScheme>>>,
 
-    /// Sink for per-frame [`crate::sync::FrameRecord`]s. The display
-    /// endpoint pushes one record per consumer per frame.
+    /// Sink for frame registration and member completion events.
     frame_record_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::sync::FrameRecord>>,
 
     /// The child process. Kept alive so dropping the manager reaps it.
@@ -344,16 +313,15 @@ impl RendererHandle {
         }
     }
 
-    /// Push a per-frame [`crate::sync::FrameRecord`] to the reaper.
-    /// Called once per display consumer per frame.
-    pub fn submit_frame_record(
+    pub fn register_frame_consumers(
         &self,
-        record: crate::sync::FrameRecord,
-    ) -> std::result::Result<(), &'static str> {
+        identity: crate::sync::FrameIdentity,
+        expected_members: u32,
+    ) -> std::result::Result<Vec<crate::sync::FrameConsumerMember>, &'static str> {
         let Some(tx) = self.frame_record_tx.as_ref() else {
             return Err("no reaper wired (test stub or unconfigured renderer)");
         };
-        tx.send(record).map_err(|_| "reaper channel closed")
+        crate::sync::register_frame(tx, identity, expected_members)
     }
 
     /// Renderer-published clear color (RGBA, 0..=1). Defaults to
@@ -665,9 +633,6 @@ impl RendererManager {
                 drm,
                 id.clone(),
                 Arc::clone(&handle.release_syncobj),
-                Arc::new(RendererReleaseResolutionPublisher {
-                    sock: Arc::downgrade(&handle.sock),
-                }),
                 frame_rx,
             );
         }
@@ -1465,6 +1430,7 @@ pub(crate) fn build_init_msg(req: &SpawnRequest, def: &RendererDef) -> ControlMs
     settings.sort_by(|a, b| a.0.cmp(&b.0));
 
     ControlMsg::Init {
+        protocol_version: crate::ipc::proto::PROTOCOL_VERSION,
         spawn_version,
         settings,
         user_properties: req.user_properties_json.clone().unwrap_or_default(),
@@ -1702,10 +1668,12 @@ mod init_handshake_tests {
         let msg = build_init_msg(&req, &def_mpv_schema());
         match msg {
             ControlMsg::Init {
+                protocol_version,
                 spawn_version,
                 settings,
                 user_properties,
             } => {
+                assert_eq!(protocol_version, crate::ipc::proto::PROTOCOL_VERSION);
                 assert_eq!(spawn_version, 1); // pulled from def_mpv_schema
                 assert_eq!(settings, vec![("loop_file".to_string(), "inf".to_string())]);
                 assert_eq!(user_properties, "");

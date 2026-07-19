@@ -27,7 +27,7 @@ fi
 cxx_files=()
 while IFS= read -r file; do
     case "$file" in
-        bridge/src/ipc_v1.c | bridge/include/waywallen-bridge/ipc_v1.h)
+        bridge/src/ipc_v2.c | bridge/include/waywallen-bridge/ipc_v2.h)
             continue
             ;;
     esac

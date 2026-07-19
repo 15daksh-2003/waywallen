@@ -30,8 +30,6 @@ import waywallen.bridge;
 namespace
 {
 
-constexpr uint32_t SLOT_COUNT = 3;
-
 struct Options {
     std::string ipc_path;
     std::string video_path;
@@ -365,7 +363,7 @@ void apply_user_properties(HostState& host, const char* json) {
     auto audio = parsed.get(kEnableAudioKey);
     if (audio.is_none()) return;
     const auto& audio_value = **audio;
-    bool enabled = true;
+    bool        enabled     = true;
     if (audio_value.is_boolean()) {
         enabled = *audio_value.as_bool();
     } else if (audio_value.is_string()) {
@@ -467,22 +465,6 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
         break;
     }
     case WW_EVT_IN_SHUTDOWN: signal_shutdown(host); break;
-    case WW_EVT_IN_RELEASE_RESOLVED: {
-        const auto& release = c.u.release_resolved;
-        int         rc      = release.outcome <= WW_POOL_RELEASE_FORCED
-                                  ? ww_bridge_pool_report_release(
-                                        host.pool,
-                                        release.buffer_generation,
-                                        release.buffer_index,
-                                        release.release_point,
-                                        static_cast<ww_pool_release_outcome_t>(release.outcome))
-                                  : -EPROTO;
-        if (rc != 0) {
-            rstd_warn("waywallen-video-renderer: release_resolved rejected: {}", rc);
-            if (rc == -EPIPE) signal_shutdown(host);
-        }
-        break;
-    }
     case WW_EVT_IN_NEGOTIATE_BUFFERS: {
         const auto&         nb = c.u.negotiate_buffers;
         ww_pool_directive_t d {};
@@ -494,8 +476,7 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
         d.sync_mode   = nb.sync_mode;
         d.color       = nb.color;
         d.mem_hint    = nb.mem_hint;
-        d.count       = nb.count > 0 ? nb.count : SLOT_COUNT;
-        if (d.count > SLOT_COUNT) d.count = SLOT_COUNT;
+        d.count       = nb.count;
         {
             std::lock_guard<std::mutex> lk(host.neg_mu);
             host.neg_directive = d;
@@ -982,8 +963,8 @@ int run(int argc, char** argv) {
         if (audio_file_res.is_err()) {
             rstd_warn("waywallen-video-renderer: audio file open failed");
         } else {
-            auto p_res = wavsen::audio::AvPlayer::open(
-                rstd::move(audio_file_res).unwrap_unchecked(), false);
+            auto p_res =
+                wavsen::audio::AvPlayer::open(rstd::move(audio_file_res).unwrap_unchecked(), false);
             if (p_res.is_err()) {
                 rstd_warn("waywallen-video-renderer: audio open failed: {}",
                           std::move(p_res).unwrap_err().message);
@@ -1103,7 +1084,6 @@ int run(int argc, char** argv) {
     rstd_info("waywallen-video-renderer: decoder mode = {}", kind_label(decoder->get()->kind()));
 
     /* --- Main loop ----------------------------------------------------- */
-    uint32_t                 slot = 0;
     wavsen::video::Presenter presenter; // Iter 3: PTS-driven pacing.
     if (av_player) {
         presenter.set_external_clock([p = av_player.get()] {
@@ -1138,7 +1118,6 @@ int run(int argc, char** argv) {
                 } else {
                     submitted_since_negotiate = false;
                 }
-                slot = 0;
             }
         }
 
@@ -1283,7 +1262,7 @@ int run(int argc, char** argv) {
         if (! presenter.present_frame(frame_pts)) continue;
 
         ww_pool_slot_acquire_result_t acquired {};
-        int acquire_rc = ww_bridge_pool_acquire_slot_for_render(host.pool, slot, 600, &acquired);
+        int acquire_rc = ww_bridge_pool_try_acquire_any_for_render(host.pool, &acquired);
         if (acquire_rc != 0) {
             rstd_error("waywallen-video-renderer: acquire slot contract failed: {}", acquire_rc);
             signal_shutdown(host);
@@ -1291,16 +1270,14 @@ int run(int argc, char** argv) {
         }
         if (acquired.status == WW_POOL_SLOT_ACQUIRE_BUSY) {
             if ((stall_warn_counter++ % 30) == 0) {
-                rstd_warn("waywallen-video-renderer: slot {} stalled, dropping frame", slot);
+                rstd_warn("waywallen-video-renderer: all slots are busy, dropping frame");
             }
             continue;
         }
         stall_warn_counter = 0;
-        if (acquired.status == WW_POOL_SLOT_ACQUIRE_FORCED_RELEASE ||
-            acquired.status == WW_POOL_SLOT_ACQUIRE_SESSION_LOST ||
+        if (acquired.status == WW_POOL_SLOT_ACQUIRE_SESSION_LOST ||
             acquired.status == WW_POOL_SLOT_ACQUIRE_ERROR) {
-            rstd_error("waywallen-video-renderer: slot {} cannot be reused (status={}, error={})",
-                       slot,
+            rstd_error("waywallen-video-renderer: cannot acquire a slot (status={}, error={})",
                        static_cast<int>(acquired.status),
                        acquired.error_code);
             signal_shutdown(host);
@@ -1308,7 +1285,8 @@ int run(int argc, char** argv) {
         }
         const auto& s = acquired.slot;
         if (! s.vk_image) {
-            rstd_error("waywallen-video-renderer: slot {} has no VkImage handle", slot);
+            ww_bridge_pool_abort_acquired_slot(host.pool, &acquired.identity);
+            rstd_error("waywallen-video-renderer: slot {} has no VkImage handle", s.index);
             signal_shutdown(host);
             break;
         }
@@ -1367,6 +1345,7 @@ int run(int argc, char** argv) {
             break;
         }
         if (cv_res.is_err()) {
+            ww_bridge_pool_abort_acquired_slot(host.pool, &acquired.identity);
             rstd_error("waywallen-video-renderer: yuv conversion failed: {}",
                        std::move(cv_res).unwrap_err().message.as_str());
             signal_shutdown(host);
@@ -1375,8 +1354,8 @@ int run(int argc, char** argv) {
         sync_fd = std::move(cv_res).unwrap();
         std::lock_guard<std::mutex>  send_lk(host.send_mu);
         ww_pool_slot_submit_result_t submitted {};
-        int                          submit_rc =
-            ww_bridge_pool_submit_slot_for_render(host.pool, host.sock, slot, sync_fd, &submitted);
+        int                          submit_rc = ww_bridge_pool_submit_acquired_slot(
+            host.pool, host.sock, &acquired.identity, sync_fd, &submitted);
         if (submit_rc != 0 || submitted.status != WW_POOL_SLOT_SUBMIT_SUBMITTED) {
             rstd_error("waywallen-video-renderer: submit slot failed (rc={}, status={}, error={})",
                        submit_rc,
@@ -1386,8 +1365,6 @@ int run(int argc, char** argv) {
             break;
         }
         submitted_since_negotiate = true;
-
-        slot = (slot + 1) % SLOT_COUNT;
     }
 
     if (reader.joinable()) {

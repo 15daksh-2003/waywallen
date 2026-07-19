@@ -23,7 +23,6 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
 
 /* -----------------------------------------------------------------------
@@ -33,41 +32,23 @@
 static int init_release_sync(ww_pool_t* p) {
     int rc = pthread_mutex_init(&p->release_mutex, NULL);
     if (rc != 0) return -rc;
-
-    pthread_condattr_t attr;
-    rc = pthread_condattr_init(&attr);
-    if (rc != 0) {
-        pthread_mutex_destroy(&p->release_mutex);
-        return -rc;
-    }
-    rc = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
-    if (rc == 0) rc = pthread_cond_init(&p->release_cond, &attr);
-    pthread_condattr_destroy(&attr);
-    if (rc != 0) {
-        pthread_mutex_destroy(&p->release_mutex);
-        return -rc;
-    }
     p->release_sync_initialized = true;
     return 0;
 }
 
 static void destroy_release_sync(ww_pool_t* p) {
     if (! p->release_sync_initialized) return;
-    pthread_cond_destroy(&p->release_cond);
     pthread_mutex_destroy(&p->release_mutex);
     p->release_sync_initialized = false;
 }
 
-static bool valid_release_outcome(ww_pool_release_outcome_t outcome) {
-    return outcome == WW_POOL_RELEASE_CONSUMER_RELEASED ||
-           outcome == WW_POOL_RELEASE_NO_CONSUMERS || outcome == WW_POOL_RELEASE_FORCED;
-}
-
-static void reset_release_proofs_locked(ww_pool_t* p) {
+static void reset_release_state_locked(ww_pool_t* p) {
     memset(p->last_release_point, 0, sizeof(p->last_release_point));
-    memset(p->release_proofs, 0, sizeof(p->release_proofs));
+    memset(&p->pending_acquire, 0, sizeof(p->pending_acquire));
     memset(&p->pending_submit, 0, sizeof(p->pending_submit));
-    p->release_slot_count = 0;
+    p->release_slot_count  = 0;
+    p->next_slot           = 0;
+    p->next_acquire_serial = 1;
 }
 
 static void close_slot_fds(ww_pool_t* p) {
@@ -104,8 +85,7 @@ static void teardown_slots(ww_pool_t* p) {
      * old buffers. Reset so the next render frame doesn't wait on a
      * syncobj point that pertains to a destroyed buffer. */
     pthread_mutex_lock(&p->release_mutex);
-    reset_release_proofs_locked(p);
-    pthread_cond_broadcast(&p->release_cond);
+    reset_release_state_locked(p);
     pthread_mutex_unlock(&p->release_mutex);
 }
 
@@ -350,7 +330,6 @@ void ww_bridge_pool_destroy(ww_pool_t* pool) {
     if (! pool) return;
     pthread_mutex_lock(&pool->release_mutex);
     pool->session_lost = true;
-    pthread_cond_broadcast(&pool->release_cond);
     pthread_mutex_unlock(&pool->release_mutex);
     /* Drain in-flight GPU work referencing any slot before tearing it
      * down. Without this, vkDestroyImage / glDeleteTextures may run on
@@ -446,6 +425,11 @@ int ww_bridge_pool_apply_directive(ww_pool_t* pool, int sock,
     if (! pool || ! directive) return -EINVAL;
     if (! pool->caps_advertised) return -EINVAL;
 
+    pthread_mutex_lock(&pool->release_mutex);
+    bool transaction_active = pool->pending_acquire.active || pool->pending_submit.active;
+    pthread_mutex_unlock(&pool->release_mutex);
+    if (transaction_active) return -EBUSY;
+
     int rc = validate_directive(pool, directive);
     if (rc != 0) {
         send_bind_failed_quiet(pool,
@@ -521,11 +505,7 @@ int ww_bridge_pool_apply_directive(ww_pool_t* pool, int sock,
     return 0;
 }
 
-int ww_bridge_pool_acquire_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_t* out_slot) {
-    if (! pool || ! out_slot) return -EINVAL;
-    if (! pool->has_directive) return -EINVAL;
-    if (slot_index >= pool->n_slots) return -EINVAL;
-
+static int populate_slot_view(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_t* out_slot) {
     memset(out_slot, 0, sizeof(*out_slot));
     out_slot->index  = slot_index;
     out_slot->width  = pool->cur.width;
@@ -540,60 +520,34 @@ int ww_bridge_pool_acquire_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_sl
     return pool->ops->populate_slot_view(pool, slot_index, out_slot);
 }
 
-static struct timespec release_wait_deadline(uint32_t timeout_ms) {
-    struct timespec deadline = { 0 };
-    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) return deadline;
-    uint64_t extra_ns = (uint64_t)timeout_ms * 1000000ull;
-    uint64_t total_ns = (uint64_t)deadline.tv_nsec + extra_ns;
-    deadline.tv_sec += (time_t)(total_ns / 1000000000ull);
-    deadline.tv_nsec = (long)(total_ns % 1000000000ull);
-    return deadline;
+static bool wait_would_block(int rc) { return rc == -ETIME || rc == -ETIMEDOUT || rc == -EAGAIN; }
+
+static bool same_identity(const ww_pool_slot_identity_t* lhs, const ww_pool_slot_identity_t* rhs) {
+    return lhs->bind_generation == rhs->bind_generation && lhs->slot_index == rhs->slot_index &&
+           lhs->previous_release_point == rhs->previous_release_point &&
+           lhs->acquire_serial == rhs->acquire_serial;
 }
 
-static int wait_release_proof(ww_pool_t* pool, uint64_t bind_generation, uint32_t slot_index,
-                              uint64_t release_point, uint32_t timeout_ms,
-                              ww_pool_release_outcome_t* out_outcome) {
-    struct timespec deadline = release_wait_deadline(timeout_ms);
+int ww_bridge_pool_get_extent(ww_pool_t* pool, uint32_t* out_width, uint32_t* out_height) {
+    if (! pool || ! out_width || ! out_height) return -EINVAL;
     pthread_mutex_lock(&pool->release_mutex);
-    for (;;) {
-        if (pool->session_lost) {
-            pthread_mutex_unlock(&pool->release_mutex);
-            return -EPIPE;
-        }
-        if (pool->bind_generation != bind_generation || slot_index >= pool->release_slot_count ||
-            pool->last_release_point[slot_index] != release_point) {
-            pthread_mutex_unlock(&pool->release_mutex);
-            return -ESTALE;
-        }
-        const ww_pool_release_proof_t* proof = &pool->release_proofs[slot_index];
-        if (proof->known && proof->bind_generation == bind_generation &&
-            proof->release_point == release_point) {
-            *out_outcome = proof->outcome;
-            pthread_mutex_unlock(&pool->release_mutex);
-            return 0;
-        }
-        int rc = pthread_cond_timedwait(&pool->release_cond, &pool->release_mutex, &deadline);
-        if (rc == ETIMEDOUT) {
-            pthread_mutex_unlock(&pool->release_mutex);
-            return -ETIMEDOUT;
-        }
-        if (rc != 0) {
-            pthread_mutex_unlock(&pool->release_mutex);
-            return -rc;
-        }
+    if (! pool->has_directive || pool->n_slots == 0) {
+        pthread_mutex_unlock(&pool->release_mutex);
+        return -ENODATA;
     }
+    *out_width  = pool->cur.width;
+    *out_height = pool->cur.height;
+    pthread_mutex_unlock(&pool->release_mutex);
+    return 0;
 }
 
-int ww_bridge_pool_acquire_slot_for_render(ww_pool_t* pool, uint32_t slot_index,
-                                           uint32_t                       timeout_ms,
-                                           ww_pool_slot_acquire_result_t* out_result) {
+int ww_bridge_pool_try_acquire_any_for_render(ww_pool_t*                     pool,
+                                              ww_pool_slot_acquire_result_t* out_result) {
     if (! pool || ! out_result) return -EINVAL;
 
     memset(out_result, 0, sizeof(*out_result));
     out_result->status     = WW_POOL_SLOT_ACQUIRE_ERROR;
     out_result->error_code = -EINVAL;
-
-    if (! pool->has_directive || slot_index >= pool->n_slots) return 0;
 
     pthread_mutex_lock(&pool->release_mutex);
     if (pool->session_lost) {
@@ -602,107 +556,142 @@ int ww_bridge_pool_acquire_slot_for_render(ww_pool_t* pool, uint32_t slot_index,
         pthread_mutex_unlock(&pool->release_mutex);
         return 0;
     }
-    uint64_t previous_point  = pool->last_release_point[slot_index];
-    uint64_t bind_generation = pool->bind_generation;
-    pthread_mutex_unlock(&pool->release_mutex);
-
-    out_result->bind_generation        = bind_generation;
-    out_result->previous_release_point = previous_point;
-
-    int wait_rc = ww_drm_syncobj_timeline_wait(
-        pool->drm_fd, pool->release_syncobj_handle, previous_point, timeout_ms);
-    if (wait_rc != 0) {
-        if (wait_rc == -ETIME || wait_rc == -ETIMEDOUT || wait_rc == -EAGAIN) {
-            out_result->status     = WW_POOL_SLOT_ACQUIRE_BUSY;
-            out_result->error_code = 0;
-        } else {
-            out_result->error_code = wait_rc;
-        }
+    if (! pool->has_directive || pool->n_slots == 0 || pool->release_slot_count != pool->n_slots) {
+        pthread_mutex_unlock(&pool->release_mutex);
+        return 0;
+    }
+    if (pool->pending_acquire.active || pool->pending_submit.active) {
+        out_result->error_code = -EBUSY;
+        pthread_mutex_unlock(&pool->release_mutex);
         return 0;
     }
 
-    if (previous_point != 0) {
-        ww_pool_release_outcome_t outcome  = WW_POOL_RELEASE_FORCED;
-        int                       proof_rc = wait_release_proof(
-            pool, bind_generation, slot_index, previous_point, timeout_ms, &outcome);
-        if (proof_rc == -EPIPE) {
-            out_result->status     = WW_POOL_SLOT_ACQUIRE_SESSION_LOST;
-            out_result->error_code = proof_rc;
-            return 0;
-        }
-        if (proof_rc != 0) {
-            out_result->error_code = proof_rc;
-            return 0;
-        }
-        if (outcome == WW_POOL_RELEASE_FORCED) {
-            out_result->status     = WW_POOL_SLOT_ACQUIRE_FORCED_RELEASE;
-            out_result->error_code = 0;
-            return 0;
+    uint32_t selected = UINT32_MAX;
+    for (uint32_t offset = 0; offset < pool->n_slots; ++offset) {
+        uint32_t index = (pool->next_slot + offset) % pool->n_slots;
+        if (pool->last_release_point[index] == 0) {
+            selected = index;
+            break;
         }
     }
+    if (selected == UINT32_MAX) {
+        for (uint32_t offset = 0; offset < pool->n_slots; ++offset) {
+            uint32_t index = (pool->next_slot + offset) % pool->n_slots;
+            int      rc    = ww_drm_syncobj_timeline_wait(
+                pool->drm_fd, pool->release_syncobj_handle, pool->last_release_point[index], 0);
+            if (rc == 0) {
+                selected = index;
+                break;
+            }
+            if (! wait_would_block(rc)) {
+                out_result->error_code = rc;
+                pthread_mutex_unlock(&pool->release_mutex);
+                return 0;
+            }
+        }
+    }
+    if (selected == UINT32_MAX) {
+        out_result->status     = WW_POOL_SLOT_ACQUIRE_BUSY;
+        out_result->error_code = 0;
+        pthread_mutex_unlock(&pool->release_mutex);
+        return 0;
+    }
 
-    int acquire_rc = ww_bridge_pool_acquire_slot(pool, slot_index, &out_result->slot);
+    uint64_t serial = pool->next_acquire_serial++;
+    if (serial == 0) {
+        out_result->error_code = -EOVERFLOW;
+        pthread_mutex_unlock(&pool->release_mutex);
+        return 0;
+    }
+    ww_pool_slot_identity_t identity = {
+        .bind_generation        = pool->bind_generation,
+        .slot_index             = selected,
+        .previous_release_point = pool->last_release_point[selected],
+        .acquire_serial         = serial,
+    };
+    int acquire_rc = populate_slot_view(pool, selected, &out_result->slot);
     if (acquire_rc != 0) {
         out_result->error_code = acquire_rc;
+        pthread_mutex_unlock(&pool->release_mutex);
         return 0;
     }
 
-    out_result->status     = previous_point == 0 ? WW_POOL_SLOT_ACQUIRE_READY_UNUSED
-                                                 : WW_POOL_SLOT_ACQUIRE_READY_RELEASED;
+    pool->pending_acquire = (ww_pool_pending_acquire_t) {
+        .identity = identity,
+        .active   = true,
+    };
+    pool->next_slot      = (selected + 1) % pool->n_slots;
+    out_result->identity = identity;
+    out_result->status = identity.previous_release_point == 0 ? WW_POOL_SLOT_ACQUIRE_READY_UNUSED
+                                                              : WW_POOL_SLOT_ACQUIRE_READY_RELEASED;
     out_result->error_code = 0;
+    pthread_mutex_unlock(&pool->release_mutex);
     return 0;
 }
 
-int ww_bridge_pool_report_release(ww_pool_t* pool, uint64_t bind_generation, uint32_t slot_index,
-                                  uint64_t release_point, ww_pool_release_outcome_t outcome) {
-    if (! pool || ! valid_release_outcome(outcome) || release_point == 0) return -EINVAL;
-
-    pthread_mutex_lock(&pool->release_mutex);
-    if (pool->session_lost) {
-        pthread_mutex_unlock(&pool->release_mutex);
-        return -EPIPE;
-    }
-
-    ww_pool_release_proof_t* proof = NULL;
-    if (pool->pending_submit.active && pool->pending_submit.bind_generation == bind_generation &&
-        pool->pending_submit.slot_index == slot_index &&
-        pool->pending_submit.release_point == release_point) {
-        if (pool->pending_submit.outcome_known && pool->pending_submit.outcome != outcome) {
-            pthread_mutex_unlock(&pool->release_mutex);
-            return -EPROTO;
+int ww_bridge_pool_wait_acquire_any_for_render(ww_pool_t* pool, ww_pool_cancel_fn cancel,
+                                               void*                          userdata,
+                                               ww_pool_slot_acquire_result_t* out_result) {
+    if (! pool || ! out_result) return -EINVAL;
+    for (;;) {
+        int rc = ww_bridge_pool_try_acquire_any_for_render(pool, out_result);
+        if (rc != 0 || out_result->status != WW_POOL_SLOT_ACQUIRE_BUSY) return rc;
+        if (cancel && cancel(userdata)) {
+            out_result->status     = WW_POOL_SLOT_ACQUIRE_CANCELLED;
+            out_result->error_code = 0;
+            return 0;
         }
-        pool->pending_submit.outcome       = outcome;
-        pool->pending_submit.outcome_known = true;
-        pthread_cond_broadcast(&pool->release_cond);
-        pthread_mutex_unlock(&pool->release_mutex);
-        return 0;
-    }
 
-    if (bind_generation != pool->bind_generation || slot_index >= pool->release_slot_count ||
-        pool->last_release_point[slot_index] != release_point) {
+        pthread_mutex_lock(&pool->release_mutex);
+        if (pool->session_lost) {
+            out_result->status     = WW_POOL_SLOT_ACQUIRE_SESSION_LOST;
+            out_result->error_code = -EPIPE;
+            pthread_mutex_unlock(&pool->release_mutex);
+            return 0;
+        }
+        uint64_t next_point = UINT64_MAX;
+        for (uint32_t index = 0; index < pool->release_slot_count; ++index) {
+            uint64_t point = pool->last_release_point[index];
+            if (point != 0 && point < next_point) next_point = point;
+        }
+        pthread_mutex_unlock(&pool->release_mutex);
+        if (next_point == UINT64_MAX) continue;
+
+        rc = ww_drm_syncobj_timeline_wait(
+            pool->drm_fd, pool->release_syncobj_handle, next_point, 250);
+        if (rc != 0 && ! wait_would_block(rc)) {
+            out_result->status     = WW_POOL_SLOT_ACQUIRE_ERROR;
+            out_result->error_code = rc;
+            return 0;
+        }
+    }
+}
+
+int ww_bridge_pool_abort_acquired_slot(ww_pool_t* pool, const ww_pool_slot_identity_t* identity) {
+    if (! pool || ! identity) return -EINVAL;
+    pthread_mutex_lock(&pool->release_mutex);
+    if (pool->pending_submit.active) {
+        pthread_mutex_unlock(&pool->release_mutex);
+        return -EBUSY;
+    }
+    if (! pool->pending_acquire.active) {
+        pthread_mutex_unlock(&pool->release_mutex);
+        return -ENOENT;
+    }
+    if (! same_identity(&pool->pending_acquire.identity, identity)) {
         pthread_mutex_unlock(&pool->release_mutex);
         return -ESTALE;
     }
-
-    proof = &pool->release_proofs[slot_index];
-    if (proof->known && proof->bind_generation == bind_generation &&
-        proof->release_point == release_point && proof->outcome != outcome) {
-        pthread_mutex_unlock(&pool->release_mutex);
-        return -EPROTO;
-    }
-    proof->bind_generation = bind_generation;
-    proof->release_point   = release_point;
-    proof->outcome         = outcome;
-    proof->known           = true;
-    pthread_cond_broadcast(&pool->release_cond);
+    memset(&pool->pending_acquire, 0, sizeof(pool->pending_acquire));
     pthread_mutex_unlock(&pool->release_mutex);
     return 0;
 }
 
-int ww_bridge_pool_submit_slot_for_render(ww_pool_t* pool, int sock, uint32_t slot_index,
-                                          int                           acquire_sync_fd,
-                                          ww_pool_slot_submit_result_t* out_result) {
-    if (! pool || ! out_result) {
+int ww_bridge_pool_submit_acquired_slot(ww_pool_t* pool, int sock,
+                                        const ww_pool_slot_identity_t* identity,
+                                        int                            acquire_sync_fd,
+                                        ww_pool_slot_submit_result_t*  out_result) {
+    if (! pool || ! identity || ! out_result) {
         if (acquire_sync_fd >= 0) close(acquire_sync_fd);
         return -EINVAL;
     }
@@ -710,17 +699,20 @@ int ww_bridge_pool_submit_slot_for_render(ww_pool_t* pool, int sock, uint32_t sl
     out_result->status     = WW_POOL_SLOT_SUBMIT_ERROR;
     out_result->error_code = -EINVAL;
 
-    if (! pool->has_directive || slot_index >= pool->n_slots) {
-        if (acquire_sync_fd >= 0) close(acquire_sync_fd);
-        return 0;
-    }
-
     pthread_mutex_lock(&pool->release_mutex);
-    out_result->bind_generation = pool->bind_generation;
-    out_result->slot_index      = slot_index;
+    out_result->identity = *identity;
     if (pool->session_lost) {
         out_result->status     = WW_POOL_SLOT_SUBMIT_SESSION_LOST;
         out_result->error_code = -EPIPE;
+        pthread_mutex_unlock(&pool->release_mutex);
+        if (acquire_sync_fd >= 0) close(acquire_sync_fd);
+        return 0;
+    }
+    if (! pool->has_directive || identity->slot_index >= pool->n_slots ||
+        identity->bind_generation != pool->bind_generation || ! pool->pending_acquire.active ||
+        ! same_identity(&pool->pending_acquire.identity, identity) ||
+        pool->last_release_point[identity->slot_index] != identity->previous_release_point) {
+        out_result->error_code = -ESTALE;
         pthread_mutex_unlock(&pool->release_mutex);
         if (acquire_sync_fd >= 0) close(acquire_sync_fd);
         return 0;
@@ -740,16 +732,15 @@ int ww_bridge_pool_submit_slot_for_render(ww_pool_t* pool, int sock, uint32_t sl
 
     uint64_t pt          = pool->release_point + 1;
     pool->pending_submit = (ww_pool_pending_submit_t) {
-        .bind_generation = pool->bind_generation,
-        .release_point   = pt,
-        .slot_index      = slot_index,
-        .active          = true,
+        .identity      = *identity,
+        .release_point = pt,
+        .active        = true,
     };
     out_result->release_point = pt;
     pthread_mutex_unlock(&pool->release_mutex);
 
     ww_evt_frame_ready_t fr = { 0 };
-    fr.image_index          = slot_index;
+    fr.image_index          = identity->slot_index;
     fr.seq                  = pt; /* seq doubles as monotonic per submit */
     fr.ts_ns                = ww_bridge_now_ns();
     fr.release_point        = pt;
@@ -760,59 +751,20 @@ int ww_bridge_pool_submit_slot_for_render(ww_pool_t* pool, int sock, uint32_t sl
     pthread_mutex_lock(&pool->release_mutex);
     if (rc != 0) {
         memset(&pool->pending_submit, 0, sizeof(pool->pending_submit));
+        memset(&pool->pending_acquire, 0, sizeof(pool->pending_acquire));
         pool->session_lost     = true;
         out_result->status     = WW_POOL_SLOT_SUBMIT_SESSION_LOST;
         out_result->error_code = rc;
-        pthread_cond_broadcast(&pool->release_cond);
         pthread_mutex_unlock(&pool->release_mutex);
         return 0;
     }
 
-    ww_pool_release_proof_t* proof = &pool->release_proofs[slot_index];
-    *proof                         = (ww_pool_release_proof_t) {
-        .bind_generation = pool->pending_submit.bind_generation,
-        .release_point   = pt,
-        .outcome         = pool->pending_submit.outcome,
-        .known           = pool->pending_submit.outcome_known,
-    };
-    pool->release_point                  = pt;
-    pool->last_release_point[slot_index] = pt;
+    pool->release_point                            = pt;
+    pool->last_release_point[identity->slot_index] = pt;
     memset(&pool->pending_submit, 0, sizeof(pool->pending_submit));
+    memset(&pool->pending_acquire, 0, sizeof(pool->pending_acquire));
     out_result->status     = WW_POOL_SLOT_SUBMIT_SUBMITTED;
     out_result->error_code = 0;
-    pthread_cond_broadcast(&pool->release_cond);
     pthread_mutex_unlock(&pool->release_mutex);
     return 0;
-}
-
-int ww_bridge_pool_submit_slot(ww_pool_t* pool, int sock, uint32_t slot_index,
-                               int acquire_sync_fd) {
-    ww_pool_slot_submit_result_t result;
-    int                          rc =
-        ww_bridge_pool_submit_slot_for_render(pool, sock, slot_index, acquire_sync_fd, &result);
-    if (rc != 0) return rc;
-    if (result.status == WW_POOL_SLOT_SUBMIT_SUBMITTED) return 0;
-    return result.error_code != 0 ? result.error_code : -EIO;
-}
-
-int ww_bridge_pool_wait_slot_release(ww_pool_t* pool, uint32_t slot_index, uint32_t timeout_ms) {
-    if (! pool) return -EINVAL;
-    if (! pool->has_directive || slot_index >= pool->n_slots) return -EINVAL;
-    pthread_mutex_lock(&pool->release_mutex);
-    if (pool->session_lost) {
-        pthread_mutex_unlock(&pool->release_mutex);
-        return -EPIPE;
-    }
-    uint64_t bind_generation = pool->bind_generation;
-    uint64_t release_point   = pool->last_release_point[slot_index];
-    pthread_mutex_unlock(&pool->release_mutex);
-
-    int rc = ww_drm_syncobj_timeline_wait(
-        pool->drm_fd, pool->release_syncobj_handle, release_point, timeout_ms);
-    if (rc != 0 || release_point == 0) return rc;
-
-    ww_pool_release_outcome_t outcome = WW_POOL_RELEASE_FORCED;
-    rc = wait_release_proof(pool, bind_generation, slot_index, release_point, timeout_ms, &outcome);
-    if (rc != 0) return rc;
-    return outcome == WW_POOL_RELEASE_FORCED ? -EOWNERDEAD : 0;
 }

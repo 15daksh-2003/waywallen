@@ -14,9 +14,11 @@ use crate::events::GlobalEvent;
 use crate::display::layout::display_point_to_texture;
 use crate::error::{Error, Result, ResultExt};
 use crate::renderer_manager::{BindSnapshot, RendererHandle};
-use crate::routing::{DisplayHandle, DisplayOutEvent, DisplayRegistration, Router};
+use crate::routing::{
+    DisplayConsumptionPermit, DisplayHandle, DisplayOutEvent, DisplayRegistration, Router,
+};
 use crate::scheduler::ProjectedConfig;
-use crate::sync::{drm_device, FrameRecord};
+use crate::sync::drm_device;
 
 /// Server version string advertised in `welcome.server_version`.
 /// Free-form, informational; consumers do not gate on this.
@@ -344,11 +346,11 @@ async fn run_frame_loop(
                 }
                 Some(DisplayOutEvent::Frame {
                     renderer, buffer_generation, buffer_index, seq,
-                    release_point, expected_count,
+                    consumption, member,
                 }) => {
                     if let Err(e) = forward_frame_ready(
                         &stream, &renderer, buffer_generation, buffer_index, seq,
-                        release_point, expected_count,
+                        consumption, member,
                     ).await {
                         break Err(e);
                     }
@@ -663,9 +665,15 @@ async fn forward_frame_ready(
     buffer_generation: u64,
     buffer_index: u32,
     seq: u64,
-    release_point: u64,
-    expected_count: u32,
+    consumption: DisplayConsumptionPermit,
+    member: Option<crate::sync::FrameConsumerMember>,
 ) -> Result<()> {
+    if !consumption.is_current() {
+        if let Some(member) = member {
+            member.skip();
+        }
+        return Ok(());
+    }
     let fence = acquire_sync_fd(renderer, seq)?;
     // Allocate a fresh BINARY drm_syncobj for this consumer and frame.
     // The handle stays in the daemon and is handed off to the reaper.
@@ -694,19 +702,8 @@ async fn forward_frame_ready(
     drop(release_fd);
     send_result.map_err(|e| Error::Internal(anyhow!("send frame_ready: {e}")))?;
 
-    // Hand off to the renderer's reaper. If the channel is closed
-    // because the renderer was evicted, dropping the handle cleans up.
-    if let Err(e) = renderer.submit_frame_record(FrameRecord {
-        buffer_generation,
-        buffer_index,
-        release_point,
-        consumer_handle: Some(consumer_handle),
-        expected_count,
-    }) {
-        log::warn!(
-            "renderer {}: failed to enqueue FrameRecord (point {release_point}): {e}",
-            renderer.id
-        );
+    if let Some(member) = member {
+        member.released(consumer_handle);
     }
     Ok(())
 }

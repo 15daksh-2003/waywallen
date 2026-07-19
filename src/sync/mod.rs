@@ -2,10 +2,8 @@ pub mod drm_syncobj;
 pub mod reaper;
 
 pub use drm_syncobj::{merge_sync_files, DrmDevice, SyncobjHandle};
-pub use reaper::{
-    spawn_reaper, FrameRecord, ReleaseResolution, ReleaseResolutionOutcome,
-    ReleaseResolutionPublisher,
-};
+pub(crate) use reaper::{register_frame, spawn_reaper, FrameRecord};
+pub use reaper::{FrameConsumerMember, FrameIdentity};
 
 /// Daemon-global, lazily opened DRM render node for drm_syncobj.
 /// Returns the same `&'static DrmDevice` on every call.

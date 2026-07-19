@@ -311,26 +311,44 @@ static void maybe_dump_producer_frame(const HostState& host, const ww_pool_direc
     std::fclose(sf);
 }
 
-bool upload_to_slot(HostState& host, wavsen::video::Producer& producer,
-                    const ww_pool_directive_t& directive, uint32_t slot_index) {
+enum class UploadStatus
+{
+    Submitted,
+    Cancelled,
+    Failed,
+};
+
+int cancel_slot_wait(void* userdata) {
+    auto& host = *static_cast<HostState*>(userdata);
+    if (host.shutdown.load(std::memory_order_acquire)) return 1;
+    std::lock_guard<std::mutex> lk(host.neg_mu);
+    return host.neg_pending ? 1 : 0;
+}
+
+UploadStatus upload_to_slot(HostState& host, wavsen::video::Producer& producer,
+                            const ww_pool_directive_t& directive) {
     ww_pool_slot_acquire_result_t acquired {};
-    if (int rc = ww_bridge_pool_acquire_slot_for_render(host.pool, slot_index, 600, &acquired);
+    if (int rc = ww_bridge_pool_wait_acquire_any_for_render(
+            host.pool, cancel_slot_wait, &host, &acquired);
         rc != 0) {
         rstd_error("waywallen-image-renderer: acquire slot contract failed: {}", rc);
-        return false;
+        return UploadStatus::Failed;
+    }
+    if (acquired.status == WW_POOL_SLOT_ACQUIRE_CANCELLED) {
+        return UploadStatus::Cancelled;
     }
     if (acquired.status != WW_POOL_SLOT_ACQUIRE_READY_UNUSED &&
         acquired.status != WW_POOL_SLOT_ACQUIRE_READY_RELEASED) {
-        rstd_error("waywallen-image-renderer: slot {} is not writable (status={}, error={})",
-                   slot_index,
+        rstd_error("waywallen-image-renderer: no slot is writable (status={}, error={})",
                    static_cast<int>(acquired.status),
                    acquired.error_code);
-        return false;
+        return UploadStatus::Failed;
     }
     const auto& s = acquired.slot;
     if (! s.vk_image) {
-        rstd_error("waywallen-image-renderer: slot {} has no VkImage handle", slot_index);
-        return false;
+        ww_bridge_pool_abort_acquired_slot(host.pool, &acquired.identity);
+        rstd_error("waywallen-image-renderer: slot {} has no VkImage handle", s.index);
+        return UploadStatus::Failed;
     }
 
     static std::atomic<uint64_t> g_dump_seq { 0 };
@@ -340,23 +358,24 @@ bool upload_to_slot(HostState& host, wavsen::video::Producer& producer,
     auto upload_res = producer.upload_into(
         reinterpret_cast<VkImage>(s.vk_image), s.width, s.height, host.rgba_data, host.rgba_size);
     if (upload_res.is_err()) {
+        ww_bridge_pool_abort_acquired_slot(host.pool, &acquired.identity);
         rstd_error("waywallen-image-renderer: upload_into failed: {}",
                    std::move(upload_res).unwrap_err().message.as_str());
-        return false;
+        return UploadStatus::Failed;
     }
     int                          sync_fd = std::move(upload_res).unwrap();
     std::lock_guard<std::mutex>  send_lk(host.send_mu);
     ww_pool_slot_submit_result_t submitted {};
-    int                          rc = ww_bridge_pool_submit_slot_for_render(
-        host.pool, host.sock, slot_index, sync_fd, &submitted);
+    int                          rc = ww_bridge_pool_submit_acquired_slot(
+        host.pool, host.sock, &acquired.identity, sync_fd, &submitted);
     if (rc != 0 || submitted.status != WW_POOL_SLOT_SUBMIT_SUBMITTED) {
         rstd_error("waywallen-image-renderer: submit slot failed (rc={}, status={}, error={})",
                    rc,
                    static_cast<int>(submitted.status),
                    submitted.error_code);
-        return false;
+        return UploadStatus::Failed;
     }
-    return true;
+    return UploadStatus::Submitted;
 }
 
 void publish_clear_color(HostState& host, const ClearColor& c) {
@@ -414,7 +433,9 @@ void apply_negotiate_request(HostState& host, wavsen::video::Producer& producer,
         if (rc > 0) signal_shutdown(host);
         return;
     }
-    if (! upload_to_slot(host, producer, d, 0)) {
+    const auto upload = upload_to_slot(host, producer, d);
+    if (upload == UploadStatus::Cancelled) return;
+    if (upload == UploadStatus::Failed) {
         signal_shutdown(host);
         return;
     }
@@ -465,22 +486,6 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
         break;
     }
     case WW_EVT_IN_SHUTDOWN: signal_shutdown(host); break;
-    case WW_EVT_IN_RELEASE_RESOLVED: {
-        const auto& release = c.u.release_resolved;
-        int         rc      = release.outcome <= WW_POOL_RELEASE_FORCED
-                                  ? ww_bridge_pool_report_release(
-                                        host.pool,
-                                        release.buffer_generation,
-                                        release.buffer_index,
-                                        release.release_point,
-                                        static_cast<ww_pool_release_outcome_t>(release.outcome))
-                                  : -EPROTO;
-        if (rc != 0) {
-            rstd_warn("waywallen-image-renderer: release_resolved rejected: {}", rc);
-            if (rc == -EPIPE) signal_shutdown(host);
-        }
-        break;
-    }
     case WW_EVT_IN_NEGOTIATE_BUFFERS: {
         const auto&         nb = c.u.negotiate_buffers;
         ww_pool_directive_t d {};

@@ -1,6 +1,6 @@
 /* waywallen-bridge — IPC framing + high-level helpers.
  *
- * Handwritten companion to the auto-generated src/ipc_v1.c. Provides
+ * Handwritten companion to the auto-generated src/ipc_v2.c. Provides
  * SCM_RIGHTS fd passing on top of the generated per-message encoders
  * and a tagged union for incoming control requests.
  */
@@ -513,9 +513,6 @@ int ww_bridge_recv_control(int sock, ww_bridge_control_t* out) {
     case WW_EVT_IN_NEGOTIATE_BUFFERS:
         rc = ww_evt_in_negotiate_buffers_decode(body, body_len, &out->u.negotiate_buffers);
         break;
-    case WW_EVT_IN_RELEASE_RESOLVED:
-        rc = ww_evt_in_release_resolved_decode(body, body_len, &out->u.release_resolved);
-        break;
     default: rc = WW_ERR_UNKNOWN_OPCODE; break;
     }
 
@@ -540,9 +537,6 @@ void ww_bridge_control_free(ww_bridge_control_t* msg) {
     case WW_EVT_IN_SHUTDOWN: ww_evt_in_shutdown_free(&msg->u.shutdown); break;
     case WW_EVT_IN_NEGOTIATE_BUFFERS:
         ww_evt_in_negotiate_buffers_free(&msg->u.negotiate_buffers);
-        break;
-    case WW_EVT_IN_RELEASE_RESOLVED:
-        ww_evt_in_release_resolved_free(&msg->u.release_resolved);
         break;
     default: break;
     }
@@ -623,15 +617,17 @@ int ww_bridge_recv_init(int sock, ww_bridge_init_t* out) {
      * `ww_evt_in_init_t` into the caller-facing `ww_bridge_init_t`.
      * After this point the union is logically empty so calling
      * `ww_bridge_control_free` on it would double-free; we skip it. */
-    out->spawn_version   = ctl.u.init.spawn_version;
-    out->settings        = ctl.u.init.settings;
-    out->user_properties = ctl.u.init.user_properties;
+    out->protocol_version = ctl.u.init.protocol_version;
+    out->spawn_version    = ctl.u.init.spawn_version;
+    out->settings         = ctl.u.init.settings;
+    out->user_properties  = ctl.u.init.user_properties;
 
     /* Zero the union members we just stole so `ww_bridge_control_free`
      * is safe even if a future refactor calls it. */
     memset(&ctl.u.init, 0, sizeof(ctl.u.init));
 
-    if (out->spawn_version != WW_BRIDGE_SUPPORTED_SPAWN_VERSION) {
+    if (out->protocol_version != WW_BRIDGE_SUPPORTED_PROTOCOL_VERSION ||
+        out->spawn_version != WW_BRIDGE_SUPPORTED_SPAWN_VERSION) {
         return -EPROTO;
     }
     return 0;
@@ -640,7 +636,7 @@ int ww_bridge_recv_init(int sock, ww_bridge_init_t* out) {
 void ww_bridge_init_free(ww_bridge_init_t* out) {
     if (! out) return;
     /* `ww_kv_list_t` cleanup mirrors what the auto-generated
-     * `free_kv_list` does in ipc_v1.c — but that helper is `static`
+     * `free_kv_list` does in ipc_v2.c — but that helper is `static`
      * inside the generated TU. Replicate the freeing pattern locally
      * (free key+value strings, then the `data` array). */
     if (out->settings.data) {

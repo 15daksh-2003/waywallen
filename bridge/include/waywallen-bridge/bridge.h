@@ -3,7 +3,7 @@
  *
  * This header layers length-prefix framing + SCM_RIGHTS fd passing
  * on top of the auto-generated per-message encoders/decoders in
- * <waywallen-bridge/ipc_v1.h>.
+ * <waywallen-bridge/ipc_v2.h>.
  *
  * Wire frame (same layout as waywallen-display-v1):
  *
@@ -14,7 +14,7 @@
  *
  * Error conventions: all functions return 0 on success and a negative
  * value on failure. The negative is either a negated errno, or one of
- * the WW_ERR_* codes defined in <waywallen-bridge/ipc_v1.h>.
+ * the WW_ERR_* codes defined in <waywallen-bridge/ipc_v2.h>.
  *
  * Thread safety: none. Each socket is single-writer, single-reader
  * from the caller's perspective.
@@ -22,7 +22,7 @@
 #ifndef WAYWALLEN_BRIDGE_H
 #define WAYWALLEN_BRIDGE_H
 
-#include <waywallen-bridge/ipc_v1.h>
+#include <waywallen-bridge/ipc_v2.h>
 #include <waywallen-bridge/drm_fourcc.h>
 #include <waywallen-bridge/protocol_bits.h>
 
@@ -383,7 +383,6 @@ typedef struct ww_bridge_control {
         ww_evt_in_set_fps_t           set_fps;
         ww_evt_in_shutdown_t          shutdown;
         ww_evt_in_negotiate_buffers_t negotiate_buffers;
-        ww_evt_in_release_resolved_t  release_resolved;
     } u;
 } ww_bridge_control_t;
 
@@ -424,7 +423,8 @@ void ww_bridge_control_free(ww_bridge_control_t* msg);
  * Bump when the daemon/renderer wire contract changes; `ww_bridge_recv_init`
  * validates the value sent by the daemon matches and returns -EPROTO
  * otherwise. */
-#define WW_BRIDGE_SUPPORTED_SPAWN_VERSION 7u
+#define WW_BRIDGE_SUPPORTED_PROTOCOL_VERSION 2u
+#define WW_BRIDGE_SUPPORTED_SPAWN_VERSION    8u
 
 /* Caller-friendly view of the typed Init payload. The kv list is
  * heap-owned (transferred from the underlying `ww_evt_in_init_t`
@@ -436,6 +436,7 @@ void ww_bridge_control_free(ww_bridge_control_t* msg);
  * all live as keys in `settings` whenever the renderer's manifest
  * declares them; no scalar gets promoted to a typed wire field. */
 typedef struct ww_bridge_init {
+    uint32_t     protocol_version;
     uint32_t     spawn_version;
     ww_kv_list_t settings;
     /* Raw JSON object forwarded from the DB row's
@@ -452,11 +453,11 @@ typedef struct ww_bridge_init {
  *   - Blocks until the next control frame arrives.
  *   - If the message is anything other than `WW_EVT_IN_INIT`, the body
  *     is freed and -EPROTO is returned.
- *   - If `spawn_version != WW_BRIDGE_SUPPORTED_SPAWN_VERSION`, the
- *     decoded value lands in `out->spawn_version` so the caller can
- *     forward it via `ww_bridge_send_init_nack`, and the function
- *     returns -EPROTO. The other heap fields are still populated and
- *     must be released via `ww_bridge_init_free`.
+ *   - If `protocol_version != WW_BRIDGE_SUPPORTED_PROTOCOL_VERSION` or
+ *     `spawn_version != WW_BRIDGE_SUPPORTED_SPAWN_VERSION`, decoded
+ *     values remain available to the caller and the function returns
+ *     -EPROTO. Heap fields must still be released via
+ *     `ww_bridge_init_free`.
  *   - On success returns 0; ownership of every heap allocation
  *     transfers to the caller. */
 int ww_bridge_recv_init(int sock, ww_bridge_init_t* out);

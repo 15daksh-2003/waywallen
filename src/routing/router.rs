@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,13 +41,21 @@ pub enum DisplayOutEvent {
         buffer_generation: u64,
         buffer_index: u32,
         seq: u64,
-        /// Timeline value the producer assigned to this frame on its
-        /// release_syncobj; the endpoint records it for release tracking.
-        release_point: u64,
-        /// Total number of consumer endpoints the router dispatched
-        /// this release point to, used by the reaper as fan-out width.
-        expected_count: u32,
+        consumption: DisplayConsumptionPermit,
+        member: Option<crate::sync::FrameConsumerMember>,
     },
+}
+
+#[derive(Clone)]
+pub struct DisplayConsumptionPermit {
+    current: Arc<AtomicU64>,
+    epoch: u64,
+}
+
+impl DisplayConsumptionPermit {
+    pub fn is_current(&self) -> bool {
+        self.current.load(Ordering::Acquire) == self.epoch
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -271,6 +280,20 @@ struct DisplayState {
     /// Per-display auto replay machine driven by display facts and
     /// the resolved rule policy.
     auto_replay: auto_replay::State,
+    consumption_epoch: Arc<AtomicU64>,
+}
+
+impl DisplayState {
+    fn consumption_permit(&self) -> DisplayConsumptionPermit {
+        DisplayConsumptionPermit {
+            current: Arc::clone(&self.consumption_epoch),
+            epoch: self.consumption_epoch.load(Ordering::Acquire),
+        }
+    }
+
+    fn invalidate_consumption(&self) {
+        self.consumption_epoch.fetch_add(1, Ordering::AcqRel);
+    }
 }
 
 struct Inner {
@@ -856,6 +879,7 @@ impl Router {
                     last_buffer_generation: None,
                     consumer_caps: reg.consumer_caps,
                     auto_replay: auto_replay::State::new(),
+                    consumption_epoch: Arc::new(AtomicU64::new(1)),
                 },
             );
             // Auto-link to whichever renderer is first in the routing table.
@@ -1146,13 +1170,20 @@ impl Router {
                 if let Some(state) = inner.displays.get_mut(&display_id) {
                     state.auto_replay.stop_applied = should_stop;
                 }
+                let mut link_changed = false;
                 for link in inner.table.links_for_display(display_id) {
                     if inner.table.set_link_enabled(link.id, !should_stop) {
+                        link_changed = true;
                         if should_stop {
                             disabled_any = true;
                         } else {
                             reenabled_renderers.push(link.renderer_id);
                         }
+                    }
+                }
+                if link_changed {
+                    if let Some(state) = inner.displays.get(&display_id) {
+                        state.invalidate_consumption();
                     }
                 }
                 changed_displays.push(display_id);
@@ -1868,45 +1899,30 @@ impl Router {
                     && state.last_renderer.as_deref() == Some(renderer_id)
             })
             .collect();
-        let expected_count = recipients.len() as u32;
-        if expected_count == 0 {
-            // No enabled recipients: still hand the producer's release
-            // timeline a synthetic signal at this point.
-            if let Err(e) = renderer.submit_frame_record(crate::sync::FrameRecord {
-                buffer_generation: gen,
-                buffer_index,
-                release_point,
-                consumer_handle: None,
-                expected_count: 0,
-            }) {
-                log::warn!(
-                    "router: renderer {renderer_id}: failed to enqueue \
-                     advance-only FrameRecord (point {release_point}): {e}"
-                );
-            }
-            return;
-        }
-        if let Err(e) = renderer.submit_frame_record(crate::sync::FrameRecord {
+        let identity = crate::sync::FrameIdentity {
             buffer_generation: gen,
             buffer_index,
             release_point,
-            consumer_handle: None,
-            expected_count,
-        }) {
-            log::warn!(
-                "router: renderer {renderer_id}: failed to register release point \
-                 {release_point} before fan-out: {e}"
-            );
-            return;
-        }
-        for state in recipients {
+        };
+        let expected_members = recipients.len() as u32;
+        let members = match renderer.register_frame_consumers(identity, expected_members) {
+            Ok(members) => members,
+            Err(error) => {
+                log::warn!(
+                    "router: renderer {renderer_id}: failed to register release point \
+                     {release_point} before fan-out: {error}"
+                );
+                return;
+            }
+        };
+        for (state, member) in recipients.into_iter().zip(members) {
             let _ = state.tx.send(DisplayOutEvent::Frame {
                 renderer: renderer.clone(),
                 buffer_generation: gen,
                 buffer_index,
                 seq,
-                release_point,
-                expected_count,
+                consumption: state.consumption_permit(),
+                member: Some(member),
             });
         }
     }
@@ -2379,6 +2395,12 @@ impl Router {
             return;
         }
 
+        inner
+            .displays
+            .get(&display_id)
+            .expect("display checked above")
+            .invalidate_consumption();
+
         // Retire the prior pool if one was bound.
         if let Some(og) = last_gen {
             let s = inner.displays.get(&display_id).unwrap();
@@ -2418,8 +2440,8 @@ impl Router {
                     buffer_generation: frame.buffer_generation,
                     buffer_index: frame.buffer_index,
                     seq: frame.seq,
-                    release_point: frame.release_point,
-                    expected_count: 1,
+                    consumption: s.consumption_permit(),
+                    member: None,
                 });
             }
             s.last_renderer = Some(new_r);
@@ -3305,6 +3327,19 @@ mod tests {
         out
     }
 
+    #[test]
+    fn consumption_permit_is_invalidated_without_waiting_for_endpoint() {
+        let epoch = Arc::new(AtomicU64::new(4));
+        let permit = DisplayConsumptionPermit {
+            current: Arc::clone(&epoch),
+            epoch: 4,
+        };
+
+        assert!(permit.is_current());
+        epoch.fetch_add(1, Ordering::AcqRel);
+        assert!(!permit.is_current());
+    }
+
     fn drain_renderer_controls(peer: &std::os::unix::net::UnixStream) {
         peer.set_read_timeout(Some(Duration::from_millis(10)))
             .unwrap();
@@ -3365,16 +3400,14 @@ mod tests {
                 buffer_generation,
                 buffer_index,
                 seq,
-                release_point,
-                expected_count,
+                consumption: _,
+                member: _,
             } = ev
             {
                 assert_eq!(renderer.id, "r1");
                 assert_eq!(buffer_generation, 1);
                 assert_eq!(buffer_index, 0);
                 assert_eq!(seq, 42);
-                assert_eq!(release_point, 7);
-                assert_eq!(expected_count, 1);
                 saw_frame = true;
             }
         }

@@ -1,67 +1,157 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use tokio::time::Instant;
 
 use crate::sync::drm_syncobj::{DrmDevice, SyncobjHandle};
 
-/// Maximum bucket age before force-flush when consumers lag.
-/// Sized so a 60 fps producer has room for several frames.
-const BUCKET_TIMEOUT: Duration = Duration::from_millis(500);
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-/// Per-handle wait deadline inside the bucket-flush ioctl.
-/// Late consumers are force-signaled after this timeout.
-const WAIT_TIMEOUT: Duration = Duration::from_millis(500);
-
-/// Per-frame work item produced by `display::endpoint::forward_frame_ready`
-/// and consumed by [`spawn_reaper`].
-pub struct FrameRecord {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FrameIdentity {
     pub buffer_generation: u64,
     pub buffer_index: u32,
     pub release_point: u64,
-    /// `None` with a zero expected count means there are no recipients.
-    /// With a non-zero expected count it registers the release point
-    /// before endpoints start delivering consumer handles.
-    pub consumer_handle: Option<SyncobjHandle>,
-    /// Total fan-out width for this `release_point`.
-    /// `0` means the release point can complete without consumers.
-    pub expected_count: u32,
+}
+
+pub(crate) enum FrameRecord {
+    Register {
+        identity: FrameIdentity,
+        expected_members: u32,
+    },
+    Released {
+        identity: FrameIdentity,
+        member_index: u32,
+        consumer_handle: SyncobjHandle,
+    },
+    Skipped {
+        identity: FrameIdentity,
+        member_index: u32,
+    },
+}
+
+pub struct FrameConsumerMember {
+    tx: Option<mpsc::UnboundedSender<FrameRecord>>,
+    identity: FrameIdentity,
+    member_index: u32,
+}
+
+impl FrameConsumerMember {
+    fn new(
+        tx: mpsc::UnboundedSender<FrameRecord>,
+        identity: FrameIdentity,
+        member_index: u32,
+    ) -> Self {
+        Self {
+            tx: Some(tx),
+            identity,
+            member_index,
+        }
+    }
+
+    pub fn released(mut self, consumer_handle: SyncobjHandle) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(FrameRecord::Released {
+                identity: self.identity,
+                member_index: self.member_index,
+                consumer_handle,
+            });
+        }
+    }
+
+    pub fn skip(mut self) {
+        self.complete_skipped();
+    }
+
+    fn complete_skipped(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(FrameRecord::Skipped {
+                identity: self.identity,
+                member_index: self.member_index,
+            });
+        }
+    }
+}
+
+impl Drop for FrameConsumerMember {
+    fn drop(&mut self) {
+        self.complete_skipped();
+    }
+}
+
+pub(crate) fn register_frame(
+    tx: &mpsc::UnboundedSender<FrameRecord>,
+    identity: FrameIdentity,
+    expected_members: u32,
+) -> Result<Vec<FrameConsumerMember>, &'static str> {
+    tx.send(FrameRecord::Register {
+        identity,
+        expected_members,
+    })
+    .map_err(|_| "reaper channel closed")?;
+
+    Ok((0..expected_members)
+        .map(|member_index| FrameConsumerMember::new(tx.clone(), identity, member_index))
+        .collect())
 }
 
 struct Bucket {
-    buffer_generation: u64,
-    buffer_index: u32,
+    identity: FrameIdentity,
+    expected_members: Option<u32>,
+    completed_members: u32,
+    completed_indices: HashSet<u32>,
     handles: Vec<SyncobjHandle>,
-    expected: u32,
-    deadline: Instant,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u32)]
-pub enum ReleaseResolutionOutcome {
-    ConsumerReleased = 0,
-    NoConsumers = 1,
-    Forced = 2,
-}
+impl Bucket {
+    fn new(identity: FrameIdentity) -> Self {
+        Self {
+            identity,
+            expected_members: None,
+            completed_members: 0,
+            completed_indices: HashSet::new(),
+            handles: Vec::new(),
+        }
+    }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ReleaseResolution {
-    pub buffer_generation: u64,
-    pub buffer_index: u32,
-    pub release_point: u64,
-    pub outcome: ReleaseResolutionOutcome,
-}
+    fn register(&mut self, expected_members: u32) -> Result<(), &'static str> {
+        match self.expected_members {
+            Some(existing) if existing != expected_members => Err("member count mismatch"),
+            Some(_) => Err("duplicate registration"),
+            None => {
+                self.expected_members = Some(expected_members);
+                Ok(())
+            }
+        }
+    }
 
-pub trait ReleaseResolutionPublisher: Send + Sync {
-    fn publish(&self, resolution: ReleaseResolution) -> Result<(), String>;
-}
+    fn complete(
+        &mut self,
+        member_index: u32,
+        handle: Option<SyncobjHandle>,
+    ) -> Result<(), &'static str> {
+        if let Some(expected) = self.expected_members {
+            if member_index >= expected {
+                return Err("member index out of range");
+            }
+        }
+        if !self.completed_indices.insert(member_index) {
+            return Err("duplicate member completion");
+        }
+        self.completed_members = self.completed_members.saturating_add(1);
+        if let Some(handle) = handle {
+            self.handles.push(handle);
+        }
+        Ok(())
+    }
 
-struct ResolvedRelease {
-    handle: SyncobjHandle,
-    resolution: ReleaseResolution,
+    fn ready(&self) -> bool {
+        self.expected_members
+            .is_some_and(|expected| self.completed_members == expected)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -115,132 +205,125 @@ impl<T> ReleaseFrontier<T> {
     }
 }
 
-pub fn spawn_reaper(
+enum WaitCompletion {
+    Resolved {
+        identity: FrameIdentity,
+        handle: SyncobjHandle,
+    },
+    Failed {
+        identity: FrameIdentity,
+        error: String,
+    },
+    Cancelled,
+}
+
+pub(crate) fn spawn_reaper(
     drm: &'static DrmDevice,
     renderer_id: String,
     release_syncobj: Arc<StdMutex<Option<OwnedFd>>>,
-    resolution_publisher: Arc<dyn ReleaseResolutionPublisher>,
     mut rx: mpsc::UnboundedReceiver<FrameRecord>,
 ) {
     tokio::spawn(async move {
         let mut producer_handle: Option<SyncobjHandle> = None;
         let mut buckets: HashMap<u64, Bucket> = HashMap::new();
         let mut frontier = ReleaseFrontier::new();
+        let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
 
         loop {
-            // Earliest bucket deadline. None when there are no pending
-            // buckets, in which case we just wait on the channel.
-            let next_deadline = buckets.values().map(|b| b.deadline).min();
-
             tokio::select! {
                 maybe_record = rx.recv() => {
                     let Some(record) = maybe_record else {
-                        // Channel closed: every Sender clone is gone,
-                        // so the renderer handle has been dropped.
+                        cancelled.store(true, Ordering::Release);
                         if !buckets.is_empty() || frontier.pending_count() != 0 {
                             log::info!(
-                                "reaper {renderer_id}: channel closed with {} pending bucket(s) and {} resolved point(s); dropping",
+                                "reaper {renderer_id}: channel closed with {} pending bucket(s) and {} resolved point(s); retiring generation",
                                 buckets.len(),
                                 frontier.pending_count(),
                             );
                         }
-                        drop(buckets);
                         log::info!("reaper {renderer_id}: exiting");
                         return;
                     };
-                    let Some(consumer_handle) = record.consumer_handle else {
-                        if record.expected_count == 0 {
-                            if let Some(release) = resolve_empty_release(drm, &renderer_id, &record) {
-                                publish_resolved_release(
-                                    drm, &renderer_id, &release_syncobj, &mut producer_handle,
-                                    &resolution_publisher, &mut frontier, record.release_point, release,
-                                ).await;
-                            }
-                        } else {
-                            let entry = buckets.entry(record.release_point).or_insert_with(|| Bucket {
-                                buffer_generation: record.buffer_generation,
-                                buffer_index: record.buffer_index,
-                                handles: Vec::new(),
-                                expected: record.expected_count,
-                                deadline: Instant::now() + BUCKET_TIMEOUT,
-                            });
-                            if entry.buffer_generation != record.buffer_generation ||
-                                entry.buffer_index != record.buffer_index
-                            {
-                                log::warn!(
-                                    "reaper {renderer_id}: reject point {} registration identity mismatch",
-                                    record.release_point,
-                                );
-                            } else {
-                                entry.expected = entry.expected.max(record.expected_count);
-                            }
-                        }
-                        continue;
+
+                    let identity = match &record {
+                        FrameRecord::Register { identity, .. }
+                        | FrameRecord::Released { identity, .. }
+                        | FrameRecord::Skipped { identity, .. } => *identity,
                     };
-                    let entry = buckets.entry(record.release_point).or_insert_with(|| {
-                        Bucket {
-                            buffer_generation: record.buffer_generation,
-                            buffer_index: record.buffer_index,
-                            handles: Vec::new(),
-                            expected: record.expected_count,
-                            deadline: Instant::now() + BUCKET_TIMEOUT,
-                        }
-                    });
-                    if entry.buffer_generation != record.buffer_generation ||
-                        entry.buffer_index != record.buffer_index
-                    {
+                    if identity.release_point == 0 {
+                        log::warn!("reaper {renderer_id}: reject release point 0");
+                        continue;
+                    }
+
+                    let entry = buckets
+                        .entry(identity.release_point)
+                        .or_insert_with(|| Bucket::new(identity));
+                    if entry.identity != identity {
                         log::warn!(
-                            "reaper {renderer_id}: reject point {} identity mismatch: \
-                             existing generation={} index={}, received generation={} index={}",
-                            record.release_point,
-                            entry.buffer_generation,
-                            entry.buffer_index,
-                            record.buffer_generation,
-                            record.buffer_index,
+                            "reaper {renderer_id}: reject point {} identity mismatch",
+                            identity.release_point,
                         );
                         continue;
                     }
-                    // Defensive: if a later record reports a different
-                    // expected_count, use the wider fan-out.
-                    entry.expected = entry.expected.max(record.expected_count);
-                    entry.handles.push(consumer_handle);
-                    if entry.handles.len() as u32 >= entry.expected {
-                        let bucket = buckets.remove(&record.release_point).unwrap();
-                        if let Some(release) = resolve_bucket(
-                            drm, &renderer_id, record.release_point, bucket,
-                        ).await {
-                            publish_resolved_release(
-                                drm, &renderer_id, &release_syncobj, &mut producer_handle,
-                                &resolution_publisher, &mut frontier, record.release_point, release,
-                            ).await;
+
+                    let update = match record {
+                        FrameRecord::Register { expected_members, .. } => {
+                            entry.register(expected_members)
                         }
+                        FrameRecord::Released {
+                            member_index,
+                            consumer_handle,
+                            ..
+                        } => entry.complete(member_index, Some(consumer_handle)),
+                        FrameRecord::Skipped { member_index, .. } => {
+                            entry.complete(member_index, None)
+                        }
+                    };
+                    if let Err(error) = update {
+                        log::warn!(
+                            "reaper {renderer_id}: reject point {} update: {error}",
+                            identity.release_point,
+                        );
+                        continue;
+                    }
+
+                    if entry.ready() {
+                        let bucket = buckets
+                            .remove(&identity.release_point)
+                            .expect("ready bucket remains registered");
+                        dispatch_bucket_wait(
+                            drm,
+                            &renderer_id,
+                            bucket,
+                            completion_tx.clone(),
+                            Arc::clone(&cancelled),
+                        );
                     }
                 }
-                _ = sleep_until_or_pending(next_deadline) => {
-                    // Snapshot expired keys first so the map can be
-                    // mutated during flushing.
-                    let now = Instant::now();
-                    let expired: Vec<u64> = buckets
-                        .iter()
-                        .filter(|(_, b)| b.deadline <= now)
-                        .map(|(p, _)| *p)
-                        .collect();
-                    for point in expired {
-                        let bucket = buckets.remove(&point).unwrap();
-                        log::warn!(
-                            "reaper {renderer_id}: bucket point {point} timed out \
-                             with {}/{} consumer signals — force-flushing",
-                            bucket.handles.len(),
-                            bucket.expected,
-                        );
-                        if let Some(release) = resolve_bucket(
-                            drm, &renderer_id, point, bucket,
-                        ).await {
+                maybe_completion = completion_rx.recv() => {
+                    let Some(completion) = maybe_completion else {
+                        continue;
+                    };
+                    match completion {
+                        WaitCompletion::Resolved { identity, handle } => {
                             publish_resolved_release(
-                                drm, &renderer_id, &release_syncobj, &mut producer_handle,
-                                &resolution_publisher, &mut frontier, point, release,
-                            ).await;
+                                drm,
+                                &renderer_id,
+                                &release_syncobj,
+                                &mut producer_handle,
+                                &mut frontier,
+                                identity.release_point,
+                                handle,
+                            );
                         }
+                        WaitCompletion::Failed { identity, error } => {
+                            log::error!(
+                                "reaper {renderer_id}: wait point {} failed without releasing ownership: {error}",
+                                identity.release_point,
+                            );
+                        }
+                        WaitCompletion::Cancelled => {}
                     }
                 }
             }
@@ -248,27 +331,104 @@ pub fn spawn_reaper(
     });
 }
 
-/// Sleep until `deadline`. If `deadline` is `None`, never resolve —
-/// the surrounding `tokio::select!` falls through to the recv arm.
-async fn sleep_until_or_pending(deadline: Option<Instant>) {
-    match deadline {
-        Some(d) => tokio::time::sleep_until(d).await,
-        None => std::future::pending::<()>().await,
+fn dispatch_bucket_wait(
+    drm: &'static DrmDevice,
+    renderer_id: &str,
+    bucket: Bucket,
+    completion_tx: mpsc::UnboundedSender<WaitCompletion>,
+    cancelled: Arc<AtomicBool>,
+) {
+    let identity = bucket.identity;
+    if bucket.handles.is_empty() {
+        let result = drm
+            .create_binary_syncobj()
+            .and_then(|handle| drm.signal(&handle).map(|()| handle));
+        match result {
+            Ok(handle) => {
+                let _ = completion_tx.send(WaitCompletion::Resolved { identity, handle });
+            }
+            Err(error) => {
+                let _ = completion_tx.send(WaitCompletion::Failed {
+                    identity,
+                    error: error.to_string(),
+                });
+            }
+        }
+        return;
+    }
+
+    let renderer_id = renderer_id.to_owned();
+    tokio::spawn(async move {
+        let join = tokio::task::spawn_blocking(move || {
+            wait_for_real_release(drm, bucket.handles, &cancelled)
+        })
+        .await;
+        let completion = match join {
+            Ok(Ok(handle)) => WaitCompletion::Resolved { identity, handle },
+            Ok(Err(WaitError::Cancelled)) => WaitCompletion::Cancelled,
+            Ok(Err(WaitError::Io(error))) => WaitCompletion::Failed {
+                identity,
+                error: error.to_string(),
+            },
+            Err(error) => WaitCompletion::Failed {
+                identity,
+                error: format!("wait worker for {renderer_id} panicked: {error}"),
+            },
+        };
+        let _ = completion_tx.send(completion);
+    });
+}
+
+enum WaitError {
+    Cancelled,
+    Io(std::io::Error),
+}
+
+fn wait_for_real_release(
+    drm: &'static DrmDevice,
+    handles: Vec<SyncobjHandle>,
+    cancelled: &AtomicBool,
+) -> Result<SyncobjHandle, WaitError> {
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(WaitError::Cancelled);
+        }
+        let timeout = monotonic_deadline(CANCEL_POLL_INTERVAL).map_err(WaitError::Io)?;
+        let refs: Vec<&SyncobjHandle> = handles.iter().collect();
+        match drm.wait_handles_signaled(&refs, timeout) {
+            Ok(()) => {
+                return handles
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| WaitError::Io(std::io::Error::other("empty release wait")));
+            }
+            Err(error) if matches!(error.raw_os_error(), Some(libc::ETIME) | Some(libc::EINTR)) => {
+                continue;
+            }
+            Err(error) => return Err(WaitError::Io(error)),
+        }
     }
 }
 
-/// Duplicate the producer release_syncobj fd out of the shared slot.
-/// The returned fd is owned by the caller.
+fn monotonic_deadline(after: Duration) -> std::io::Result<i64> {
+    let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    (ts.tv_sec as i64)
+        .checked_mul(1_000_000_000)
+        .and_then(|seconds| seconds.checked_add(ts.tv_nsec as i64))
+        .and_then(|now| now.checked_add(after.as_nanos() as i64))
+        .ok_or_else(|| std::io::Error::other("monotonic deadline overflow"))
+}
+
 fn dup_release_syncobj_fd(slot: &StdMutex<Option<OwnedFd>>) -> Option<OwnedFd> {
     let guard = slot.lock().ok()?;
     let fd = guard.as_ref()?;
     let dup_raw = nix::unistd::dup(fd.as_raw_fd()).ok()?;
-    // SAFETY: nix::unistd::dup returned a fresh fd we now own.
     Some(unsafe { OwnedFd::from_raw_fd(dup_raw) })
 }
 
-/// Lazy-import the producer's release_syncobj into our handle cache.
-/// Returns true if `producer_handle` is `Some` after this call.
 fn ensure_producer_handle(
     drm: &'static DrmDevice,
     renderer_id: &str,
@@ -281,35 +441,33 @@ fn ensure_producer_handle(
     }
     let Some(fd) = dup_release_syncobj_fd(release_syncobj) else {
         log::warn!(
-            "reaper {renderer_id}: dropping point {release_point} — \
-             producer hasn't sent ReleaseSyncobj yet"
+            "reaper {renderer_id}: cannot publish point {release_point}; producer has not sent ReleaseSyncobj"
         );
         return false;
     };
     match drm.fd_to_handle(&fd) {
-        Ok(h) => {
-            *producer_handle = Some(h);
+        Ok(handle) => {
+            *producer_handle = Some(handle);
             log::info!("reaper {renderer_id}: imported release_syncobj");
             true
         }
-        Err(e) => {
-            log::warn!("reaper {renderer_id}: DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE failed: {e}");
+        Err(error) => {
+            log::warn!("reaper {renderer_id}: DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE failed: {error}");
             false
         }
     }
 }
 
-async fn publish_resolved_release(
+fn publish_resolved_release(
     drm: &'static DrmDevice,
     renderer_id: &str,
     release_syncobj: &StdMutex<Option<OwnedFd>>,
     producer_handle: &mut Option<SyncobjHandle>,
-    resolution_publisher: &Arc<dyn ReleaseResolutionPublisher>,
-    frontier: &mut ReleaseFrontier<ResolvedRelease>,
+    frontier: &mut ReleaseFrontier<SyncobjHandle>,
     release_point: u64,
-    release: ResolvedRelease,
+    handle: SyncobjHandle,
 ) {
-    if let Err(error) = frontier.insert(release_point, release) {
+    if let Err(error) = frontier.insert(release_point, handle) {
         log::warn!("reaper {renderer_id}: reject resolved point {release_point}: {error:?}");
         return;
     }
@@ -323,282 +481,39 @@ async fn publish_resolved_release(
     ) {
         return;
     }
-    let producer = producer_handle.as_ref().expect("set above");
+    let producer = producer_handle.as_ref().expect("producer handle imported");
 
-    while let Some((point, resolution)) = frontier
-        .next_ready()
-        .map(|(point, release)| (point, release.resolution))
-    {
-        if resolution.outcome == ReleaseResolutionOutcome::Forced {
-            log::warn!("reaper {renderer_id}: publishing forced release point {point}");
-        }
-        let publisher = Arc::clone(resolution_publisher);
-        let publish_result =
-            tokio::task::spawn_blocking(move || publisher.publish(resolution)).await;
-        match publish_result {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                log::warn!(
-                    "reaper {renderer_id}: release outcome notification for point {point} \
-                     failed: {error}"
-                );
-                return;
-            }
-            Err(error) => {
-                log::warn!(
-                    "reaper {renderer_id}: release outcome notification task for point {point} \
-                     failed: {error}"
-                );
-                return;
-            }
-        }
-        let release = frontier
-            .next_ready()
-            .map(|(_, release)| release)
-            .expect("frontier cannot change while publishing a release outcome");
-        if let Err(error) = drm.transfer(&release.handle, 0, producer, point) {
+    while let Some((point, release)) = frontier.next_ready() {
+        if let Err(error) = drm.transfer(release, 0, producer, point) {
             log::warn!("reaper {renderer_id}: TRANSFER to release point {point} failed: {error}");
             return;
         }
-        let _published = frontier
+        let _ = frontier
             .commit_next()
             .expect("next_ready guaranteed a matching frontier entry");
         log::trace!("reaper {renderer_id}: published release point {point}");
     }
 }
 
-/// Used when a frame has zero recipients. The returned signaled fence is
-/// published only when every preceding release point has also resolved.
-fn resolve_empty_release(
-    drm: &'static DrmDevice,
-    renderer_id: &str,
-    record: &FrameRecord,
-) -> Option<ResolvedRelease> {
-    let release_point = record.release_point;
-    let placeholder = match drm.create_binary_syncobj() {
-        Ok(h) => h,
-        Err(e) => {
-            log::warn!(
-                "reaper {renderer_id}: advance point {release_point}: create_binary_syncobj: {e}"
-            );
-            return None;
-        }
-    };
-    if let Err(e) = drm.signal(&placeholder) {
-        log::warn!("reaper {renderer_id}: advance point {release_point}: SIGNAL: {e}");
-        return None;
-    }
-    Some(ResolvedRelease {
-        handle: placeholder,
-        resolution: ReleaseResolution {
-            buffer_generation: record.buffer_generation,
-            buffer_index: record.buffer_index,
-            release_point,
-            outcome: ReleaseResolutionOutcome::NoConsumers,
-        },
-    })
-}
-
-/// Wait for every handle in `bucket`, force-signaling stragglers.
-/// The returned fence is not transferred to the producer timeline until
-/// every preceding release point has also resolved.
-async fn resolve_bucket(
-    drm: &'static DrmDevice,
-    renderer_id: &str,
-    release_point: u64,
-    mut bucket: Bucket,
-) -> Option<ResolvedRelease> {
-    if bucket.handles.is_empty() {
-        let placeholder = match drm.create_binary_syncobj() {
-            Ok(handle) => handle,
-            Err(error) => {
-                log::warn!(
-                    "reaper {renderer_id}: create forced placeholder for point \
-                     {release_point} failed: {error}"
-                );
-                return None;
-            }
-        };
-        if let Err(error) = drm.signal(&placeholder) {
-            log::warn!(
-                "reaper {renderer_id}: signal forced placeholder for point \
-                 {release_point} failed: {error}"
-            );
-            return None;
-        }
-        return Some(ResolvedRelease {
-            handle: placeholder,
-            resolution: ReleaseResolution {
-                buffer_generation: bucket.buffer_generation,
-                buffer_index: bucket.buffer_index,
-                release_point,
-                outcome: ReleaseResolutionOutcome::Forced,
-            },
-        });
-    }
-
-    // 1+2. Wait for all consumer signals; force-signal stragglers.
-    // wait_handles_signaled wants ABSOLUTE CLOCK_MONOTONIC.
-    let timeout_nsec = {
-        let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
-        let ok = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } == 0;
-        if !ok {
-            i64::MAX
-        } else {
-            (ts.tv_sec as i64)
-                .checked_mul(1_000_000_000)
-                .and_then(|s| s.checked_add(ts.tv_nsec as i64))
-                .and_then(|now| now.checked_add(WAIT_TIMEOUT.as_nanos() as i64))
-                .unwrap_or(i64::MAX)
-        }
-    };
-
-    // Move ownership across spawn_blocking boundary to keep handles
-    // alive on the blocking thread; ioctl needs &SyncobjHandle so we
-    let actual_count = bucket.handles.len() as u32;
-    let incomplete = actual_count < bucket.expected;
-    let handles_for_blocking = std::mem::take(&mut bucket.handles);
-    let join = tokio::task::spawn_blocking(move || {
-        let refs: Vec<&SyncobjHandle> = handles_for_blocking.iter().collect();
-        let res = drm.wait_handles_signaled(&refs, timeout_nsec);
-        (res, handles_for_blocking)
-    })
-    .await;
-    let (wait_result, handles) = match join {
-        Ok(pair) => pair,
-        Err(e) => {
-            log::warn!("reaper {renderer_id}: wait task panicked: {e}");
-            return None;
-        }
-    };
-
-    let resolution_outcome =
-        classify_release_outcome(bucket.expected, actual_count, wait_result.is_ok());
-    if incomplete {
-        log::warn!(
-            "reaper {renderer_id}: point {release_point} missing consumer records \
-             ({actual_count}/{}); marking release forced",
-            bucket.expected,
-        );
-    }
-    if let Err(e) = wait_result {
-        log::warn!(
-            "reaper {renderer_id}: wait point {release_point} timed out / errored ({e}); \
-             force-signaling stragglers"
-        );
-        for h in &handles {
-            // SIGNAL is a CPU-side mark; cheap and cannot fail in any
-            // meaningful way for our handles.
-            if let Err(se) = drm.signal(h) {
-                log::warn!("reaper {renderer_id}: force SIGNAL failed: {se}");
-            }
-        }
-    }
-
-    // Single-consumer fast path: keep the consumer fence directly.
-    let n = handles.len();
-    if n == 1 {
-        return handles.into_iter().next().map(|handle| ResolvedRelease {
-            handle,
-            resolution: ReleaseResolution {
-                buffer_generation: bucket.buffer_generation,
-                buffer_index: bucket.buffer_index,
-                release_point,
-                outcome: resolution_outcome,
-            },
-        });
-    }
-
-    // Fan-out merge:
-    //   3a. EXPORT_SYNC_FILE on each consumer handle.
-    let mut sync_files: Vec<std::os::fd::OwnedFd> = Vec::with_capacity(n);
-    let mut export_failed = false;
-    for h in &handles {
-        match drm.export_sync_file(h) {
-            Ok(fd) => sync_files.push(fd),
-            Err(e) => {
-                log::warn!(
-                    "reaper {renderer_id}: EXPORT_SYNC_FILE on point {release_point} failed: {e}"
-                );
-                export_failed = true;
-                break;
-            }
-        }
-    }
-    if export_failed || sync_files.is_empty() {
-        // Keep the existing compatibility fallback, but still route it
-        // through the ordered publication frontier.
-        return handles.into_iter().next().map(|handle| ResolvedRelease {
-            handle,
-            resolution: ReleaseResolution {
-                buffer_generation: bucket.buffer_generation,
-                buffer_index: bucket.buffer_index,
-                release_point,
-                outcome: ReleaseResolutionOutcome::Forced,
-            },
-        });
-    }
-
-    let merged = sync_files
-        .into_iter()
-        .reduce(|a, b| match crate::sync::merge_sync_files(&a, &b) {
-            Ok(m) => m,
-            Err(e) => {
-                log::warn!(
-                    "reaper {renderer_id}: SYNC_IOC_MERGE on point {release_point} failed: {e}; \
-                     dropping later fences"
-                );
-                a
-            }
-        })
-        .expect("non-empty after empty-check above");
-
-    let temp_handle = match drm.create_binary_syncobj() {
-        Ok(h) => h,
-        Err(e) => {
-            log::warn!(
-                "reaper {renderer_id}: create temp syncobj for point {release_point} failed: {e}"
-            );
-            return None;
-        }
-    };
-    if let Err(e) = drm.import_sync_file(&temp_handle, &merged) {
-        log::warn!("reaper {renderer_id}: IMPORT_SYNC_FILE for point {release_point} failed: {e}");
-        return None;
-    }
-    log::trace!(
-        "reaper {renderer_id}: resolved point {release_point} ({n} consumer fences merged)"
-    );
-    drop(handles);
-    Some(ResolvedRelease {
-        handle: temp_handle,
-        resolution: ReleaseResolution {
-            buffer_generation: bucket.buffer_generation,
-            buffer_index: bucket.buffer_index,
-            release_point,
-            outcome: resolution_outcome,
-        },
-    })
-}
-
-fn classify_release_outcome(
-    expected_count: u32,
-    actual_count: u32,
-    all_waits_succeeded: bool,
-) -> ReleaseResolutionOutcome {
-    if actual_count < expected_count || !all_waits_succeeded {
-        ReleaseResolutionOutcome::Forced
-    } else {
-        ReleaseResolutionOutcome::ConsumerReleased
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use std::time::Duration;
+
     use super::{
-        classify_release_outcome, ReleaseFrontier, ReleaseFrontierInsertError,
-        ReleaseResolutionOutcome,
+        dispatch_bucket_wait, Bucket, FrameIdentity, ReleaseFrontier, ReleaseFrontierInsertError,
+        WaitCompletion,
     };
+    use crate::sync::DrmDevice;
+
+    fn identity(point: u64) -> FrameIdentity {
+        FrameIdentity {
+            buffer_generation: 3,
+            buffer_index: 1,
+            release_point: point,
+        }
+    }
 
     #[test]
     fn release_frontier_never_publishes_across_a_gap() {
@@ -615,7 +530,6 @@ mod tests {
         assert_eq!(frontier.commit_next(), Some("two"));
         assert_eq!(frontier.next_ready(), Some((3, &"three")));
         assert_eq!(frontier.commit_next(), Some("three"));
-        assert_eq!(frontier.next_ready(), None);
     }
 
     #[test]
@@ -639,22 +553,90 @@ mod tests {
     }
 
     #[test]
-    fn release_outcome_requires_every_consumer_record_and_signal() {
-        assert_eq!(
-            classify_release_outcome(2, 2, true),
-            ReleaseResolutionOutcome::ConsumerReleased
+    fn bucket_completes_only_after_every_unique_member() {
+        let mut bucket = Bucket::new(identity(7));
+        bucket.register(2).unwrap();
+        bucket.complete(0, None).unwrap();
+        assert!(!bucket.ready());
+        assert_eq!(bucket.complete(0, None), Err("duplicate member completion"));
+        bucket.complete(1, None).unwrap();
+        assert!(bucket.ready());
+    }
+
+    #[tokio::test]
+    async fn blocked_bucket_does_not_delay_other_completions_or_timeout() {
+        let Ok(device) = DrmDevice::open_first_render_node() else {
+            eprintln!("skip: no /dev/dri/renderD* available");
+            return;
+        };
+        let device = Box::leak(Box::new(device));
+        let blocked = device
+            .create_binary_syncobj()
+            .expect("create blocked handle");
+        let blocked_fd = device
+            .handle_to_fd(&blocked)
+            .expect("export blocked handle");
+        let blocked_signal = device
+            .fd_to_handle(&blocked_fd)
+            .expect("import blocked signal handle");
+        let ready = device.create_binary_syncobj().expect("create ready handle");
+        device.signal(&ready).expect("signal ready handle");
+
+        let mut blocked_bucket = Bucket::new(identity(1));
+        blocked_bucket.register(1).unwrap();
+        blocked_bucket.complete(0, Some(blocked)).unwrap();
+        let mut ready_bucket = Bucket::new(identity(2));
+        ready_bucket.register(1).unwrap();
+        ready_bucket.complete(0, Some(ready)).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        dispatch_bucket_wait(
+            device,
+            "test",
+            blocked_bucket,
+            tx.clone(),
+            Arc::clone(&cancelled),
         );
-        assert_eq!(
-            classify_release_outcome(2, 1, true),
-            ReleaseResolutionOutcome::Forced
+        dispatch_bucket_wait(device, "test", ready_bucket, tx, cancelled);
+
+        let completion = tokio::time::timeout(Duration::from_millis(250), rx.recv())
+            .await
+            .expect("ready bucket completion delayed by blocked bucket")
+            .expect("completion channel closed");
+        assert!(matches!(
+            completion,
+            WaitCompletion::Resolved {
+                identity: FrameIdentity {
+                    release_point: 2,
+                    ..
+                },
+                ..
+            }
+        ));
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(550), rx.recv())
+                .await
+                .is_err(),
+            "blocked bucket completed at the removed ownership timeout"
         );
-        assert_eq!(
-            classify_release_outcome(2, 0, true),
-            ReleaseResolutionOutcome::Forced
-        );
-        assert_eq!(
-            classify_release_outcome(2, 2, false),
-            ReleaseResolutionOutcome::Forced
-        );
+        device
+            .signal(&blocked_signal)
+            .expect("signal blocked consumer handle");
+        let completion = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("blocked bucket did not resume after a real release")
+            .expect("completion channel closed");
+        assert!(matches!(
+            completion,
+            WaitCompletion::Resolved {
+                identity: FrameIdentity {
+                    release_point: 1,
+                    ..
+                },
+                ..
+            }
+        ));
     }
 }

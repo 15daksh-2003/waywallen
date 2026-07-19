@@ -39,11 +39,7 @@ fn generated_c_compiles_cleanly() {
 
     let tmp = std::env::temp_dir().join(format!("wayproto-gen-c-test-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
-    // Generated source includes "waywallen-bridge/ipc_v1.h" — mirror
-    // that include path layout under the temp dir so gcc resolves it
-    let h_dir = tmp.join("waywallen-bridge");
-    std::fs::create_dir_all(&h_dir).unwrap();
-    let h_path = h_dir.join("ipc_v1.h");
+    let h_path = tmp.join("ww_proto.h");
     let c_path = tmp.join("ww_proto.c");
     let o_path = tmp.join("ww_proto.o");
     std::fs::write(&h_path, header).unwrap();
@@ -93,9 +89,7 @@ fn roundtrip_hello_and_bind_buffers() {
 
     let tmp = std::env::temp_dir().join(format!("wayproto-gen-c-rt-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
-    let h_dir = tmp.join("waywallen-bridge");
-    std::fs::create_dir_all(&h_dir).unwrap();
-    let h_path = h_dir.join("ipc_v1.h");
+    let h_path = tmp.join("ww_proto.h");
     let c_path = tmp.join("ww_proto.c");
     let rt_c_path = tmp.join("roundtrip.c");
     let bin_path = tmp.join("roundtrip");
@@ -104,7 +98,7 @@ fn roundtrip_hello_and_bind_buffers() {
 
     let rt_src = r#"
 #define _POSIX_C_SOURCE 200809L
-#include "waywallen-bridge/ipc_v1.h"
+#include "ww_proto.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>

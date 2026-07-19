@@ -14,7 +14,7 @@ option(BUILD_SHARED_LIBS "Build using shared libraries" ON)
 add_library(waywallen-bridge
     src/bridge.c
     src/drm_fourcc.c
-    src/ipc_v1.c
+    src/ipc_v2.c
     src/probe_egl.c
     src/probe_vk.c
     src/sync_release.c
@@ -71,7 +71,7 @@ set_target_properties(waywallen-bridge PROPERTIES
 )
 
 # Symbol visibility: export only the public ww_* API.
-# Uses a linker version script because ipc_v1.{h,c} is auto-generated and
+# Uses a linker version script because ipc_v2.{h,c} is auto-generated and
 # hand-annotating its declarations with a visibility macro would be lost on
 # regeneration. Restricted to ELF/GNU-like linkers (Linux is the only
 # supported target today — see README).

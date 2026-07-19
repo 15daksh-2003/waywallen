@@ -286,7 +286,8 @@ mod tests {
     fn roundtrip_init() {
         let (a, b) = pair();
         let sent = EventIn::Init {
-            spawn_version: 6,
+            protocol_version: PROTOCOL_VERSION,
+            spawn_version: 8,
             settings: vec![("fps".into(), "60".into()), ("volume".into(), "1.0".into())],
             user_properties: String::new(),
         };
@@ -323,20 +324,6 @@ mod tests {
             album_artist: "Album Artist".into(),
             art_url: "/tmp/cover.png".into(),
             previous_art_url: "/tmp/previous.png".into(),
-        };
-        send_control(&a, &sent, &[]).unwrap();
-        let (got, _) = recv_control(&b).unwrap();
-        assert_eq!(sent, got);
-    }
-
-    #[test]
-    fn roundtrip_release_resolved() {
-        let (a, b) = pair();
-        let sent = EventIn::ReleaseResolved {
-            buffer_generation: 7,
-            buffer_index: 2,
-            release_point: 19,
-            outcome: 2,
         };
         send_control(&a, &sent, &[]).unwrap();
         let (got, _) = recv_control(&b).unwrap();

@@ -3,7 +3,7 @@
 #ifndef WAYWALLEN_BRIDGE_POOL_H
 #define WAYWALLEN_BRIDGE_POOL_H
 
-#include <waywallen-bridge/ipc_v1.h>
+#include <waywallen-bridge/ipc_v2.h>
 #include <waywallen-bridge/protocol_bits.h>
 
 #include <stddef.h>
@@ -166,6 +166,8 @@ typedef struct ww_pool_vulkan_init {
 
 typedef struct ww_pool ww_pool_t;
 
+#define WW_POOL_MAX_SLOT_COUNT 8u
+
 /* Create a pool with the chosen backend. `init_data` points at an
  * `ww_pool_egl_gbm_init_t` or `ww_pool_vulkan_init_t` matching the
  * backend selector. The pool DOES NOT yet have any slots — caller
@@ -259,65 +261,52 @@ typedef enum ww_pool_slot_acquire_status
     WW_POOL_SLOT_ACQUIRE_READY_UNUSED = 0,
     /* The daemon release timeline proves the previous use completed. */
     WW_POOL_SLOT_ACQUIRE_READY_RELEASED = 1,
-    /* The previous use did not complete before the requested deadline. */
+    /* Every slot is currently owned by a consumer. */
     WW_POOL_SLOT_ACQUIRE_BUSY = 2,
     /* Pool state, wait, or backend snapshot failed. See `error_code`. */
     WW_POOL_SLOT_ACQUIRE_ERROR = 3,
-    /* Daemon advanced the point without proof from every consumer. */
-    WW_POOL_SLOT_ACQUIRE_FORCED_RELEASE = 4,
     /* The renderer transport failed; no further pool work is valid. */
-    WW_POOL_SLOT_ACQUIRE_SESSION_LOST = 5,
+    WW_POOL_SLOT_ACQUIRE_SESSION_LOST = 4,
+    /* A blocking acquire was cancelled by its caller. */
+    WW_POOL_SLOT_ACQUIRE_CANCELLED = 5,
 } ww_pool_slot_acquire_status_t;
+
+typedef struct ww_pool_slot_identity {
+    uint64_t bind_generation;
+    uint32_t slot_index;
+    uint64_t previous_release_point;
+    uint64_t acquire_serial;
+} ww_pool_slot_identity_t;
 
 typedef struct ww_pool_slot_acquire_result {
     ww_pool_slot_acquire_status_t status;
     /* Negative errno-style value for ERROR, otherwise zero. */
-    int32_t        error_code;
-    uint64_t       bind_generation;
-    uint64_t       previous_release_point;
-    ww_pool_slot_t slot;
+    int32_t                 error_code;
+    ww_pool_slot_identity_t identity;
+    ww_pool_slot_t          slot;
 } ww_pool_slot_acquire_result_t;
 
-/* Acquire any free slot. Iter 1: no internal queueing — caller picks
- * a slot index it knows is free (e.g. round-robin via libmpv's
- * `mpv_render_context_update` low bits). The returned struct is a
- * snapshot; bridge does not hold internal state that cares about it.
- *
- * Returns 0 on success. Returns -EINVAL when the pool has no
- * directive applied yet, or when `slot_index` is out of range. */
-int ww_bridge_pool_acquire_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_t* out_slot);
+/* Read the current pool extent without acquiring a writable slot. */
+int ww_bridge_pool_get_extent(ww_pool_t* pool, uint32_t* out_width, uint32_t* out_height);
 
-/* Wait for the selected slot's previous consumer use and acquire its
- * backend snapshot as one owner operation. READY_* results contain a
- * writable `slot`. BUSY and ERROR never expose a backend handle.
- *
- * `bind_generation + slot.index + previous_release_point` identifies
- * the exact reuse proof consumed by this acquisition. The producer
- * should add its own monotonically increasing acquire serial when it
- * permits only one outstanding acquisition.
- *
- * Returns 0 when `out_result` contains a typed outcome. Returns
- * -EINVAL only when `pool` or `out_result` itself is null. */
-int ww_bridge_pool_acquire_slot_for_render(ww_pool_t* pool, uint32_t slot_index,
-                                           uint32_t                       timeout_ms,
-                                           ww_pool_slot_acquire_result_t* out_result);
+/* Acquire any slot whose previous release point has been signaled.
+ * READY_* starts one transaction and returns its identity and writable
+ * backend handle. BUSY never exposes a handle. At most one transaction
+ * may be outstanding per pool. */
+int ww_bridge_pool_try_acquire_any_for_render(ww_pool_t*                     pool,
+                                              ww_pool_slot_acquire_result_t* out_result);
 
-typedef enum ww_pool_release_outcome
-{
-    WW_POOL_RELEASE_CONSUMER_RELEASED = 0,
-    WW_POOL_RELEASE_NO_CONSUMERS      = 1,
-    WW_POOL_RELEASE_FORCED            = 2,
-} ww_pool_release_outcome_t;
+typedef int (*ww_pool_cancel_fn)(void* userdata);
 
-/* Record the daemon's sideband result for one release point. This is
- * thread-safe and may be called by the control-reader thread while the
- * render thread waits in `acquire_slot_for_render`.
- *
- * Exact duplicate notifications are accepted. Stale generation/point
- * notifications return -ESTALE; conflicting duplicates return
- * -EPROTO. The pool never upgrades FORCED to a writable reuse proof. */
-int ww_bridge_pool_report_release(ww_pool_t* pool, uint64_t bind_generation, uint32_t slot_index,
-                                  uint64_t release_point, ww_pool_release_outcome_t outcome);
+/* Wait for any slot without imposing an ownership timeout. The callback
+ * is polled while waiting; a non-zero result returns CANCELLED. A NULL
+ * callback waits until a slot is released or the session is lost. */
+int ww_bridge_pool_wait_acquire_any_for_render(ww_pool_t* pool, ww_pool_cancel_fn cancel,
+                                               void*                          userdata,
+                                               ww_pool_slot_acquire_result_t* out_result);
+
+/* Abandon an acquired slot without publishing it. */
+int ww_bridge_pool_abort_acquired_slot(ww_pool_t* pool, const ww_pool_slot_identity_t* identity);
 
 typedef enum ww_pool_slot_submit_status
 {
@@ -329,8 +318,7 @@ typedef enum ww_pool_slot_submit_status
 typedef struct ww_pool_slot_submit_result {
     ww_pool_slot_submit_status_t status;
     int32_t                      error_code;
-    uint64_t                     bind_generation;
-    uint32_t                     slot_index;
+    ww_pool_slot_identity_t      identity;
     uint64_t                     release_point;
 } ww_pool_slot_submit_result_t;
 
@@ -338,46 +326,10 @@ typedef struct ww_pool_slot_submit_result {
  * private while `frame_ready` is sent and is committed to the slot only
  * after send success. A transport failure marks the entire pool session
  * lost; subsequent acquire/submit calls return SESSION_LOST. */
-int ww_bridge_pool_submit_slot_for_render(ww_pool_t* pool, int sock, uint32_t slot_index,
-                                          int                           acquire_sync_fd,
-                                          ww_pool_slot_submit_result_t* out_result);
-
-/* Submit a rendered slot. Bridge:
- *   - Takes ownership of `acquire_sync_fd` (closes after sendmsg).
- *   - Bumps the producer's release timeline by 1.
- *   - Records the new release_point on the slot.
- *   - Emits `frame_ready{image_index=slot_index, release_point=…}`
- *     on `sock`.
- *
- * `acquire_sync_fd` is the dma_fence sync_file the plugin obtained
- * from its rendering API:
- *   - EGL/GBM: `eglDupNativeFenceFDANDROID` after `glFlush`.
- *   - Vulkan:  `vkGetSemaphoreFdKHR(SYNC_FD)` after queue submit.
- *             Use a binary semaphore created with
- *             `VkExportSemaphoreCreateInfo.handleTypes = SYNC_FD`;
- *             OPAQUE_FD (timeline) is NOT cross-vendor portable.
- *
- * The fd is REQUIRED on the COMPAT_LINEAR / GPU_LINEAR path: cross-
- * vendor importing GPUs (notably amdgpu) refuse to schedule a foreign
- * dma-buf without an explicit dma_fence dependency and report
- * "Not enough memory for command submission" before losing the device.
- * On OPTIMIZED same-GPU paths the fd is optional but recommended.
- *
- * The bridge will close the fd; plugin MUST NOT close it after this
- * call. Pass -1 only on shutdown (consumers will see no acquire
- * fence and the daemon may stall briefly).
- *
- * Returns 0 on success. This is the legacy integer wrapper around
- * `ww_bridge_pool_submit_slot_for_render`. */
-int ww_bridge_pool_submit_slot(ww_pool_t* pool, int sock, uint32_t slot_index, int acquire_sync_fd);
-
-/* Block until the slot's last release_point has been signaled by the
- * daemon's reaper, with a wall-clock timeout. Plugin SHOULD call
- * this before re-rendering into the same `slot_index`. Returns 0 on
- * signal, negative on timeout/error. This is the legacy split API;
- * new producers should use `ww_bridge_pool_acquire_slot_for_render`
- * so a busy slot is never exposed as writable by accident. */
-int ww_bridge_pool_wait_slot_release(ww_pool_t* pool, uint32_t slot_index, uint32_t timeout_ms);
+int ww_bridge_pool_submit_acquired_slot(ww_pool_t* pool, int sock,
+                                        const ww_pool_slot_identity_t* identity,
+                                        int                            acquire_sync_fd,
+                                        ww_pool_slot_submit_result_t*  out_result);
 
 #ifdef __cplusplus
 } /* extern "C" */
