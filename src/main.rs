@@ -5,6 +5,7 @@ use anyhow::Context;
 
 use probe::media::{AvFormatProbe, MediaProbe};
 
+mod audio;
 mod autostart;
 mod control;
 mod control_proto;
@@ -45,6 +46,7 @@ mod ws_server;
 /// Shared state handed to every ws connection.
 pub struct AppState {
     pub renderer_manager: Arc<renderer_manager::RendererManager>,
+    pub audio: audio::AudioService,
     pub source_manager: Arc<tokio::sync::Mutex<plugin::source_manager::SourceManager>>,
     /// Active installable-plugin metadata from the startup scan.
     pub plugins: Arc<tokio::sync::RwLock<Vec<plugin::renderer_registry::PluginPackageMeta>>>,
@@ -340,8 +342,10 @@ async fn async_main() -> anyhow::Result<()> {
 
     let source_plugins = Arc::new(tokio::sync::RwLock::new(Vec::new()));
 
+    let audio_service = audio::AudioService::start(renderer_mgr.clone(), shutdown_tx.subscribe());
     let state = Arc::new(AppState {
         renderer_manager: renderer_mgr,
+        audio: audio_service,
         source_manager: source_mgr.clone(),
         plugins: plugin_packages,
         inactive_system,

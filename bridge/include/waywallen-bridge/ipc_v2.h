@@ -102,6 +102,8 @@ typedef enum ww_event_in_op {
     WW_EVT_IN_POINTER_BUTTON = 10,
     WW_EVT_IN_POINTER_AXIS = 11,
     WW_EVT_IN_MPRIS = 14,
+    WW_EVT_IN_EVENT_SUBSCRIPTIONS_APPLIED = 16,
+    WW_EVT_IN_AUDIO_SPECTRUM = 17,
 } ww_event_in_op_t;
 
 typedef enum ww_event_op {
@@ -114,6 +116,7 @@ typedef enum ww_event_op {
     WW_EVT_BIND_FAILED = 7,
     WW_EVT_INIT_NACK = 8,
     WW_EVT_REPORT_STATE = 9,
+    WW_EVT_SET_EVENT_SUBSCRIPTIONS = 10,
 } ww_event_op_t;
 
 typedef struct ww_evt_in_init_t {
@@ -199,6 +202,22 @@ typedef struct ww_evt_in_mpris_t {
     char *previous_art_url;
 } ww_evt_in_mpris_t;
 
+typedef struct ww_evt_in_event_subscriptions_applied_t {
+    uint64_t revision;
+    uint32_t status;
+    ww_array_string_t kinds;
+    char *reason;
+} ww_evt_in_event_subscriptions_applied_t;
+
+typedef struct ww_evt_in_audio_spectrum_t {
+    uint64_t subscription_revision;
+    uint64_t generation;
+    uint64_t sequence;
+    uint64_t captured_at_ns;
+    ww_array_f32_t left;
+    ww_array_f32_t right;
+} ww_evt_in_audio_spectrum_t;
+
 typedef struct ww_evt_ready_t {
     uint32_t drm_render_major;
     uint32_t drm_render_minor;
@@ -265,6 +284,11 @@ typedef struct ww_evt_init_nack_t {
 typedef struct ww_evt_report_state_t {
     ww_kv_list_t state;
 } ww_evt_report_state_t;
+
+typedef struct ww_evt_set_event_subscriptions_t {
+    uint64_t revision;
+    ww_array_string_t kinds;
+} ww_evt_set_event_subscriptions_t;
 
 /* --- Per-message functions ---
  * encode:        append wire body to `out` (header is the caller's job)
@@ -338,6 +362,16 @@ int  ww_evt_in_mpris_decode(const uint8_t *buf, size_t len, ww_evt_in_mpris_t *o
 void ww_evt_in_mpris_free(ww_evt_in_mpris_t *m);
 uint32_t ww_evt_in_mpris_expected_fds(const ww_evt_in_mpris_t *m);
 
+int  ww_evt_in_event_subscriptions_applied_encode(const ww_evt_in_event_subscriptions_applied_t *m, ww_buf_t *out);
+int  ww_evt_in_event_subscriptions_applied_decode(const uint8_t *buf, size_t len, ww_evt_in_event_subscriptions_applied_t *out);
+void ww_evt_in_event_subscriptions_applied_free(ww_evt_in_event_subscriptions_applied_t *m);
+uint32_t ww_evt_in_event_subscriptions_applied_expected_fds(const ww_evt_in_event_subscriptions_applied_t *m);
+
+int  ww_evt_in_audio_spectrum_encode(const ww_evt_in_audio_spectrum_t *m, ww_buf_t *out);
+int  ww_evt_in_audio_spectrum_decode(const uint8_t *buf, size_t len, ww_evt_in_audio_spectrum_t *out);
+void ww_evt_in_audio_spectrum_free(ww_evt_in_audio_spectrum_t *m);
+uint32_t ww_evt_in_audio_spectrum_expected_fds(const ww_evt_in_audio_spectrum_t *m);
+
 int  ww_evt_ready_encode(const ww_evt_ready_t *m, ww_buf_t *out);
 int  ww_evt_ready_decode(const uint8_t *buf, size_t len, ww_evt_ready_t *out);
 void ww_evt_ready_free(ww_evt_ready_t *m);
@@ -382,6 +416,11 @@ int  ww_evt_report_state_encode(const ww_evt_report_state_t *m, ww_buf_t *out);
 int  ww_evt_report_state_decode(const uint8_t *buf, size_t len, ww_evt_report_state_t *out);
 void ww_evt_report_state_free(ww_evt_report_state_t *m);
 uint32_t ww_evt_report_state_expected_fds(const ww_evt_report_state_t *m);
+
+int  ww_evt_set_event_subscriptions_encode(const ww_evt_set_event_subscriptions_t *m, ww_buf_t *out);
+int  ww_evt_set_event_subscriptions_decode(const uint8_t *buf, size_t len, ww_evt_set_event_subscriptions_t *out);
+void ww_evt_set_event_subscriptions_free(ww_evt_set_event_subscriptions_t *m);
+uint32_t ww_evt_set_event_subscriptions_expected_fds(const ww_evt_set_event_subscriptions_t *m);
 
 /* --- Output buffer helpers --- */
 void ww_buf_init(ww_buf_t *b);

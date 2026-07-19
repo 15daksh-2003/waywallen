@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod autostart;
 pub mod control_proto;
 pub mod display;

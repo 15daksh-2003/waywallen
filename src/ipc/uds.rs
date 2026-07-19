@@ -330,6 +330,43 @@ mod tests {
         assert_eq!(sent, got);
     }
 
+    #[test]
+    fn roundtrip_runtime_subscriptions_and_audio() {
+        let (a, b) = pair();
+        let subscription = Event::SetEventSubscriptions {
+            revision: 7,
+            kinds: vec!["audio".into(), "pointer".into()],
+        };
+        send_event(&a, &subscription, &[]).unwrap();
+        let (got, fds) = recv_event(&b).unwrap();
+        assert_eq!(subscription, got);
+        assert!(fds.is_empty());
+
+        let applied = EventIn::EventSubscriptionsApplied {
+            revision: 7,
+            status: 0,
+            kinds: vec!["pointer".into(), "audio".into()],
+            reason: String::new(),
+        };
+        send_control(&a, &applied, &[]).unwrap();
+        let (got, fds) = recv_control(&b).unwrap();
+        assert_eq!(applied, got);
+        assert!(fds.is_empty());
+
+        let audio = EventIn::AudioSpectrum {
+            subscription_revision: 7,
+            generation: 3,
+            sequence: 11,
+            captured_at_ns: 42,
+            left: (0..64).map(|index| index as f32 / 63.0).collect(),
+            right: (0..64).map(|index| 1.0 - index as f32 / 63.0).collect(),
+        };
+        send_control(&a, &audio, &[]).unwrap();
+        let (got, fds) = recv_control(&b).unwrap();
+        assert_eq!(audio, got);
+        assert!(fds.is_empty());
+    }
+
     fn make_memfd() -> OwnedFd {
         let name = CString::new("waywallen-ipc-test").unwrap();
         memfd_create(&name, MemFdCreateFlag::MFD_CLOEXEC).expect("memfd_create")

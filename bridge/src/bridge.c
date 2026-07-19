@@ -17,6 +17,7 @@
 #include "log_internal.h"
 
 #include <errno.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -434,6 +435,22 @@ int ww_bridge_send_report_state_clear_color(int sock, float r, float g, float b,
     return ww_bridge_send_report_state(sock, &m);
 }
 
+int ww_bridge_set_event_subscriptions(int sock, uint64_t revision, const char* const* kinds,
+                                      uint32_t count) {
+    if (revision == 0 || count > WW_BRIDGE_MAX_EVENT_SUBSCRIPTIONS) return -EINVAL;
+    if (count > 0 && ! kinds) return -EINVAL;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (! kinds[i] || kinds[i][0] == '\0') return -EINVAL;
+    }
+
+    ww_evt_set_event_subscriptions_t m = {
+        .revision = revision,
+        .kinds    = { .count = count, .data = (char**)kinds },
+    };
+    WW_SEND_EVENT(
+        sock, WW_EVT_SET_EVENT_SUBSCRIPTIONS, ww_evt_set_event_subscriptions_encode, &m, NULL, 0);
+}
+
 /* -----------------------------------------------------------------------
  * Diagnostics
  * ----------------------------------------------------------------------- */
@@ -506,6 +523,13 @@ int ww_bridge_recv_control(int sock, ww_bridge_control_t* out) {
         rc = ww_evt_in_pointer_axis_decode(body, body_len, &out->u.pointer_axis);
         break;
     case WW_EVT_IN_MPRIS: rc = ww_evt_in_mpris_decode(body, body_len, &out->u.mpris); break;
+    case WW_EVT_IN_EVENT_SUBSCRIPTIONS_APPLIED:
+        rc = ww_evt_in_event_subscriptions_applied_decode(
+            body, body_len, &out->u.event_subscriptions_applied);
+        break;
+    case WW_EVT_IN_AUDIO_SPECTRUM:
+        rc = ww_evt_in_audio_spectrum_decode(body, body_len, &out->u.audio_spectrum);
+        break;
     case WW_EVT_IN_SET_FPS: rc = ww_evt_in_set_fps_decode(body, body_len, &out->u.set_fps); break;
     case WW_EVT_IN_SHUTDOWN:
         rc = ww_evt_in_shutdown_decode(body, body_len, &out->u.shutdown);
@@ -533,6 +557,10 @@ void ww_bridge_control_free(ww_bridge_control_t* msg) {
     case WW_EVT_IN_POINTER_BUTTON: ww_evt_in_pointer_button_free(&msg->u.pointer_button); break;
     case WW_EVT_IN_POINTER_AXIS: ww_evt_in_pointer_axis_free(&msg->u.pointer_axis); break;
     case WW_EVT_IN_MPRIS: ww_evt_in_mpris_free(&msg->u.mpris); break;
+    case WW_EVT_IN_EVENT_SUBSCRIPTIONS_APPLIED:
+        ww_evt_in_event_subscriptions_applied_free(&msg->u.event_subscriptions_applied);
+        break;
+    case WW_EVT_IN_AUDIO_SPECTRUM: ww_evt_in_audio_spectrum_free(&msg->u.audio_spectrum); break;
     case WW_EVT_IN_SET_FPS: ww_evt_in_set_fps_free(&msg->u.set_fps); break;
     case WW_EVT_IN_SHUTDOWN: ww_evt_in_shutdown_free(&msg->u.shutdown); break;
     case WW_EVT_IN_NEGOTIATE_BUFFERS:
@@ -689,6 +717,57 @@ void ww_bridge_setting_changed_free(ww_bridge_setting_changed_t* out) {
         free(out->settings.data);
     }
     memset(out, 0, sizeof(*out));
+}
+
+int ww_bridge_event_subscriptions_applied_from_control(
+    ww_bridge_control_t* ctrl, ww_bridge_event_subscriptions_applied_t* out) {
+    if (! ctrl || ! out) return -EINVAL;
+    if (ctrl->op != WW_EVT_IN_EVENT_SUBSCRIPTIONS_APPLIED) return -EINVAL;
+
+    memset(out, 0, sizeof(*out));
+    out->revision = ctrl->u.event_subscriptions_applied.revision;
+    out->status   = ctrl->u.event_subscriptions_applied.status;
+    out->kinds    = ctrl->u.event_subscriptions_applied.kinds;
+    out->reason   = ctrl->u.event_subscriptions_applied.reason;
+    memset(&ctrl->u.event_subscriptions_applied, 0, sizeof(ctrl->u.event_subscriptions_applied));
+    return 0;
+}
+
+void ww_bridge_event_subscriptions_applied_free(ww_bridge_event_subscriptions_applied_t* out) {
+    if (! out) return;
+    if (out->kinds.data) {
+        for (uint32_t i = 0; i < out->kinds.count; ++i) free(out->kinds.data[i]);
+        free(out->kinds.data);
+    }
+    free(out->reason);
+    memset(out, 0, sizeof(*out));
+}
+
+int ww_bridge_audio_spectrum_from_control(const ww_bridge_control_t*  ctrl,
+                                          ww_bridge_audio_spectrum_t* out) {
+    if (! ctrl || ! out) return -EINVAL;
+    memset(out, 0, sizeof(*out));
+    if (ctrl->op != WW_EVT_IN_AUDIO_SPECTRUM) return -EINVAL;
+
+    const ww_evt_in_audio_spectrum_t* in = &ctrl->u.audio_spectrum;
+    if (in->left.count != WW_BRIDGE_AUDIO_SPECTRUM_BINS ||
+        in->right.count != WW_BRIDGE_AUDIO_SPECTRUM_BINS || ! in->left.data || ! in->right.data) {
+        return -EPROTO;
+    }
+    for (uint32_t i = 0; i < WW_BRIDGE_AUDIO_SPECTRUM_BINS; ++i) {
+        if (! isfinite(in->left.data[i]) || in->left.data[i] < 0.0f || in->left.data[i] > 1.0f ||
+            ! isfinite(in->right.data[i]) || in->right.data[i] < 0.0f || in->right.data[i] > 1.0f) {
+            return -EPROTO;
+        }
+    }
+
+    out->subscription_revision = in->subscription_revision;
+    out->generation            = in->generation;
+    out->sequence              = in->sequence;
+    out->captured_at_ns        = in->captured_at_ns;
+    memcpy(out->left, in->left.data, sizeof(out->left));
+    memcpy(out->right, in->right.data, sizeof(out->right));
+    return 0;
 }
 
 /* -----------------------------------------------------------------------

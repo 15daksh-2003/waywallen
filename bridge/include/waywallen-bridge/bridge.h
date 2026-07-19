@@ -240,6 +240,15 @@ int ww_bridge_send_report_state(int sock, const ww_evt_report_state_t* m);
  * (cheap to keep four floats around per-renderer). */
 int ww_bridge_send_report_state_clear_color(int sock, float r, float g, float b, float a);
 
+/* Replace the complete runtime optional-event subscription set. `revision`
+ * starts at 1 and increases monotonically for this connection. The daemon
+ * replies with `WW_EVT_IN_EVENT_SUBSCRIPTIONS_APPLIED` before it begins
+ * delivering events for the new revision. An empty array unsubscribes from
+ * every optional event. */
+#define WW_BRIDGE_MAX_EVENT_SUBSCRIPTIONS 16u
+int ww_bridge_set_event_subscriptions(int sock, uint64_t revision, const char* const* kinds,
+                                      uint32_t count);
+
 /* -----------------------------------------------------------------------
  * Modifier negotiation
  *
@@ -370,19 +379,21 @@ void ww_bridge_log_gpu_info(const char* prefix, const ww_gpu_info_field_t* field
 typedef struct ww_bridge_control {
     ww_event_in_op_t op;
     union {
-        ww_evt_in_init_t              init;
-        ww_evt_in_setting_changed_t   setting_changed;
-        ww_evt_in_play_t              play;
-        ww_evt_in_pause_t             pause;
-        ww_evt_in_mute_t              mute;
-        ww_evt_in_unmute_t            unmute;
-        ww_evt_in_pointer_motion_t    pointer_motion;
-        ww_evt_in_pointer_button_t    pointer_button;
-        ww_evt_in_pointer_axis_t      pointer_axis;
-        ww_evt_in_mpris_t             mpris;
-        ww_evt_in_set_fps_t           set_fps;
-        ww_evt_in_shutdown_t          shutdown;
-        ww_evt_in_negotiate_buffers_t negotiate_buffers;
+        ww_evt_in_init_t                        init;
+        ww_evt_in_setting_changed_t             setting_changed;
+        ww_evt_in_play_t                        play;
+        ww_evt_in_pause_t                       pause;
+        ww_evt_in_mute_t                        mute;
+        ww_evt_in_unmute_t                      unmute;
+        ww_evt_in_pointer_motion_t              pointer_motion;
+        ww_evt_in_pointer_button_t              pointer_button;
+        ww_evt_in_pointer_axis_t                pointer_axis;
+        ww_evt_in_mpris_t                       mpris;
+        ww_evt_in_event_subscriptions_applied_t event_subscriptions_applied;
+        ww_evt_in_audio_spectrum_t              audio_spectrum;
+        ww_evt_in_set_fps_t                     set_fps;
+        ww_evt_in_shutdown_t                    shutdown;
+        ww_evt_in_negotiate_buffers_t           negotiate_buffers;
     } u;
 } ww_bridge_control_t;
 
@@ -512,11 +523,50 @@ int ww_bridge_setting_changed_from_control(ww_bridge_control_t*         ctrl,
 void ww_bridge_setting_changed_free(ww_bridge_setting_changed_t* out);
 
 /* -----------------------------------------------------------------------
- * Pointer events — optional, gated by manifest `events = ["pointer"]`
+ * Runtime optional events
+ * ----------------------------------------------------------------------- */
+
+typedef enum ww_bridge_subscription_status
+{
+    WW_BRIDGE_SUBSCRIPTION_APPLIED           = 0,
+    WW_BRIDGE_SUBSCRIPTION_INVALID           = 1,
+    WW_BRIDGE_SUBSCRIPTION_STALE_REVISION    = 2,
+    WW_BRIDGE_SUBSCRIPTION_REVISION_CONFLICT = 3,
+    WW_BRIDGE_SUBSCRIPTION_LIMIT_EXCEEDED    = 4,
+} ww_bridge_subscription_status_t;
+
+typedef struct ww_bridge_event_subscriptions_applied {
+    uint64_t          revision;
+    uint32_t          status;
+    ww_array_string_t kinds;
+    char*             reason;
+} ww_bridge_event_subscriptions_applied_t;
+
+int ww_bridge_event_subscriptions_applied_from_control(
+    ww_bridge_control_t* ctrl, ww_bridge_event_subscriptions_applied_t* out);
+void ww_bridge_event_subscriptions_applied_free(ww_bridge_event_subscriptions_applied_t* out);
+
+#define WW_BRIDGE_AUDIO_SPECTRUM_BINS 64u
+typedef struct ww_bridge_audio_spectrum {
+    uint64_t subscription_revision;
+    uint64_t generation;
+    uint64_t sequence;
+    uint64_t captured_at_ns;
+    float    left[WW_BRIDGE_AUDIO_SPECTRUM_BINS];
+    float    right[WW_BRIDGE_AUDIO_SPECTRUM_BINS];
+} ww_bridge_audio_spectrum_t;
+
+/* Copy and validate one normalized spectrum. Both wire arrays must contain
+ * exactly 64 finite values in [0, 1]. `ctrl` retains its allocations and
+ * must still be released with `ww_bridge_control_free`. */
+int ww_bridge_audio_spectrum_from_control(const ww_bridge_control_t*  ctrl,
+                                          ww_bridge_audio_spectrum_t* out);
+
+/* -----------------------------------------------------------------------
+ * Pointer events
  *
- * The daemon forwards these only when the renderer's manifest declared
- * the "pointer" subscription. They are POD copies of the wire payload,
- * with no heap-owned fields, so no _free is required. The semantics of
+ * The daemon forwards these only while the applied runtime set contains
+ * "pointer". They are POD copies with no heap-owned fields. The semantics of
  * (button, state, source, modifiers) mirror waywallen-display-v1's
  * pointer events.
  * ----------------------------------------------------------------------- */
@@ -568,9 +618,10 @@ int ww_bridge_pointer_button_from_control(ww_bridge_control_t*        ctrl,
 int ww_bridge_pointer_axis_from_control(ww_bridge_control_t* ctrl, ww_bridge_pointer_axis_t* out);
 
 /* -----------------------------------------------------------------------
- * MPRIS media events — optional, gated by manifest `events = ["mpris"]`
+ * MPRIS media events
  *
- * The daemon sends already-normalized media snapshots. String storage is
+ * The daemon sends these while the applied runtime set contains "mpris".
+ * String storage is
  * heap-owned; `_from_control` transfers it from `ctrl` into `out`, and
  * the caller MUST release it with `ww_bridge_mpris_free`.
  * ----------------------------------------------------------------------- */

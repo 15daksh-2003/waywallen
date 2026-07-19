@@ -1485,7 +1485,7 @@ async fn dispatch_inner(
 
         Req::RendererMouse(r) => {
             // Subscription-gated: skipped silently when the renderer's
-            // manifest doesn't declare events = ["pointer"].
+            // renderer has not registered the pointer event.
             state
                 .renderer_manager
                 .send_pointer_motion(&r.renderer_id, r.x as f32, r.y as f32, 0, 0)

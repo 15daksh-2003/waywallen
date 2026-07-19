@@ -15,10 +15,12 @@
     <event_in> — daemon → subprocess (inbound to the renderer). All
                  control-plane notifications: init, setting_changed,
                  play, pause, set_fps, shutdown, pointer_*,
-                 mpris, negotiate_buffers.
+                 mpris, negotiate_buffers, event_subscriptions_applied,
+                 audio_spectrum.
     <event>    — subprocess → daemon (outbound from the renderer):
                  ready, bind_buffers, frame_ready, error,
-                 release_syncobj, format_caps, bind_failed, init_nack.
+                 release_syncobj, format_caps, bind_failed, init_nack,
+                 report_state, set_event_subscriptions.
 
   Wire format: identical framing to waywallen-display-v1 (Wayland-style
   binary):
@@ -92,16 +94,21 @@
     settings is reused via `setting_changed` rather than respawned.
 
     Optional pointer events. `pointer_motion` / `pointer_button` /
-    `pointer_axis` are forwarded from the consumer display only when
-    the renderer's manifest opts in via `[renderer] events =
-    ["pointer"]`. Renderers that don't subscribe never see them.
+    `pointer_axis` are forwarded from the consumer display only while
+    the renderer's runtime subscription set contains `pointer`.
     Field shapes mirror waywallen-display-v1's pointer events; the
     daemon is a pure passthrough that strips its display id.
 
-    Optional MPRIS events. `mpris` snapshots are forwarded only when
-    the renderer's manifest opts in via `[renderer] events =
-    ["mpris"]`. The daemon owns D-Bus/MPRIS parsing and renderer
-    selection; subprocesses receive the already-normalized metadata.
+    Optional MPRIS events. `mpris` snapshots are forwarded only while
+    the renderer's runtime subscription set contains `mpris`. The
+    daemon owns D-Bus/MPRIS parsing and renderer selection; subprocesses
+    receive the already-normalized metadata.
+
+    Runtime subscriptions. After `ready`, the renderer sends
+    `set_event_subscriptions` with a monotonically increasing revision
+    and the complete desired event set. The daemon atomically applies
+    or rejects it, then returns `event_subscriptions_applied`. New
+    connections start with an empty set; disconnect clears it.
 
     Modifier negotiation. The renderer ships `format_caps` after
     `ready` and before any `bind_buffers`, advertising
@@ -233,7 +240,7 @@
 
   <!--
     Pointer motion. Optional inbound event; only delivered when the
-    renderer's manifest declares `events = ["pointer"]`. Field shapes
+    renderer's runtime subscription set contains `pointer`. Field shapes
     mirror waywallen-display-v1 `pointer_motion` (opcode 8) — the
     daemon is a pure passthrough.
   -->
@@ -305,7 +312,7 @@
   </event_in>
 
   <!--
-    Pointer button. Optional; gated by manifest `events = ["pointer"]`.
+    Pointer button. Optional; gated by the runtime `pointer` subscription.
     Mirrors waywallen-display-v1 `pointer_button` (opcode 9).
   -->
   <event_in name="pointer_button" opcode="10">
@@ -318,8 +325,8 @@
   </event_in>
 
   <!--
-    Pointer axis (scroll). Optional; gated by manifest `events =
-    ["pointer"]`. Mirrors waywallen-display-v1 `pointer_axis`
+    Pointer axis (scroll). Optional; gated by the runtime `pointer`
+    subscription. Mirrors waywallen-display-v1 `pointer_axis`
     (opcode 10).
   -->
   <event_in name="pointer_axis" opcode="11">
@@ -333,8 +340,8 @@
   </event_in>
 
   <!--
-    MPRIS media snapshot. Optional; gated by manifest `events =
-    ["mpris"]`. `state` matches Wallpaper Engine's MediaPlaybackEvent
+    MPRIS media snapshot. Optional; gated by the runtime `mpris`
+    subscription. `state` matches Wallpaper Engine's MediaPlaybackEvent
     enum: 0=stopped, 1=playing, 2=paused. String fields are empty when
     unavailable. `art_url` is the current cover URL/path, and
     `previous_art_url` is the last non-empty cover before it changed.
@@ -351,6 +358,33 @@
 
   <!-- Opcode 15 was release_resolved in v1 and remains reserved. -->
 
+  <!--
+    Result of atomically applying `set_event_subscriptions`. `kinds` is
+    always the daemon's current canonical applied set, including on
+    failure. Status: 0=applied, 1=invalid kind/shape, 2=stale revision,
+    3=revision conflict, 4=limit exceeded.
+  -->
+  <event_in name="event_subscriptions_applied" opcode="16">
+    <arg name="revision" type="u64"/>
+    <arg name="status" type="u32"/>
+    <arg name="kinds" type="array" element="string"/>
+    <arg name="reason" type="string"/>
+  </event_in>
+
+  <!--
+    Latest normalized system-output spectrum. Delivered only while the
+    renderer's applied set contains `audio`. Arrays contain exactly 64
+    finite values in 0..=1. The renderer rejects a frame whose
+    subscription_revision no longer matches its applied revision.
+  -->
+  <event_in name="audio_spectrum" opcode="17">
+    <arg name="subscription_revision" type="u64"/>
+    <arg name="generation" type="u64"/>
+    <arg name="sequence" type="u64"/>
+    <arg name="captured_at_ns" type="u64"/>
+    <arg name="left" type="array" element="f32"/>
+    <arg name="right" type="array" element="f32"/>
+  </event_in>
 
   <!-- ==================================================================
        EVENTS  (subprocess -> daemon)
@@ -587,6 +621,18 @@
   -->
   <event name="report_state" opcode="9">
     <arg name="state" type="kv_list"/>
+  </event>
+
+  <!--
+    Replace the renderer's complete optional-event subscription set.
+    Revisions start at 1 and increase monotonically per connection.
+    Known kinds are `pointer`, `mpris`, and `audio`; an empty set clears
+    all subscriptions. The daemon acknowledges every validly decoded
+    request with `event_subscriptions_applied`.
+  -->
+  <event name="set_event_subscriptions" opcode="10">
+    <arg name="revision" type="u64"/>
+    <arg name="kinds" type="array" element="string"/>
   </event>
 
 </protocol>

@@ -163,21 +163,10 @@ pub struct RendererDef {
     /// Each entry declares a type and validation envelope.
     #[serde(default)]
     pub settings: HashMap<String, SettingDef>,
-    /// Opt-in inbound-event subscriptions.
-    /// Recognized values include "pointer" and "mpris".
-    #[serde(default)]
-    pub events: Vec<String>,
-}
-
-/// Inbound-event family subscribed via the manifest `events` array.
-/// Recognized values are listed here for validation.
-pub const EVENT_KIND_POINTER: &str = "pointer";
-pub const EVENT_KIND_MPRIS: &str = "mpris";
-
-/// Returns `true` when `name` matches one of the recognised
-/// inbound-event family strings.
-pub fn is_known_event_kind(name: &str) -> bool {
-    matches!(name, EVENT_KIND_POINTER | EVENT_KIND_MPRIS)
+    /// Retained only so manifests using the removed static subscription
+    /// field can be rejected instead of silently changing behaviour.
+    #[serde(default, rename = "events")]
+    pub legacy_events: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -640,23 +629,18 @@ pub fn scan_plugins(dir: &Path, system: bool) -> PluginScan {
             def.plugin_version = meta.version.clone();
             def.plugin_system = meta.system;
             def.bin = resolve_rel(&plugin_dir, def.bin);
-            // Drop unrecognised event kinds — the gating tables only know
-            // a small closed set, so an unknown name is dead config.
-            let renderer_name = def.name.clone();
-            def.events.retain(|e| {
-                if is_known_event_kind(e) {
-                    true
-                } else {
-                    log::warn!("renderer {renderer_name}: dropping unknown event kind {e:?}");
-                    false
-                }
-            });
+            if def.legacy_events.is_some() {
+                log::error!(
+                    "renderer {}: manifest field `events` was removed; register optional events at runtime",
+                    def.name
+                );
+                continue;
+            }
             log::info!(
-                "loaded renderer component: {} (plugin {}, types: {:?}, events: {:?})",
+                "loaded renderer component: {} (plugin {}, types: {:?})",
                 def.name,
                 meta.id,
                 def.types,
-                def.events,
             );
             out.renderers.push(def);
         }
@@ -886,7 +870,7 @@ types = ["image"]
             spawn_version: None,
             extras: Vec::new(),
             settings: Default::default(),
-            events: Vec::new(),
+            legacy_events: None,
         }
     }
 
@@ -907,7 +891,7 @@ types = ["image"]
     }
 
     #[test]
-    fn manifest_parses_events_array() {
+    fn manifest_preserves_legacy_events_for_rejection() {
         let src = r#"
             [plugin]
             id = "org.waywallen.wallpaper-engine"
@@ -925,7 +909,34 @@ types = ["image"]
             Some("https://example.org/owe/update.json")
         );
         let r = &m.renderers["wescene-renderer"];
-        assert_eq!(r.events, vec!["pointer".to_string(), "mpris".to_string()]);
+        assert_eq!(
+            r.legacy_events,
+            Some(vec!["pointer".to_string(), "mpris".to_string()])
+        );
+    }
+
+    #[test]
+    fn scan_rejects_renderer_with_legacy_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        write_test_plugin(&plugins, "org.test.legacy");
+        std::fs::write(
+            plugins.join("org.test.legacy/plugin.toml"),
+            r#"[plugin]
+id = "org.test.legacy"
+name = "Legacy"
+
+[renderers.test]
+bin = "bin/renderer"
+types = ["image"]
+events = ["pointer"]
+"#,
+        )
+        .unwrap();
+
+        let scan = scan_plugin_roots(&[PluginRoot::system(plugins)]);
+        assert_eq!(scan.plugins.len(), 1);
+        assert!(scan.renderers.is_empty());
     }
 
     #[test]
@@ -1010,7 +1021,7 @@ types = ["image"]
     }
 
     #[test]
-    fn manifest_events_default_empty() {
+    fn manifest_legacy_events_default_none() {
         let src = r#"
             [plugin]
             id = "org.waywallen.image"
@@ -1021,7 +1032,7 @@ types = ["image"]
             types = ["image"]
         "#;
         let m: PluginManifest = toml::from_str(src).expect("parses");
-        assert!(m.renderers["waywallen-image"].events.is_empty());
+        assert!(m.renderers["waywallen-image"].legacy_events.is_none());
     }
 
     #[test]

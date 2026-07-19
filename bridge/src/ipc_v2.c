@@ -879,6 +879,90 @@ uint32_t ww_evt_in_mpris_expected_fds(const ww_evt_in_mpris_t *m) {
     return 0;
 }
 
+int ww_evt_in_event_subscriptions_applied_encode(const ww_evt_in_event_subscriptions_applied_t *m, ww_buf_t *out) {
+    int rc;
+    (void)m;
+    if ((rc = w_u64(out, m->revision))) return rc;
+    if ((rc = w_u32(out, m->status))) return rc;
+    if ((rc = w_array_string(out, &m->kinds))) return rc;
+    if ((rc = w_string(out, m->reason))) return rc;
+    return WW_OK;
+}
+
+int ww_evt_in_event_subscriptions_applied_decode(const uint8_t *buf, size_t len, ww_evt_in_event_subscriptions_applied_t *out) {
+    memset(out, 0, sizeof(*out));
+    ww_rd_t r = { buf, 0, len };
+    int rc;
+    if ((rc = rd_u64(&r, &out->revision))) goto fail;
+    if ((rc = rd_u32(&r, &out->status))) goto fail;
+    if ((rc = rd_array_string(&r, &out->kinds))) goto fail;
+    if ((rc = rd_string(&r, &out->reason))) goto fail;
+    if (r.pos != r.len) {
+        int rc2 = WW_ERR_TRAILING;
+        (void)rc2;
+        ww_evt_in_event_subscriptions_applied_free(out);
+        return WW_ERR_TRAILING;
+    }
+    return WW_OK;
+fail:
+    ww_evt_in_event_subscriptions_applied_free(out);
+    return rc;
+}
+
+void ww_evt_in_event_subscriptions_applied_free(ww_evt_in_event_subscriptions_applied_t *m) {
+    free_array_string(&m->kinds);
+    free(m->reason); m->reason = NULL;
+}
+
+uint32_t ww_evt_in_event_subscriptions_applied_expected_fds(const ww_evt_in_event_subscriptions_applied_t *m) {
+    (void)m;
+    return 0;
+}
+
+int ww_evt_in_audio_spectrum_encode(const ww_evt_in_audio_spectrum_t *m, ww_buf_t *out) {
+    int rc;
+    (void)m;
+    if ((rc = w_u64(out, m->subscription_revision))) return rc;
+    if ((rc = w_u64(out, m->generation))) return rc;
+    if ((rc = w_u64(out, m->sequence))) return rc;
+    if ((rc = w_u64(out, m->captured_at_ns))) return rc;
+    if ((rc = w_array_f32(out, &m->left))) return rc;
+    if ((rc = w_array_f32(out, &m->right))) return rc;
+    return WW_OK;
+}
+
+int ww_evt_in_audio_spectrum_decode(const uint8_t *buf, size_t len, ww_evt_in_audio_spectrum_t *out) {
+    memset(out, 0, sizeof(*out));
+    ww_rd_t r = { buf, 0, len };
+    int rc;
+    if ((rc = rd_u64(&r, &out->subscription_revision))) goto fail;
+    if ((rc = rd_u64(&r, &out->generation))) goto fail;
+    if ((rc = rd_u64(&r, &out->sequence))) goto fail;
+    if ((rc = rd_u64(&r, &out->captured_at_ns))) goto fail;
+    if ((rc = rd_array_f32(&r, &out->left))) goto fail;
+    if ((rc = rd_array_f32(&r, &out->right))) goto fail;
+    if (r.pos != r.len) {
+        int rc2 = WW_ERR_TRAILING;
+        (void)rc2;
+        ww_evt_in_audio_spectrum_free(out);
+        return WW_ERR_TRAILING;
+    }
+    return WW_OK;
+fail:
+    ww_evt_in_audio_spectrum_free(out);
+    return rc;
+}
+
+void ww_evt_in_audio_spectrum_free(ww_evt_in_audio_spectrum_t *m) {
+    free(m->left.data); m->left.data = NULL; m->left.count = 0;
+    free(m->right.data); m->right.data = NULL; m->right.count = 0;
+}
+
+uint32_t ww_evt_in_audio_spectrum_expected_fds(const ww_evt_in_audio_spectrum_t *m) {
+    (void)m;
+    return 0;
+}
+
 int ww_evt_ready_encode(const ww_evt_ready_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
@@ -1232,6 +1316,41 @@ void ww_evt_report_state_free(ww_evt_report_state_t *m) {
 }
 
 uint32_t ww_evt_report_state_expected_fds(const ww_evt_report_state_t *m) {
+    (void)m;
+    return 0;
+}
+
+int ww_evt_set_event_subscriptions_encode(const ww_evt_set_event_subscriptions_t *m, ww_buf_t *out) {
+    int rc;
+    (void)m;
+    if ((rc = w_u64(out, m->revision))) return rc;
+    if ((rc = w_array_string(out, &m->kinds))) return rc;
+    return WW_OK;
+}
+
+int ww_evt_set_event_subscriptions_decode(const uint8_t *buf, size_t len, ww_evt_set_event_subscriptions_t *out) {
+    memset(out, 0, sizeof(*out));
+    ww_rd_t r = { buf, 0, len };
+    int rc;
+    if ((rc = rd_u64(&r, &out->revision))) goto fail;
+    if ((rc = rd_array_string(&r, &out->kinds))) goto fail;
+    if (r.pos != r.len) {
+        int rc2 = WW_ERR_TRAILING;
+        (void)rc2;
+        ww_evt_set_event_subscriptions_free(out);
+        return WW_ERR_TRAILING;
+    }
+    return WW_OK;
+fail:
+    ww_evt_set_event_subscriptions_free(out);
+    return rc;
+}
+
+void ww_evt_set_event_subscriptions_free(ww_evt_set_event_subscriptions_t *m) {
+    free_array_string(&m->kinds);
+}
+
+uint32_t ww_evt_set_event_subscriptions_expected_fds(const ww_evt_set_event_subscriptions_t *m) {
     (void)m;
     return 0;
 }

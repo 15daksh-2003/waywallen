@@ -43,6 +43,27 @@ fn main() {
     prost_build::Config::new()
         .compile_protos(&proto_paths, &[manifest_dir.join("proto")])
         .expect("prost-build failed on control/filter protos");
+
+    build_pulse_adapter(&manifest_dir);
+}
+
+fn build_pulse_adapter(manifest_dir: &Path) {
+    let source = manifest_dir.join("src/audio/pulse_adapter.c");
+    let header = manifest_dir.join("src/audio/pulse_adapter.h");
+    println!("cargo:rerun-if-changed={}", source.display());
+    println!("cargo:rerun-if-changed={}", header.display());
+
+    let pulse = pkg_config::Config::new()
+        .cargo_metadata(false)
+        .probe("libpulse")
+        .expect("libpulse headers are required to build the optional runtime adapter");
+    let mut build = cc::Build::new();
+    build.file(source).flag_if_supported("-std=gnu11");
+    for include in pulse.include_paths {
+        build.include(include);
+    }
+    build.compile("waywallen_pulse_adapter");
+    println!("cargo:rustc-link-lib=dl");
 }
 
 fn gen_rust(xml_path: &Path, out_file: &Path) {

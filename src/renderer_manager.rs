@@ -1,25 +1,24 @@
 use crate::error::{Error, Result, ResultExt};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock as StdRwLock, Weak as StdWeak};
 use std::thread;
 use std::time::Duration;
 use tokio::process::{Child, Command};
-use tokio::sync::{broadcast, Mutex as TokioMutex};
+use tokio::sync::{broadcast, watch, Mutex as TokioMutex};
 use uuid::Uuid;
 
 use crate::ipc::proto::{ControlMsg, EventMsg};
-use crate::ipc::uds::{recv_event, send_control, CodecError};
+use crate::ipc::uds::{recv_event, send_control};
 
 /// Renderer IPC compatibility version the daemon currently emits. Bump
 /// this when the daemon/renderer wire contract changes.
 pub const SPAWN_VERSION: u32 = 8;
-use crate::plugin::renderer_registry::{
-    RendererDef, RendererRegistry, EVENT_KIND_MPRIS, EVENT_KIND_POINTER,
-};
+use crate::plugin::renderer_registry::{RendererDef, RendererRegistry};
 use crate::routing::Router;
 use crate::wallpaper::types::WallpaperType;
 
@@ -27,6 +26,393 @@ use crate::wallpaper::types::WallpaperType;
 // Public types
 
 pub type RendererId = String;
+
+const MAX_EVENT_SUBSCRIPTIONS: usize = 16;
+const MAX_EVENT_KIND_BYTES: usize = 64;
+const MAX_EVENT_KIND_TOTAL_BYTES: usize = 512;
+const WRITER_QUEUE_CAPACITY: usize = 64;
+
+pub const SUBSCRIPTION_STATUS_APPLIED: u32 = 0;
+pub const SUBSCRIPTION_STATUS_INVALID: u32 = 1;
+pub const SUBSCRIPTION_STATUS_STALE_REVISION: u32 = 2;
+pub const SUBSCRIPTION_STATUS_REVISION_CONFLICT: u32 = 3;
+pub const SUBSCRIPTION_STATUS_LIMIT_EXCEEDED: u32 = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RendererEventKind {
+    Pointer,
+    Mpris,
+    Audio,
+}
+
+impl RendererEventKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pointer => "pointer",
+            Self::Mpris => "mpris",
+            Self::Audio => "audio",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "pointer" => Some(Self::Pointer),
+            "mpris" => Some(Self::Mpris),
+            "audio" => Some(Self::Audio),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RendererSubscription {
+    pub revision: u64,
+    pub kinds: BTreeSet<RendererEventKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RendererSubscriptionSnapshot {
+    entries: Arc<BTreeMap<RendererId, RendererSubscription>>,
+}
+
+impl RendererSubscriptionSnapshot {
+    pub fn revision_for(&self, id: &str, kind: RendererEventKind) -> Option<u64> {
+        self.entries
+            .get(id)
+            .filter(|entry| entry.kinds.contains(&kind))
+            .map(|entry| entry.revision)
+    }
+
+    pub fn subscribers(&self, kind: RendererEventKind) -> Vec<(RendererId, u64)> {
+        self.entries
+            .iter()
+            .filter_map(|(id, entry)| {
+                entry
+                    .kinds
+                    .contains(&kind)
+                    .then(|| (id.clone(), entry.revision))
+            })
+            .collect()
+    }
+}
+
+struct SubscriptionApply {
+    revision: u64,
+    status: u32,
+    kinds: Vec<String>,
+    reason: String,
+    commit: Option<RendererSubscription>,
+}
+
+struct RendererSubscriptionRegistry {
+    committed: StdMutex<BTreeMap<RendererId, RendererSubscription>>,
+    published: watch::Sender<RendererSubscriptionSnapshot>,
+}
+
+impl RendererSubscriptionRegistry {
+    fn new() -> Self {
+        let (published, _) = watch::channel(RendererSubscriptionSnapshot::default());
+        Self {
+            committed: StdMutex::new(BTreeMap::new()),
+            published,
+        }
+    }
+
+    fn register(&self, id: RendererId) {
+        if let Ok(mut committed) = self.committed.lock() {
+            committed.insert(id, RendererSubscription::default());
+            self.publish_locked(&committed);
+        }
+    }
+
+    fn remove(&self, id: &str) {
+        if let Ok(mut committed) = self.committed.lock() {
+            committed.remove(id);
+            self.publish_locked(&committed);
+        }
+    }
+
+    fn prepare(&self, id: &str, revision: u64, raw_kinds: &[String]) -> SubscriptionApply {
+        let committed = match self.committed.lock() {
+            Ok(committed) => committed,
+            Err(_) => {
+                return SubscriptionApply {
+                    revision,
+                    status: SUBSCRIPTION_STATUS_INVALID,
+                    kinds: Vec::new(),
+                    reason: "subscription registry unavailable".to_string(),
+                    commit: None,
+                };
+            }
+        };
+        let Some(current) = committed.get(id) else {
+            return SubscriptionApply {
+                revision,
+                status: SUBSCRIPTION_STATUS_INVALID,
+                kinds: Vec::new(),
+                reason: "renderer is not registered".to_string(),
+                commit: None,
+            };
+        };
+        let current_kinds = || {
+            current
+                .kinds
+                .iter()
+                .map(|kind| kind.as_str().to_string())
+                .collect()
+        };
+        if raw_kinds.len() > MAX_EVENT_SUBSCRIPTIONS {
+            return SubscriptionApply {
+                revision,
+                status: SUBSCRIPTION_STATUS_LIMIT_EXCEEDED,
+                kinds: current_kinds(),
+                reason: format!("at most {MAX_EVENT_SUBSCRIPTIONS} event kinds are allowed"),
+                commit: None,
+            };
+        }
+        if revision == 0 {
+            return SubscriptionApply {
+                revision,
+                status: SUBSCRIPTION_STATUS_INVALID,
+                kinds: current_kinds(),
+                reason: "revision must start at 1".to_string(),
+                commit: None,
+            };
+        }
+        let total_kind_bytes = raw_kinds
+            .iter()
+            .try_fold(0usize, |total, kind| total.checked_add(kind.len()));
+        if total_kind_bytes.is_none_or(|total| total > MAX_EVENT_KIND_TOTAL_BYTES)
+            || raw_kinds
+                .iter()
+                .any(|kind| kind.len() > MAX_EVENT_KIND_BYTES)
+        {
+            return SubscriptionApply {
+                revision,
+                status: SUBSCRIPTION_STATUS_LIMIT_EXCEEDED,
+                kinds: current_kinds(),
+                reason: format!(
+                    "event kind names are limited to {MAX_EVENT_KIND_BYTES} bytes each and \
+                     {MAX_EVENT_KIND_TOTAL_BYTES} bytes total"
+                ),
+                commit: None,
+            };
+        }
+
+        let mut kinds = BTreeSet::new();
+        for raw in raw_kinds {
+            let Some(kind) = RendererEventKind::parse(raw) else {
+                return SubscriptionApply {
+                    revision,
+                    status: SUBSCRIPTION_STATUS_INVALID,
+                    kinds: current_kinds(),
+                    reason: format!("unknown event kind {raw:?}"),
+                    commit: None,
+                };
+            };
+            kinds.insert(kind);
+        }
+        let canonical: Vec<String> = kinds.iter().map(|kind| kind.as_str().to_string()).collect();
+
+        if revision < current.revision {
+            return SubscriptionApply {
+                revision,
+                status: SUBSCRIPTION_STATUS_STALE_REVISION,
+                kinds: current_kinds(),
+                reason: format!("current revision is {}", current.revision),
+                commit: None,
+            };
+        }
+        if revision == current.revision {
+            let same = kinds == current.kinds;
+            return SubscriptionApply {
+                revision,
+                status: if same {
+                    SUBSCRIPTION_STATUS_APPLIED
+                } else {
+                    SUBSCRIPTION_STATUS_REVISION_CONFLICT
+                },
+                kinds: current_kinds(),
+                reason: if same {
+                    String::new()
+                } else {
+                    "revision already names a different event set".to_string()
+                },
+                commit: None,
+            };
+        }
+
+        SubscriptionApply {
+            revision,
+            status: SUBSCRIPTION_STATUS_APPLIED,
+            kinds: canonical,
+            reason: String::new(),
+            commit: Some(RendererSubscription { revision, kinds }),
+        }
+    }
+
+    fn commit(&self, id: RendererId, subscription: RendererSubscription) {
+        if let Ok(mut committed) = self.committed.lock() {
+            if committed.contains_key(&id) {
+                committed.insert(id, subscription);
+                self.publish_locked(&committed);
+            }
+        }
+    }
+
+    fn snapshot(&self) -> RendererSubscriptionSnapshot {
+        self.published.borrow().clone()
+    }
+
+    fn subscribe(&self) -> watch::Receiver<RendererSubscriptionSnapshot> {
+        self.published.subscribe()
+    }
+
+    fn publish_locked(&self, committed: &BTreeMap<RendererId, RendererSubscription>) {
+        self.published.send_replace(RendererSubscriptionSnapshot {
+            entries: Arc::new(committed.clone()),
+        });
+    }
+}
+
+type WriterCompletion = std::sync::mpsc::SyncSender<std::result::Result<(), String>>;
+
+enum WriterCommand {
+    Reliable {
+        msg: ControlMsg,
+        commit: Option<RendererSubscription>,
+        done: WriterCompletion,
+    },
+    WakeAudio,
+}
+
+#[derive(Clone)]
+struct RendererWriter {
+    tx: std::sync::mpsc::SyncSender<WriterCommand>,
+    audio: Arc<StdMutex<Option<(u64, ControlMsg)>>>,
+    audio_wake_pending: Arc<AtomicBool>,
+}
+
+impl RendererWriter {
+    fn spawn(
+        id: RendererId,
+        stream: StdUnixStream,
+        subscriptions: Arc<RendererSubscriptionRegistry>,
+        reap_tx: tokio::sync::mpsc::UnboundedSender<RendererId>,
+    ) -> Self {
+        let (tx, rx) = std::sync::mpsc::sync_channel(WRITER_QUEUE_CAPACITY);
+        let audio = Arc::new(StdMutex::new(None));
+        let writer_audio = Arc::clone(&audio);
+        let audio_wake_pending = Arc::new(AtomicBool::new(false));
+        let writer_audio_wake_pending = Arc::clone(&audio_wake_pending);
+        thread::spawn(move || {
+            'writer: loop {
+                let first = match rx.recv() {
+                    Ok(command) => command,
+                    Err(_) => break,
+                };
+                let mut commands = std::collections::VecDeque::from([first]);
+                while commands.len() < WRITER_QUEUE_CAPACITY {
+                    match rx.try_recv() {
+                        Ok(command) => commands.push_back(command),
+                        Err(_) => break,
+                    }
+                }
+
+                while let Some(command) = commands.pop_front() {
+                    let WriterCommand::Reliable { msg, commit, done } = command else {
+                        continue;
+                    };
+                    match send_control(&stream, &msg, &[]) {
+                        Ok(()) => {
+                            if let Some(subscription) = commit {
+                                if let Ok(mut audio) = writer_audio.lock() {
+                                    *audio = None;
+                                }
+                                subscriptions.commit(id.clone(), subscription);
+                            }
+                            let _ = done.send(Ok(()));
+                        }
+                        Err(error) => {
+                            let reason = error.to_string();
+                            let _ = done.send(Err(reason.clone()));
+                            for pending in commands.drain(..).chain(rx.try_iter()) {
+                                if let WriterCommand::Reliable { done, .. } = pending {
+                                    let _ = done.send(Err(reason.clone()));
+                                }
+                            }
+                            log::warn!("renderer {id}: writer exit: {reason}");
+                            let _ = reap_tx.send(id.clone());
+                            break 'writer;
+                        }
+                    }
+                }
+
+                writer_audio_wake_pending.store(false, Ordering::Release);
+                let latest = writer_audio.lock().ok().and_then(|mut audio| audio.take());
+                if let Some((revision, msg)) = latest {
+                    if subscriptions
+                        .snapshot()
+                        .revision_for(&id, RendererEventKind::Audio)
+                        == Some(revision)
+                    {
+                        if let Err(error) = send_control(&stream, &msg, &[]) {
+                            log::warn!("renderer {id}: audio writer exit: {error}");
+                            let _ = reap_tx.send(id.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+
+            for command in rx.try_iter() {
+                if let WriterCommand::Reliable { done, .. } = command {
+                    let _ = done.send(Err("renderer writer stopped".to_string()));
+                }
+            }
+        });
+        Self {
+            tx,
+            audio,
+            audio_wake_pending,
+        }
+    }
+
+    fn send_blocking(
+        &self,
+        msg: ControlMsg,
+        commit: Option<RendererSubscription>,
+    ) -> std::result::Result<(), String> {
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        self.tx
+            .send(WriterCommand::Reliable {
+                msg,
+                commit,
+                done: done_tx,
+            })
+            .map_err(|_| "renderer writer stopped".to_string())?;
+        done_rx
+            .recv()
+            .map_err(|_| "renderer writer stopped".to_string())?
+    }
+
+    fn replace_audio(&self, revision: u64, msg: ControlMsg) -> std::result::Result<(), String> {
+        *self
+            .audio
+            .lock()
+            .map_err(|_| "audio slot mutex poisoned".to_string())? = Some((revision, msg));
+        if self.audio_wake_pending.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        match self.tx.try_send(WriterCommand::WakeAudio) {
+            Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => Ok(()),
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                self.audio_wake_pending.store(false, Ordering::Release);
+                Err("renderer writer stopped".to_string())
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MprisSnapshot {
@@ -152,9 +538,9 @@ pub struct RendererHandle {
     /// picked. Reported in Ready and used by DMA-BUF negotiation.
     pub gpu: DrmNode,
 
-    /// Blocking std UnixStream. Guarded by a std Mutex so HTTP handlers
-    /// hold the lock only while a `sendmsg` is in flight.
-    sock: Arc<StdMutex<StdUnixStream>>,
+    /// Sole owner-facing path for daemon-to-renderer writes. A dedicated
+    /// thread serializes reliable control traffic and latest-only audio.
+    writer: RendererWriter,
 
     /// Broadcast of every event the host emits (besides the FDs on the
     /// initial BindBuffers, whose fds are stored in `bind_snapshot`).
@@ -191,10 +577,6 @@ pub struct RendererHandle {
 
     /// The child process. Kept alive so dropping the manager reaps it.
     child: Arc<TokioMutex<Option<Child>>>,
-
-    /// Inbound-event family subscriptions copied from the renderer's
-    /// manifest at spawn time. Pointer senders consult this before dispatch.
-    events_subscribed: Arc<Vec<String>>,
 
     /// Renderer-published clear color (RGBA, 0..=1, sRGB straight
     /// alpha). Sole source for outbound display clear color.
@@ -351,6 +733,7 @@ pub struct RendererManager {
     /// a send_control hitting EPIPE). One background task drains it.
     reap_tx: tokio::sync::mpsc::UnboundedSender<RendererId>,
     reap_rx: StdMutex<Option<tokio::sync::mpsc::UnboundedReceiver<RendererId>>>,
+    subscriptions: Arc<RendererSubscriptionRegistry>,
 }
 
 struct Inner {
@@ -369,6 +752,7 @@ impl RendererManager {
             gpus: OnceLock::new(),
             reap_tx,
             reap_rx: StdMutex::new(Some(reap_rx)),
+            subscriptions: Arc::new(RendererSubscriptionRegistry::new()),
         }
     }
 
@@ -416,7 +800,7 @@ impl RendererManager {
                 spawn_version: None,
                 extras: Vec::new(),
                 settings: Default::default(),
-                events: Vec::new(),
+                legacy_events: None,
             });
         }
         Self::new(registry)
@@ -559,8 +943,18 @@ impl RendererManager {
         let pending_configure: Arc<StdMutex<Option<u32>>> = Arc::new(StdMutex::new(None));
         let clear_rgba: Arc<StdMutex<[f32; 4]>> = Arc::new(StdMutex::new([0.0, 0.0, 0.0, 1.0]));
 
-        let sock = Arc::new(StdMutex::new(std_stream));
-        let reader_sock = sock.clone();
+        let reader_stream = std_stream
+            .try_clone()
+            .context("try_clone for renderer reader")?;
+        self.subscriptions.register(id.clone());
+        let writer = RendererWriter::spawn(
+            id.clone(),
+            std_stream,
+            Arc::clone(&self.subscriptions),
+            self.reap_tx.clone(),
+        );
+        let reader_writer = writer.clone();
+        let reader_subscriptions = Arc::clone(&self.subscriptions);
         let reader_events = events_tx.clone();
         let reader_snapshot = bind_snapshot.clone();
         let reader_sync_fds = sync_fds.clone();
@@ -571,21 +965,6 @@ impl RendererManager {
         let reader_clear_rgba = clear_rgba.clone();
         let reader_id = id.clone();
         let reader_reap_tx = self.reap_tx.clone();
-        thread::spawn(move || {
-            run_reader(
-                reader_id,
-                reader_sock,
-                reader_events,
-                reader_snapshot,
-                reader_sync_fds,
-                reader_latest_frame,
-                reader_release_syncobj,
-                reader_format_caps,
-                reader_pending,
-                reader_clear_rgba,
-                reader_reap_tx,
-            );
-        });
 
         // Per-renderer reaper drains FrameRecords and transfers consumer
         // release fences onto the producer timeline.
@@ -609,7 +988,7 @@ impl RendererManager {
             plugin_id: renderer_def.plugin_id.clone(),
             pid: child_pid,
             gpu,
-            sock,
+            writer,
             events: events_tx,
             bind_snapshot,
             sync_fds,
@@ -620,7 +999,6 @@ impl RendererManager {
             frame_record_tx,
             pending_configure,
             child: Arc::new(TokioMutex::new(Some(child))),
-            events_subscribed: Arc::new(renderer_def.events.clone()),
             clear_rgba,
         });
 
@@ -641,6 +1019,23 @@ impl RendererManager {
             let mut inner = self.inner.lock().await;
             inner.renderers.insert(id.clone(), handle);
         }
+        thread::spawn(move || {
+            run_reader(
+                reader_id,
+                reader_stream,
+                reader_writer,
+                reader_subscriptions,
+                reader_events,
+                reader_snapshot,
+                reader_sync_fds,
+                reader_latest_frame,
+                reader_release_syncobj,
+                reader_format_caps,
+                reader_pending,
+                reader_clear_rgba,
+                reader_reap_tx,
+            );
+        });
         log::info!("spawned renderer {id} ({})", req.wp_type);
         Ok(id)
     }
@@ -781,26 +1176,14 @@ impl RendererManager {
             .get(id)
             .await
             .ok_or_else(|| Error::RendererNotFound(id.to_string()))?;
-        let sock = handle.sock.clone();
-        let codec_res: Result<std::result::Result<(), CodecError>> =
-            tokio::task::spawn_blocking(move || {
-                let guard = sock.lock().map_err(|e| {
-                    Error::RendererControlFailed(format!("sock mutex poisoned: {e}"))
-                })?;
-                Ok(send_control(&*guard, &msg, &[]))
-            })
+        let writer = handle.writer.clone();
+        let write = tokio::task::spawn_blocking(move || writer.send_blocking(msg, None))
             .await
             .context("send_control join")?;
-        match codec_res? {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                if is_peer_gone(&e) {
-                    log::warn!("renderer {id}: peer gone on send_control ({e}), evicting");
-                    self.mark_dead(id);
-                }
-                Err(Error::RendererControlFailed(format!("send_control: {e}")))
-            }
-        }
+        write.map_err(|error| {
+            self.mark_dead(id);
+            Error::RendererControlFailed(format!("send_control: {error}"))
+        })
     }
 
     /// Modifier-negotiation v2 dispatch — replaces the deleted
@@ -895,7 +1278,7 @@ impl RendererManager {
         timestamp_us: u64,
         modifiers: u32,
     ) -> Result<()> {
-        if !self.subscribed_to(id, EVENT_KIND_POINTER).await {
+        if !self.subscribed_to(id, RendererEventKind::Pointer) {
             return Ok(());
         }
         self.send_control(
@@ -922,7 +1305,7 @@ impl RendererManager {
         timestamp_us: u64,
         modifiers: u32,
     ) -> Result<()> {
-        if !self.subscribed_to(id, EVENT_KIND_POINTER).await {
+        if !self.subscribed_to(id, RendererEventKind::Pointer) {
             return Ok(());
         }
         self.send_control(
@@ -952,7 +1335,7 @@ impl RendererManager {
         timestamp_us: u64,
         modifiers: u32,
     ) -> Result<()> {
-        if !self.subscribed_to(id, EVENT_KIND_POINTER).await {
+        if !self.subscribed_to(id, RendererEventKind::Pointer) {
             return Ok(());
         }
         self.send_control(
@@ -973,19 +1356,12 @@ impl RendererManager {
     /// Forward an MPRIS media snapshot to a live renderer. Silently
     /// drops when the renderer did not subscribe to MPRIS events.
     pub async fn send_mpris(&self, id: &str, snapshot: MprisSnapshot) -> Result<()> {
-        let Some(handle) = self.get(id).await else {
+        if self.get(id).await.is_none() {
             log::debug!("renderer {id}: drop mpris snapshot; renderer not found");
             return Ok(());
-        };
-        if !handle
-            .events_subscribed
-            .iter()
-            .any(|e| e == EVENT_KIND_MPRIS)
-        {
-            log::debug!(
-                "renderer {id}: drop mpris snapshot; not subscribed to mpris events={:?}",
-                handle.events_subscribed
-            );
+        }
+        if !self.subscribed_to(id, RendererEventKind::Mpris) {
+            log::debug!("renderer {id}: drop mpris snapshot; not subscribed");
             return Ok(());
         }
         log::debug!(
@@ -1010,13 +1386,55 @@ impl RendererManager {
         .await
     }
 
-    /// Returns `true` when the renderer is alive and its manifest
-    /// declared `events = [..., kind, ...]`. Unknown id ⇒ `false`
-    async fn subscribed_to(&self, id: &str, kind: &str) -> bool {
-        match self.get(id).await {
-            Some(h) => h.events_subscribed.iter().any(|e| e == kind),
-            None => false,
+    pub fn subscription_snapshot(&self) -> RendererSubscriptionSnapshot {
+        self.subscriptions.snapshot()
+    }
+
+    pub fn subscribe_subscriptions(&self) -> watch::Receiver<RendererSubscriptionSnapshot> {
+        self.subscriptions.subscribe()
+    }
+
+    fn subscribed_to(&self, id: &str, kind: RendererEventKind) -> bool {
+        self.subscription_snapshot()
+            .revision_for(id, kind)
+            .is_some()
+    }
+
+    pub async fn send_audio_spectrum_latest(
+        &self,
+        id: &str,
+        subscription_revision: u64,
+        generation: u64,
+        sequence: u64,
+        captured_at_ns: u64,
+        left: Vec<f32>,
+        right: Vec<f32>,
+    ) -> Result<()> {
+        let handle = self
+            .get(id)
+            .await
+            .ok_or_else(|| Error::RendererNotFound(id.to_string()))?;
+        if self
+            .subscription_snapshot()
+            .revision_for(id, RendererEventKind::Audio)
+            != Some(subscription_revision)
+        {
+            return Ok(());
         }
+        handle
+            .writer
+            .replace_audio(
+                subscription_revision,
+                ControlMsg::AudioSpectrum {
+                    subscription_revision,
+                    generation,
+                    sequence,
+                    captured_at_ns,
+                    left,
+                    right,
+                },
+            )
+            .map_err(|error| Error::RendererControlFailed(format!("send audio: {error}")))
     }
 
     /// Enqueue a renderer for eviction. Synchronous (cheap channel
@@ -1035,6 +1453,7 @@ impl RendererManager {
             inner.renderers.remove(id)
         };
         let Some(handle) = handle else { return };
+        self.subscriptions.remove(id);
         log::warn!("renderer {id}: evicting");
 
         if let Some(router) = self.router.get().and_then(|w| w.upgrade()) {
@@ -1056,15 +1475,12 @@ impl RendererManager {
             inner.renderers.remove(id)
         }
         .ok_or_else(|| Error::RendererNotFound(id.to_string()))?;
+        self.subscriptions.remove(id);
 
-        // Send Shutdown over the bridge socket.
-        let sock = handle.sock.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            if let Ok(guard) = sock.lock() {
-                let _ = send_control(&*guard, &ControlMsg::Shutdown, &[]);
-            }
-        })
-        .await;
+        let writer = handle.writer.clone();
+        let _ =
+            tokio::task::spawn_blocking(move || writer.send_blocking(ControlMsg::Shutdown, None))
+                .await;
 
         let mut child_guard = handle.child.lock().await;
         if let Some(mut child) = child_guard.take() {
@@ -1090,7 +1506,9 @@ impl RendererManager {
 
 fn run_reader(
     id: RendererId,
-    sock: Arc<StdMutex<StdUnixStream>>,
+    read_stream: StdUnixStream,
+    writer: RendererWriter,
+    subscriptions: Arc<RendererSubscriptionRegistry>,
     events: broadcast::Sender<EventMsg>,
     bind_snapshot: Arc<StdMutex<Option<BindSnapshot>>>,
     sync_fds: Arc<StdMutex<std::collections::VecDeque<(u64, OwnedFd)>>>,
@@ -1108,25 +1526,6 @@ fn run_reader(
         tx: reap_tx,
     };
 
-    // Hold the stream by dup'ing the raw fd so the blocking recv is not
-    // contending with sends on the same mutex.
-    let read_stream = {
-        let guard = match sock.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                log::error!("renderer {id}: sock mutex poisoned, reader exiting");
-                return;
-            }
-        };
-        match guard.try_clone() {
-            Ok(s) => s,
-            Err(e) => {
-                log::error!("renderer {id}: try_clone failed: {e}");
-                return;
-            }
-        }
-    };
-
     loop {
         let received = match recv_event(&read_stream) {
             Ok(ok) => ok,
@@ -1136,6 +1535,24 @@ fn run_reader(
             }
         };
         let (msg, fds) = received;
+
+        if let EventMsg::SetEventSubscriptions {
+            revision,
+            ref kinds,
+        } = msg
+        {
+            let applied = subscriptions.prepare(&id, revision, kinds);
+            let ack = ControlMsg::EventSubscriptionsApplied {
+                revision: applied.revision,
+                status: applied.status,
+                kinds: applied.kinds,
+                reason: applied.reason,
+            };
+            if let Err(error) = writer.send_blocking(ack, applied.commit) {
+                log::warn!("renderer {id}: subscription acknowledgement failed: {error}");
+                return;
+            }
+        }
 
         // Cache each BindBuffers snapshot with its fds; later generations
         // replace earlier ones.
@@ -1374,17 +1791,6 @@ fn run_reader(
 // ---------------------------------------------------------------------------
 // Helpers
 
-/// True when a `send_control` / `recv_event` error indicates the peer
-/// is gone, so callers can evict the renderer.
-fn is_peer_gone(err: &CodecError) -> bool {
-    use nix::errno::Errno;
-    matches!(
-        err,
-        CodecError::PeerClosed
-            | CodecError::Nix(Errno::EPIPE | Errno::ECONNRESET | Errno::ENOTCONN)
-    )
-}
-
 /// RAII guard that enqueues the renderer for eviction when the reader
 /// thread drops on any exit path.
 struct ReaperOnDrop {
@@ -1531,6 +1937,13 @@ impl RendererHandle {
 }
 
 impl RendererHandle {
+    fn test_writer(id: &str, stream: StdUnixStream) -> RendererWriter {
+        let subscriptions = Arc::new(RendererSubscriptionRegistry::new());
+        subscriptions.register(id.to_string());
+        let (reap_tx, _reap_rx) = tokio::sync::mpsc::unbounded_channel();
+        RendererWriter::spawn(id.to_string(), stream, subscriptions, reap_tx)
+    }
+
     /// Construct a `RendererHandle` with no running child process.
     /// Used by routing-table unit tests.
     pub fn test_stub(id: &str, wp_type: &str) -> Arc<Self> {
@@ -1554,7 +1967,7 @@ impl RendererHandle {
             plugin_id: "test.plugin".into(),
             pid: None,
             gpu: DrmNode::UNKNOWN,
-            sock: Arc::new(StdMutex::new(a)),
+            writer: Self::test_writer(id, a),
             events: events_tx,
             bind_snapshot: Arc::new(StdMutex::new(None)),
             sync_fds: Arc::new(StdMutex::new(std::collections::VecDeque::new())),
@@ -1565,7 +1978,6 @@ impl RendererHandle {
             frame_record_tx: None,
             pending_configure: Arc::new(StdMutex::new(None)),
             child: Arc::new(TokioMutex::new(None)),
-            events_subscribed: Arc::new(Vec::new()),
             clear_rgba: Arc::new(StdMutex::new([0.0, 0.0, 0.0, 1.0])),
         });
         (handle, b)
@@ -1576,8 +1988,141 @@ impl RendererManager {
     /// Insert a pre-built handle into the manager's map without
     /// spawning a child process. Used by routing-table unit tests.
     pub async fn register_test_handle(&self, handle: Arc<RendererHandle>) {
+        self.subscriptions.register(handle.id.clone());
         let mut inner = self.inner.lock().await;
         inner.renderers.insert(handle.id.clone(), handle);
+    }
+}
+
+#[cfg(test)]
+mod subscription_tests {
+    use super::*;
+    use crate::ipc::uds::recv_control;
+
+    #[test]
+    fn subscription_registry_applies_complete_sets_atomically() {
+        let registry = RendererSubscriptionRegistry::new();
+        registry.register("renderer".to_string());
+        assert!(registry
+            .snapshot()
+            .subscribers(RendererEventKind::Audio)
+            .is_empty());
+
+        let applied = registry.prepare(
+            "renderer",
+            1,
+            &[
+                "audio".to_string(),
+                "pointer".to_string(),
+                "audio".to_string(),
+            ],
+        );
+        assert_eq!(applied.status, SUBSCRIPTION_STATUS_APPLIED);
+        assert_eq!(applied.kinds, vec!["pointer", "audio"]);
+        assert!(registry
+            .snapshot()
+            .subscribers(RendererEventKind::Audio)
+            .is_empty());
+        registry.commit("renderer".to_string(), applied.commit.unwrap());
+        assert_eq!(
+            registry
+                .snapshot()
+                .revision_for("renderer", RendererEventKind::Audio),
+            Some(1)
+        );
+
+        let replay = registry.prepare("renderer", 1, &["pointer".to_string(), "audio".to_string()]);
+        assert_eq!(replay.status, SUBSCRIPTION_STATUS_APPLIED);
+        assert!(replay.commit.is_none());
+
+        let conflict = registry.prepare("renderer", 1, &["mpris".to_string()]);
+        assert_eq!(conflict.status, SUBSCRIPTION_STATUS_REVISION_CONFLICT);
+        let next = registry.prepare("renderer", 2, &["audio".to_string()]);
+        registry.commit("renderer".to_string(), next.commit.unwrap());
+        let stale = registry.prepare("renderer", 1, &[]);
+        assert_eq!(stale.status, SUBSCRIPTION_STATUS_STALE_REVISION);
+        assert_eq!(
+            registry
+                .snapshot()
+                .revision_for("renderer", RendererEventKind::Audio),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn subscription_registry_rejects_unknown_and_oversized_sets() {
+        let registry = RendererSubscriptionRegistry::new();
+        registry.register("renderer".to_string());
+
+        let unknown = registry.prepare("renderer", 1, &["video".to_string()]);
+        assert_eq!(unknown.status, SUBSCRIPTION_STATUS_INVALID);
+        let oversized = registry.prepare("renderer", 1, &["x".repeat(MAX_EVENT_KIND_BYTES + 1)]);
+        assert_eq!(oversized.status, SUBSCRIPTION_STATUS_LIMIT_EXCEEDED);
+        let too_many = registry.prepare(
+            "renderer",
+            1,
+            &vec!["audio".to_string(); MAX_EVENT_SUBSCRIPTIONS + 1],
+        );
+        assert_eq!(too_many.status, SUBSCRIPTION_STATUS_LIMIT_EXCEEDED);
+        assert!(registry
+            .snapshot()
+            .subscribers(RendererEventKind::Audio)
+            .is_empty());
+    }
+
+    #[test]
+    fn writer_sends_subscription_ack_before_audio_for_its_revision() {
+        let (daemon, renderer) = StdUnixStream::pair().unwrap();
+        let subscriptions = Arc::new(RendererSubscriptionRegistry::new());
+        subscriptions.register("renderer".to_string());
+        let (reap_tx, _reap_rx) = tokio::sync::mpsc::unbounded_channel();
+        let writer = RendererWriter::spawn(
+            "renderer".to_string(),
+            daemon,
+            Arc::clone(&subscriptions),
+            reap_tx,
+        );
+        let applied = subscriptions.prepare("renderer", 1, &["audio".to_string()]);
+        writer
+            .send_blocking(
+                ControlMsg::EventSubscriptionsApplied {
+                    revision: 1,
+                    status: applied.status,
+                    kinds: applied.kinds,
+                    reason: applied.reason,
+                },
+                applied.commit,
+            )
+            .unwrap();
+        writer
+            .replace_audio(
+                1,
+                ControlMsg::AudioSpectrum {
+                    subscription_revision: 1,
+                    generation: 2,
+                    sequence: 3,
+                    captured_at_ns: 4,
+                    left: vec![0.0; 64],
+                    right: vec![0.0; 64],
+                },
+            )
+            .unwrap();
+
+        let (first, _) = recv_control(&renderer).unwrap();
+        let (second, _) = recv_control(&renderer).unwrap();
+        assert!(matches!(
+            first,
+            ControlMsg::EventSubscriptionsApplied { revision: 1, .. }
+        ));
+        assert!(matches!(
+            second,
+            ControlMsg::AudioSpectrum {
+                subscription_revision: 1,
+                generation: 2,
+                sequence: 3,
+                ..
+            }
+        ));
     }
 }
 
@@ -1603,7 +2148,7 @@ mod init_handshake_tests {
             spawn_version: None,
             extras: Vec::new(),
             settings: Default::default(),
-            events: Vec::new(),
+            legacy_events: None,
         }
     }
 
@@ -1619,7 +2164,7 @@ mod init_handshake_tests {
             spawn_version: Some(1),
             extras: vec!["assets".into(), "workshop_id".into()],
             settings: Default::default(),
-            events: Vec::new(),
+            legacy_events: None,
         }
     }
 
@@ -1644,7 +2189,7 @@ mod init_handshake_tests {
             spawn_version: Some(1),
             extras: Vec::new(),
             settings: ps,
-            events: Vec::new(),
+            legacy_events: None,
         }
     }
 
@@ -1774,7 +2319,7 @@ mod reuse_tests {
             spawn_version: Some(1),
             extras: Vec::new(),
             settings: ps,
-            events: Vec::new(),
+            legacy_events: None,
         }
     }
 
@@ -1791,7 +2336,7 @@ mod reuse_tests {
             plugin_id: "test.plugin".into(),
             pid: None,
             gpu: DrmNode::UNKNOWN,
-            sock: Arc::new(StdMutex::new(a)),
+            writer: RendererHandle::test_writer(id, a),
             events: events_tx,
             bind_snapshot: Arc::new(StdMutex::new(None)),
             sync_fds: Arc::new(StdMutex::new(std::collections::VecDeque::new())),
@@ -1802,7 +2347,6 @@ mod reuse_tests {
             frame_record_tx: None,
             pending_configure: Arc::new(StdMutex::new(None)),
             child: Arc::new(TokioMutex::new(None)),
-            events_subscribed: Arc::new(Vec::new()),
             clear_rgba: Arc::new(StdMutex::new([0.0, 0.0, 0.0, 1.0])),
         })
     }
@@ -1892,7 +2436,7 @@ mod reuse_tests {
             plugin_id: "test.plugin".into(),
             pid: None,
             gpu: DrmNode::UNKNOWN,
-            sock: Arc::new(StdMutex::new(daemon_side)),
+            writer: RendererHandle::test_writer("h1", daemon_side),
             events: events_tx,
             bind_snapshot: Arc::new(StdMutex::new(None)),
             sync_fds: Arc::new(StdMutex::new(std::collections::VecDeque::new())),
@@ -1903,7 +2447,6 @@ mod reuse_tests {
             frame_record_tx: None,
             pending_configure: Arc::new(StdMutex::new(None)),
             child: Arc::new(TokioMutex::new(None)),
-            events_subscribed: Arc::new(Vec::new()),
             clear_rgba: Arc::new(StdMutex::new([0.0, 0.0, 0.0, 1.0])),
         });
         mgr.register_test_handle(Arc::clone(&h)).await;
