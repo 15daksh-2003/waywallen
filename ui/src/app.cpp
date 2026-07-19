@@ -28,34 +28,27 @@ public:
     AppPrivate(App* self, quint16 port)
         : m_p(self),
           m_main_win(nullptr),
-          m_qml_engine(Box<QQmlApplicationEngine>::make()),
           m_backend(Box<Backend>::make(port)),
           m_display_mgr(Box<DisplayManager>::make()),
           m_renderer_mgr(Box<RendererManager>::make()),
           m_library_mgr(Box<LibraryManager>::make()),
           m_gpu_mgr(Box<GpuManager>::make()),
+          m_qml_engine(Box<QQmlApplicationEngine>::make()),
           m_port(port) {}
-    ~AppPrivate() {
-        m_qml_engine.reset();
-        m_gpu_mgr.reset();
-        m_library_mgr.reset();
-        m_renderer_mgr.reset();
-        m_display_mgr.reset();
-        m_backend.reset();
-        save_settings();
-    }
+    ~AppPrivate() { save_settings(); }
 
     void save_settings() {}
 
     App*                       m_p;
     QPointer<QQuickWindow>     m_main_win;
     QmlNetworkDiskCache        m_qml_network_cache;
-    Box<QQmlApplicationEngine> m_qml_engine;
+    // Reverse dependency order keeps the QML engine first and Backend last during destruction.
     Box<Backend>               m_backend;
     Box<DisplayManager>        m_display_mgr;
     Box<RendererManager>       m_renderer_mgr;
     Box<LibraryManager>        m_library_mgr;
     Box<GpuManager>            m_gpu_mgr;
+    Box<QQmlApplicationEngine> m_qml_engine;
     quint16                    m_port;
 };
 

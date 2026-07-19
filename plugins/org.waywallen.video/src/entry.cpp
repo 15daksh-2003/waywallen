@@ -965,11 +965,11 @@ int run(int argc, char** argv) {
         die("decode " + opt.video_path + ": " +
             to_std_string(std::move(decoder_res).unwrap_err().message));
     }
-    auto decoder = std::move(decoder_res).unwrap();
+    auto decoder = rstd::Some(std::move(decoder_res).unwrap());
     host.loop_value.store(opt.loop_file, std::memory_order_release);
     rstd_info("waywallen-video-renderer: hwdec={}, decoder kind={}",
               hwdec_label(hwaccel),
-              kind_label(decoder->kind()));
+              kind_label(decoder->get()->kind()));
 
     /* --- Audio: open the same file as an rstd byte stream and attach AvPlayer.
      *   Failure (missing audio stream, unsupported codec, no audio device)
@@ -1100,7 +1100,7 @@ int run(int argc, char** argv) {
         }
     }
 
-    rstd_info("waywallen-video-renderer: decoder mode = {}", kind_label(decoder->kind()));
+    rstd_info("waywallen-video-renderer: decoder mode = {}", kind_label(decoder->get()->kind()));
 
     /* --- Main loop ----------------------------------------------------- */
     uint32_t                 slot = 0;
@@ -1143,7 +1143,7 @@ int run(int argc, char** argv) {
         }
 
         if (host.loop_pending.exchange(false, std::memory_order_acq_rel)) {
-            decoder->set_loop(host.loop_value.load(std::memory_order_acquire));
+            decoder->get()->set_loop(host.loop_value.load(std::memory_order_acquire));
             // Loop toggled — let the presenter re-baseline on next frame.
             presenter.reset();
         }
@@ -1191,7 +1191,7 @@ int run(int argc, char** argv) {
                     rstd_info("waywallen-video-renderer: hwdec change {} → {}, reopening decoder",
                               hwdec_label(hwaccel),
                               hwdec_label(new_h));
-                    decoder.reset();
+                    (void)decoder.take();
                     wavsen::video::OpenOpts new_opts {
                         new_h, rstd::string::String::make(opt.render_node.c_str())
                     };
@@ -1208,14 +1208,14 @@ int run(int argc, char** argv) {
                         signal_shutdown(host);
                         break;
                     }
-                    decoder = std::move(re_res).unwrap();
+                    decoder = rstd::Some(std::move(re_res).unwrap());
                     hwaccel = new_h;
                     presenter.reset();
                     // Video reopened at PTS 0 — keep audio aligned.
                     if (av_player) av_player->seek_to_start();
                     prev_pts = -1.0;
                     rstd_info("waywallen-video-renderer: reopened, kind={}",
-                              kind_label(decoder->kind()));
+                              kind_label(decoder->get()->kind()));
                 }
             }
         }
@@ -1235,13 +1235,17 @@ int run(int argc, char** argv) {
         }
 
         double                                                       frame_pts = -1.0;
-        const auto                                                   fkind     = decoder->kind();
+        const auto                                                   fkind = decoder->get()->kind();
         rstd::Result<wavsen::video::NextFrame, wavsen::video::Error> fs_res =
             rstd::Ok(wavsen::video::NextFrame::Ok);
         switch (fkind) {
-        case wavsen::video::FrameKind::VulkanShared: fs_res = decoder->next_vk_frame(vkv); break;
-        case wavsen::video::FrameKind::VaapiDrm: fs_res = decoder->next_drm_frame(drmv); break;
-        case wavsen::video::FrameKind::Sw: fs_res = decoder->next_frame(frame); break;
+        case wavsen::video::FrameKind::VulkanShared:
+            fs_res = decoder->get()->next_vk_frame(vkv);
+            break;
+        case wavsen::video::FrameKind::VaapiDrm:
+            fs_res = decoder->get()->next_drm_frame(drmv);
+            break;
+        case wavsen::video::FrameKind::Sw: fs_res = decoder->get()->next_frame(frame); break;
         }
         if (fs_res.is_err()) {
             rstd_error("waywallen-video-renderer: decode error (hwdec={}): {}",
