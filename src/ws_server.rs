@@ -907,6 +907,21 @@ fn global_event_to_pb(e: &GlobalEvent, state: &Arc<AppState>) -> Option<pb::Even
                 },
             )),
         }),
+        GlobalEvent::SteamLoginProgress {
+            state: login_state,
+            qr_image,
+            account_name,
+            error,
+        } => Some(pb::Event {
+            payload: Some(pb::event::Payload::SteamLoginProgress(
+                pb::SteamLoginProgress {
+                    state: *login_state,
+                    qr_image: qr_image.clone(),
+                    account_name: account_name.clone(),
+                    error: error.clone(),
+                },
+            )),
+        }),
         GlobalEvent::SettingsChanged => {
             let snap = state.settings.snapshot();
             Some(pb::Event {
@@ -957,31 +972,7 @@ fn global_event_to_pb(e: &GlobalEvent, state: &Arc<AppState>) -> Option<pb::Even
 // ---------------------------------------------------------------------------
 // Dispatch
 
-fn sanitize_path_segment(input: &str) -> String {
-    let s: String = input
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if s.is_empty() {
-        "default".to_string()
-    } else {
-        s
-    }
-}
-
-fn remote_content_dir(source_id: &str) -> PathBuf {
-    let base = crate::settings::default_db_path()
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("remote").join(sanitize_path_segment(source_id))
-}
+use crate::settings::{remote_content_dir, sanitize_path_segment};
 
 fn safe_remote_filename(filename: &str, id: &str) -> String {
     Path::new(filename)
@@ -1011,6 +1002,51 @@ fn publish_remote_download_progress(
         state: download_state as i32,
         error: error.into(),
     });
+}
+
+fn publish_steam_login(
+    state: &Arc<AppState>,
+    login_state: pb::SteamLoginState,
+    qr_image: impl Into<String>,
+    account_name: impl Into<String>,
+    error: impl Into<String>,
+) {
+    state.events.publish(GlobalEvent::SteamLoginProgress {
+        state: login_state as i32,
+        qr_image: qr_image.into(),
+        account_name: account_name.into(),
+        error: error.into(),
+    });
+}
+
+/// Compute the current value of a plugin-declared status row. Plugin-specific;
+/// isolated here so the wire/UI stay generic.
+fn compute_source_status(_state: &Arc<AppState>, source_id: &str, status_id: &str) -> String {
+    match (source_id, status_id) {
+        ("wallpaper_engine", "steam_account") => match crate::steam_login::account_name() {
+            Some(user) if !user.trim().is_empty() => format!("Signed in as {user}"),
+            Some(_) => "Signed in".to_string(),
+            None => "Not signed in".to_string(),
+        },
+        _ => String::new(),
+    }
+}
+
+fn publish_steam_login_update(state: &Arc<AppState>, update: crate::steam_login::LoginUpdate) {
+    use crate::steam_login::LoginUpdate;
+    use pb::SteamLoginState as S;
+    match update {
+        LoginUpdate::AwaitingScan(qr_image) => {
+            publish_steam_login(state, S::AwaitingScan, qr_image, "", "")
+        }
+        LoginUpdate::Success(account) => {
+            publish_steam_login(state, S::Success, "", account, "");
+            // Refresh the "signed in" status/actions shown in the config page.
+            state.events.publish(GlobalEvent::SettingsChanged);
+        }
+        LoginUpdate::Failed(error) => publish_steam_login(state, S::Failed, "", "", error),
+        LoginUpdate::Cancelled => publish_steam_login(state, S::Cancelled, "", "", ""),
+    }
 }
 
 async fn default_remote_source_id(state: &Arc<AppState>) -> Result<String> {
@@ -1175,15 +1211,9 @@ async fn run_remote_download(state: Arc<AppState>, source_id: String, id: String
         let sm = state.source_manager.lock().await;
         sm.call_download(&source_id, &id).await?
     };
-    if info.url.trim().is_empty() {
-        return Err(anyhow!("download url is empty"));
-    }
 
     let dir = remote_content_dir(&source_id);
     tokio::fs::create_dir_all(&dir).await?;
-
-    let filename = safe_remote_filename(&info.filename, &id);
-    let target = dir.join(filename);
     publish_remote_download_progress(
         &state,
         &source_id,
@@ -1191,11 +1221,109 @@ async fn run_remote_download(state: Arc<AppState>, source_id: String, id: String
         pb::RemoteDownloadState::Downloading,
         "",
     );
-    download_remote_file(&info.url, &target).await?;
-    write_remote_sidecar(&target, &info).await?;
-    upsert_remote_download(&state, &source_id, &dir, &target, &info).await?;
+
+    match info.provider.as_deref().unwrap_or("http") {
+        "steam_workshop" => {
+            let item_dir =
+                crate::fetcher::steam_workshop::fetch(&state, &source_id, &id, &dir).await?;
+            let resolved = {
+                let sm = state.source_manager.lock().await;
+                sm.call_resolve(&source_id, &id, &item_dir.to_string_lossy())
+                    .await?
+            };
+            upsert_remote_resolved(&state, &source_id, &dir, &item_dir, &resolved).await?;
+            // Scene/web items render against the shared WE assets tree. Fetch it
+            // once so machines without a Steam WE install can still render.
+            // Best-effort: the item downloaded fine, and a Steam install may
+            // already supply the assets the plugin auto-detects.
+            if matches!(resolved.wp_type.as_str(), "scene" | "web") {
+                let assets = crate::settings::we_assets_dir();
+                if !assets.join("shaders").is_dir() {
+                    if let Err(e) =
+                        crate::fetcher::steam_workshop::ensure_assets(&state, &assets).await
+                    {
+                        log::warn!("could not fetch Wallpaper Engine assets: {e}");
+                    }
+                }
+            }
+        }
+        _ => {
+            if info.url.trim().is_empty() {
+                return Err(anyhow!("download url is empty"));
+            }
+            let filename = safe_remote_filename(&info.filename, &id);
+            let target = dir.join(filename);
+            download_remote_file(&info.url, &target).await?;
+            write_remote_sidecar(&target, &info).await?;
+            upsert_remote_download(&state, &source_id, &dir, &target, &info).await?;
+        }
+    }
+
     control::notify_wallpaper_db_changed(&state, 1).await;
     publish_remote_download_progress(&state, &source_id, &id, pb::RemoteDownloadState::Done, "");
+    Ok(())
+}
+
+/// Upsert a directory item resolved by `discover.resolve`. `item_dir` is the
+/// fetched directory; `resolved.resource`/`preview` are relative to it, and the
+/// DB `path` is relative to the remote library dir (e.g. `<id>/scene.pkg`).
+async fn upsert_remote_resolved(
+    state: &Arc<AppState>,
+    source_id: &str,
+    dir: &Path,
+    item_dir: &Path,
+    resolved: &crate::plugin::source_manager::DiscoverResolve,
+) -> Result<()> {
+    if resolved.wp_type.trim().is_empty() {
+        return Err(anyhow!("resolved wp_type is empty"));
+    }
+    let lib = ensure_remote_library(state, source_id, dir).await?;
+    let rel_of = |p: &Path| -> Option<String> {
+        p.strip_prefix(dir)
+            .ok()
+            .and_then(|r| r.to_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    let resource = item_dir.join(&resolved.resource);
+    let rel = rel_of(&resource)
+        .ok_or_else(|| anyhow!("resolved resource is not under remote library"))?;
+    let preview_abs = resolved.preview.as_ref().map(|p| item_dir.join(p));
+    let preview_rel = preview_abs.as_deref().and_then(rel_of);
+    let title = if resolved.name.trim().is_empty() {
+        resource
+            .file_name()
+            .and_then(|v| v.to_str())
+            .unwrap_or("Workshop wallpaper")
+    } else {
+        resolved.name.as_str()
+    };
+    let item = repo::upsert_item(
+        &state.db,
+        repo::ItemUpsertArgs {
+            plugin_id: lib.plugin_id,
+            library_id: lib.id,
+            path: &rel,
+            ty: &resolved.wp_type,
+            display_name: title,
+            preview_path: preview_rel.as_deref(),
+            description: (!resolved.description.trim().is_empty())
+                .then_some(resolved.description.as_str()),
+            external_id: (!resolved.external_id.trim().is_empty())
+                .then_some(resolved.external_id.as_str()),
+            size: resolved.size,
+            width: None,
+            height: None,
+            content_rating: resolved
+                .content_rating
+                .as_deref()
+                .filter(|v| !v.trim().is_empty()),
+        },
+    )
+    .await?;
+    let tags = repo::upsert_tags(&state.db, &resolved.tags).await?;
+    let tag_ids: Vec<i64> = tags.into_iter().map(|tag| tag.id).collect();
+    repo::replace_item_tags(&state.db, item.id, &tag_ids).await?;
     Ok(())
 }
 
@@ -1888,6 +2016,12 @@ async fn dispatch_inner(
                     version: p.version,
                     library_label: p.library_label,
                     library_hint: p.library_hint,
+                    plugin_id: p.plugin_id,
+                    settings: p
+                        .settings
+                        .iter()
+                        .map(crate::control_proto::source_setting_to_proto)
+                        .collect(),
                 })
                 .collect();
             Res::SourceList(pb::SourceListResponse { sources })
@@ -2033,22 +2167,55 @@ async fn dispatch_inner(
             Res::RemoteAvailability(pb::RemoteAvailabilityResponse {
                 sources: sources
                     .into_iter()
-                    .map(|s| pb::RemoteSourceInfo {
-                        id: s.plugin_id.clone(),
-                        name: s.name,
-                        supports_search: s.supports_search,
-                        sorts: s
-                            .sorts
-                            .into_iter()
-                            .map(|sort| pb::RemoteSortOption {
-                                key: sort.key,
-                                label: sort.label,
+                    .map(|s| {
+                        let settings = s
+                            .settings
+                            .iter()
+                            .map(crate::control_proto::source_setting_to_proto)
+                            .collect();
+                        let signed_in = crate::steam_login::is_signed_in();
+                        let actions = s
+                            .actions
+                            .iter()
+                            .filter(|a| match (s.plugin_id.as_str(), a.id.as_str()) {
+                                ("wallpaper_engine", "steam_sign_in") => !signed_in,
+                                ("wallpaper_engine", "steam_sign_out") => signed_in,
+                                _ => true,
                             })
-                            .collect(),
-                        tags: s.tags,
-                        content_dir: remote_content_dir(&s.plugin_id)
+                            .map(crate::control_proto::source_action_to_proto)
+                            .collect();
+                        let status = s
+                            .status
+                            .iter()
+                            .map(|st| {
+                                let mut row = crate::control_proto::source_status_to_proto(st);
+                                row.value = compute_source_status(state, &s.plugin_id, &st.id);
+                                row
+                            })
+                            .collect();
+                        let content_dir = remote_content_dir(&s.plugin_id)
                             .to_string_lossy()
-                            .to_string(),
+                            .to_string();
+                        pb::RemoteSourceInfo {
+                            id: s.plugin_id,
+                            name: s.name,
+                            supports_search: s.supports_search,
+                            sorts: s
+                                .sorts
+                                .into_iter()
+                                .map(|sort| pb::RemoteSortOption {
+                                    key: sort.key,
+                                    label: sort.label,
+                                })
+                                .collect(),
+                            tags: s.tags,
+                            content_dir,
+                            owner_plugin_id: s.owner_plugin_id,
+                            settings,
+                            display_name: s.display_name,
+                            actions,
+                            status,
+                        }
                     })
                     .collect(),
                 default_source_id,
@@ -2276,6 +2443,75 @@ async fn dispatch_inner(
                 .set_enabled(&state.settings, r.enabled)
                 .await?,
         }),
+
+        Req::SteamLoginStart(_) => {
+            let task_state = state.clone();
+            state.tasks.spawn_async_unique(
+                tasks::TaskKind::Generic,
+                "steam/login".to_string(),
+                "steam/login".to_string(),
+                async move {
+                    publish_steam_login(&task_state, pb::SteamLoginState::Starting, "", "", "");
+                    let ev_state = task_state.clone();
+                    crate::steam_login::start(&task_state, |u| {
+                        publish_steam_login_update(&ev_state, u)
+                    })
+                    .await;
+                    Ok(())
+                },
+            );
+            Res::SteamLoginStart(pb::SteamLoginStartResponse {
+                accepted: true,
+                error: String::new(),
+            })
+        }
+
+        Req::SteamLoginCancel(_) => {
+            crate::steam_login::cancel();
+            Res::SteamLoginCancel(pb::SteamLoginCancelResponse { cancelled: true })
+        }
+
+        Req::PluginAction(r) => match (r.plugin_id.as_str(), r.action_id.as_str()) {
+            ("wallpaper_engine", "steam_sign_in") => {
+                let task_state = state.clone();
+                state.tasks.spawn_async_unique(
+                    tasks::TaskKind::Generic,
+                    "steam/login".to_string(),
+                    "steam/login".to_string(),
+                    async move {
+                        publish_steam_login(&task_state, pb::SteamLoginState::Starting, "", "", "");
+                        let ev_state = task_state.clone();
+                        crate::steam_login::start(&task_state, |u| {
+                            publish_steam_login_update(&ev_state, u)
+                        })
+                        .await;
+                        Ok(())
+                    },
+                );
+                Res::PluginAction(pb::PluginActionResponse {
+                    accepted: true,
+                    error: String::new(),
+                })
+            }
+            ("wallpaper_engine", "steam_sign_out") => match crate::steam_login::sign_out().await {
+                Ok(()) => {
+                    // Nudge the UI to re-read the "signed in" status.
+                    state.events.publish(GlobalEvent::SettingsChanged);
+                    Res::PluginAction(pb::PluginActionResponse {
+                        accepted: true,
+                        error: String::new(),
+                    })
+                }
+                Err(e) => Res::PluginAction(pb::PluginActionResponse {
+                    accepted: false,
+                    error: e.to_string(),
+                }),
+            },
+            _ => Res::PluginAction(pb::PluginActionResponse {
+                accepted: false,
+                error: format!("unknown action {}.{}", r.plugin_id, r.action_id),
+            }),
+        },
 
         Req::SettingsGet(_) => {
             let snap = state.settings.snapshot();

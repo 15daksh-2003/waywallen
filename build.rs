@@ -35,6 +35,7 @@ fn main() {
     let proto_paths = [
         manifest_dir.join("proto/control.proto"),
         manifest_dir.join("proto/filter.proto"),
+        manifest_dir.join("proto/steam.proto"),
     ];
     for proto_path in &proto_paths {
         println!("cargo:rerun-if-changed={}", proto_path.display());

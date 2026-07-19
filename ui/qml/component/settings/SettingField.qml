@@ -42,6 +42,12 @@ ColumnLayout {
     }
 
     readonly property string description: schema.description_key || ""
+    // Bare http(s) URLs in the description become clickable links
+    readonly property string descriptionHtml: {
+        const c = String(MD.Token.color.primary);
+        return (root.description || "").replace(/(https?:\/\/[^\s]+)/g,
+            '<a href="$1"><font color="' + c + '">$1</font></a>');
+    }
     readonly property bool needsRestart: schema.identity === true
 
     readonly property bool isRenderNode: schema.key === "render_node"
@@ -145,15 +151,6 @@ ColumnLayout {
         }
     }
 
-    MD.Text {
-        Layout.fillWidth: true
-        visible: root.description.length > 0
-        text: root.description
-        typescale: MD.Token.typescale.body_small
-        color: MD.Token.color.on_surface_variant
-        wrapMode: Text.WordWrap
-    }
-
     Loader {
         id: control
         Layout.fillWidth: true
@@ -180,6 +177,17 @@ ColumnLayout {
                 return stringField;
             }
         }
+    }
+
+    MD.Text {
+        Layout.fillWidth: true
+        visible: root.description.length > 0
+        text: root.descriptionHtml
+        textFormat: Text.StyledText
+        onLinkActivated: link => MD.Util.openUrlExternally(link)
+        typescale: MD.Token.typescale.body_small
+        color: MD.Token.color.on_surface_variant
+        wrapMode: Text.WordWrap
     }
 
     Component {
@@ -275,6 +283,9 @@ ColumnLayout {
             id: stf
             text: root.value
             placeholderText: root.label
+            // Commit on every edit (incl. paste) so Apply enables without
+            // needing an explicit Enter/focus-out.
+            onTextEdited: root._emit(text)
             onEditingFinished: root._emit(text)
             Connections {
                 target: root

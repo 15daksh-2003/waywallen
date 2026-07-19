@@ -58,6 +58,54 @@ void RemoteAvailabilityQuery::reload() {
                 m[u"sorts"_s]          = sorts;
                 m[u"tags"_s]           = tags;
                 m[u"contentDir"_s]     = src.contentDir();
+                m[u"ownerPluginId"_s]  = src.ownerPluginId();
+                m[u"displayName"_s]    = src.displayName();
+
+                QVariantList settings;
+                for (const auto& ss : src.settings()) {
+                    QVariantMap sm;
+                    sm[u"key"_s]             = ss.key();
+                    sm[u"type"_s]            = static_cast<int>(ss.type());
+                    sm[u"default_value"_s]   = ss.defaultValue();
+                    sm[u"identity"_s]        = ss.identity();
+                    sm[u"label_key"_s]       = ss.labelKey();
+                    sm[u"description_key"_s] = ss.descriptionKey();
+                    sm[u"min"_s]             = ss.min();
+                    sm[u"max"_s]             = ss.max();
+                    sm[u"step"_s]            = ss.step();
+                    QStringList choices;
+                    for (const auto& c : ss.choices()) {
+                        choices.append(c);
+                    }
+                    sm[u"choices"_s] = choices;
+                    sm[u"group"_s]   = ss.group();
+                    sm[u"order"_s]   = static_cast<int>(ss.order());
+                    settings.append(sm);
+                }
+                m[u"settings"_s] = settings;
+
+                QVariantList actions;
+                for (const auto& a : src.actions()) {
+                    QVariantMap am;
+                    am[u"id"_s]    = a.id_proto();
+                    am[u"label"_s] = a.label();
+                    am[u"group"_s] = a.group();
+                    am[u"order"_s] = static_cast<int>(a.order());
+                    actions.append(am);
+                }
+                m[u"actions"_s] = actions;
+
+                QVariantList statusRows;
+                for (const auto& st : src.status()) {
+                    QVariantMap sm;
+                    sm[u"id"_s]    = st.id_proto();
+                    sm[u"label"_s] = st.label();
+                    sm[u"group"_s] = st.group();
+                    sm[u"order"_s] = static_cast<int>(st.order());
+                    sm[u"value"_s] = st.value();
+                    statusRows.append(sm);
+                }
+                m[u"status"_s] = statusRows;
                 sources.push_back(m);
             }
             self->m_sources           = std::move(sources);

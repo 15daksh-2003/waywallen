@@ -14,3 +14,5 @@ export import :query.settings;
 export import :query.autostart;
 export import :query.remote;
 export import :query.playlist;
+export import :query.steam_login;
+export import :query.plugin_action;

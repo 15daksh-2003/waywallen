@@ -128,6 +128,16 @@ pub enum Error {
     #[error("source_plugin '{plugin}'.discover() failed: {message}")]
     DiscoverFailed { plugin: String, message: String },
 
+    /// Source plugin's `discover.resolve` Lua callback raised (e.g. an
+    /// unclassifiable downloaded directory).
+    #[error("source_plugin '{plugin}'.resolve() failed: {message}")]
+    ResolveFailed { plugin: String, message: String },
+
+    /// A download provider (e.g. DepotDownloader) precondition failed or the
+    /// fetch itself failed.
+    #[error("workshop download failed: {0}")]
+    WorkshopFetch(String),
+
     /// Caller asked an apply path to handle an unsupported `wp_type`.
     /// For example, the portal fallback only accepts images.
     #[error("wallpaper type '{0}' not supported by this apply path")]
@@ -217,6 +227,8 @@ impl Error {
             // proto (and any dedicated codes) is owned by the transport PR.
             Self::DiscoverUnsupported(_) => E::FailedPrecondition,
             Self::DiscoverFailed { .. } => E::Internal,
+            Self::ResolveFailed { .. } => E::Internal,
+            Self::WorkshopFetch(_) => E::FailedPrecondition,
             Self::WallpaperTypeNotSupported(_) => E::WallpaperTypeNotSupported,
             Self::PortalCallFailed(_) => E::PortalCallFailed,
             Self::SettingsValidationFailed(_) => E::SettingsValidationFailed,

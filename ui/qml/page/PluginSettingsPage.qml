@@ -11,10 +11,47 @@ import waywallen.ui as W
 // open-time snapshot; edits stay pending until Apply.
 MD.Page {
     id: root
-    title: "Configure " + pluginName
+    title: "Configure " + (displayName.length > 0 ? displayName : pluginName)
     scrolling: !settingsList.atYBeginning
 
     property string pluginName: ""
+    // Human-readable name for the title; falls back to pluginName (the config key).
+    property string displayName: ""
+    // Plugin-declared read-only status rows and action buttons.
+    property var statusList: []
+    property var actionList: []
+
+    W.PluginActionQuery {
+        id: actionQuery
+    }
+    function runAction(actionId) {
+        actionQuery.pluginId = root.pluginName;
+        actionQuery.actionId = actionId;
+        actionQuery.reload();
+    }
+
+    // Live-refresh the status rows and action buttons after a sign-in/out (or any
+    // settings change) so the page updates in place instead of needing a reopen.
+    W.RemoteAvailabilityQuery {
+        id: availabilityQuery
+        onSourcesChanged: {
+            const list = sources || [];
+            for (let i = 0; i < list.length; ++i) {
+                if (list[i].id === root.pluginName) {
+                    root.statusList = list[i].status || [];
+                    root.actionList = list[i].actions || [];
+                    return;
+                }
+            }
+        }
+    }
+
+    Connections {
+        target: W.Notify
+        function onSettingsChanged() {
+            availabilityQuery.reload();
+        }
+    }
     property var schemaList: []
     property var currentValues: ({})
     // SettingsSet is full-replace, so we forward the rest of the plugin
@@ -183,6 +220,72 @@ MD.Page {
             topPadding: 16
             bottomPadding: 6
             leftPadding: 4
+        }
+
+        // Plugin-declared status rows + action buttons (e.g. Steam sign-in).
+        footer: ColumnLayout {
+            width: settingsList.contentWidth
+            spacing: 6
+
+            readonly property string sectionLabel: {
+                if (root.statusList.length > 0 && root.statusList[0].group)
+                    return root.statusList[0].group;
+                if (root.actionList.length > 0 && root.actionList[0].group)
+                    return root.actionList[0].group;
+                return "";
+            }
+
+            MD.Text {
+                Layout.fillWidth: true
+                visible: parent.sectionLabel.length > 0
+                text: parent.sectionLabel
+                typescale: MD.Token.typescale.title_small
+                color: MD.Token.color.on_surface_variant
+                topPadding: 16
+                bottomPadding: 6
+                leftPadding: 4
+            }
+
+            Repeater {
+                model: root.statusList
+                delegate: RowLayout {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 4
+                    Layout.rightMargin: 4
+                    MD.Text {
+                        text: modelData.label
+                        color: MD.Token.color.on_surface_variant
+                        typescale: MD.Token.typescale.body_medium
+                    }
+                    Item {
+                        Layout.fillWidth: true
+                    }
+                    MD.Text {
+                        text: modelData.value
+                        color: MD.Token.color.on_surface
+                        typescale: MD.Token.typescale.body_medium
+                    }
+                }
+            }
+
+            Flow {
+                Layout.fillWidth: true
+                Layout.topMargin: 8
+                Layout.leftMargin: 4
+                spacing: 8
+                visible: root.actionList.length > 0
+
+                Repeater {
+                    model: root.actionList
+                    delegate: MD.Button {
+                        required property var modelData
+                        text: modelData.label
+                        mdState.type: MD.Enum.BtFilledTonal
+                        onClicked: root.runAction(modelData.id)
+                    }
+                }
+            }
         }
 
         delegate: Rectangle {

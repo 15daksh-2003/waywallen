@@ -97,6 +97,10 @@ Notify::Notify(QObject* parent): QObject(parent) {
                 const auto& p = evt.remoteDownloadProgress();
                 Q_EMIT remoteDownloadProgress(
                     p.sourceId(), p.id_proto(), static_cast<int>(p.state()), p.error());
+            } else if (evt.hasSteamLoginProgress()) {
+                const auto& p = evt.steamLoginProgress();
+                Q_EMIT steamLoginProgress(
+                    static_cast<int>(p.state()), p.qrImage(), p.accountName(), p.error());
             } else if (evt.hasPlaylistChanged()) {
                 Q_EMIT playlistChanged();
             } else if (evt.hasPluginChanged()) {

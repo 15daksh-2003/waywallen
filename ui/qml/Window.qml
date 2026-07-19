@@ -109,6 +109,7 @@ MD.ApplicationWindow {
     }
 
     W.DaemonNotRunDialog {}
+    W.SteamLoginDialog {}
 
     ColumnLayout {
         anchors.fill: parent

@@ -68,6 +68,49 @@ pub struct SourcePluginInfo {
     /// Longer helper text for choosing a library path.
     /// May contain newlines or inline-code Markdown markers.
     pub library_hint: String,
+    /// User-configurable settings the plugin declares via `info().settings`,
+    /// rendered by the UI's plugin-settings page and stored in the plugin's
+    /// `[plugin."<id>"]` config table.
+    pub settings: Vec<SourceSetting>,
+}
+
+/// One entry from a source plugin's `info().settings` sequence. Shapes the
+/// same UI widgets as renderer `[settings]`, but declared in Lua so a source
+/// plugin keeps all of its surface in one place.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SourceSetting {
+    pub key: String,
+    /// "string" | "bool" | "u32" | "i32" | "f32".
+    pub ty: String,
+    pub default: String,
+    /// Human-readable label and help text (shown verbatim; no i18n yet).
+    pub label: String,
+    pub description: String,
+    pub group: String,
+    pub order: i32,
+    pub choices: Vec<String>,
+}
+
+/// A button a source plugin declares via `info().actions`. Triggering it sends
+/// a `PluginAction{plugin_id, action_id}` the daemon routes to plugin-specific
+/// handling (e.g. the workshop's Steam sign-in/out).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SourceAction {
+    pub id: String,
+    pub label: String,
+    pub group: String,
+    pub order: i32,
+}
+
+/// A read-only status row a source plugin declares via `info().status`. The
+/// `value` is computed by the daemon at query time (e.g. "Signed in as X").
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SourceStatus {
+    pub id: String,
+    pub label: String,
+    pub group: String,
+    pub order: i32,
+    pub value: String,
 }
 
 /// One sort option a discover-capable plugin advertises via
@@ -86,9 +129,21 @@ pub struct DiscoverSourceInfo {
     /// `DiscoverSearchRequest.plugin_id`.
     pub plugin_id: String,
     pub name: String,
+    /// Human-readable display name (falls back to `name`).
+    pub display_name: String,
     pub supports_search: bool,
     pub sorts: Vec<DiscoverSort>,
     pub tags: Vec<String>,
+    /// Domain id of the owning installable plugin (e.g.
+    /// `org.waywallen.open-wallpaper-engine`): the key of its `[plugin."<id>"]`
+    /// config table, so the UI can address settings for this source.
+    pub owner_plugin_id: String,
+    /// User-configurable settings the plugin declares via `info().settings`.
+    pub settings: Vec<SourceSetting>,
+    /// Action buttons the plugin declares via `info().actions`.
+    pub actions: Vec<SourceAction>,
+    /// Status rows the plugin declares via `info().status` (values daemon-filled).
+    pub status: Vec<SourceStatus>,
 }
 
 /// One remote item returned by a plugin's `discover.search(ctx, params)`.
@@ -133,6 +188,24 @@ pub struct DiscoverDownload {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub content_rating: Option<String>,
+    /// Download provider. Absent / `"http"` fetches `url` as a single file;
+    /// `"steam_workshop"` routes to the DepotDownloader directory fetcher.
+    pub provider: Option<String>,
+}
+
+/// Directory item resolved by `discover.resolve` after a provider fetch.
+/// Paths are relative to the fetched directory.
+#[derive(Debug, Clone, Default)]
+pub struct DiscoverResolve {
+    pub name: String,
+    pub wp_type: String,
+    pub resource: String,
+    pub preview: Option<String>,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub external_id: String,
+    pub size: Option<i64>,
+    pub content_rating: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -148,8 +221,12 @@ struct DiscoverCapability {
     supports_search: bool,
     supports_details: bool,
     supports_download: bool,
+    supports_resolve: bool,
     sorts: Vec<DiscoverSort>,
     tags: Vec<String>,
+    /// The plugin exposes `discover.tags(ctx)`; the daemon calls it to refresh
+    /// `tags` from a live source instead of the static declaration.
+    dynamic_tags: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -169,9 +246,15 @@ struct PluginCapabilities {
 #[derive(Debug, Clone)]
 struct LoadedPluginInfo {
     name: String,
+    /// Human-readable display name from `info().display_name`; falls back to
+    /// `name` when unset.
+    display_name: String,
     plugin_id: String,
     version: String,
     capabilities: PluginCapabilities,
+    settings: Vec<SourceSetting>,
+    actions: Vec<SourceAction>,
+    status: Vec<SourceStatus>,
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +275,8 @@ pub struct SourceManager {
     /// DB used by the `ctx.library_meta_*` async-Lua-function bridge.
     /// `None` makes the bridge no-op, which is useful for DB-less tests.
     db: Option<DatabaseConnection>,
+    /// Settings store backing `ctx.plugin_config(key)`. `None` in DB-less tests.
+    settings: Option<Arc<crate::settings::SettingsStore>>,
 }
 
 // mlua with the `send` feature makes Lua: Send.
@@ -217,6 +302,7 @@ impl SourceManager {
             by_type: HashMap::new(),
             probe,
             db: None,
+            settings: None,
         })
     }
 
@@ -224,6 +310,12 @@ impl SourceManager {
     /// can read and write per-library metadata.
     pub fn attach_db(&mut self, db: DatabaseConnection) {
         self.db = Some(db);
+    }
+
+    /// Hand the settings store to the source manager so `ctx.plugin_config(key)`
+    /// can read the plugin's `[plugin."<id>"]` config table.
+    pub fn attach_settings(&mut self, settings: Arc<crate::settings::SettingsStore>) {
+        self.settings = Some(settings);
     }
 
     pub fn clear_plugins(&mut self) {
@@ -505,11 +597,20 @@ impl SourceManager {
                     "info().capabilities.discover",
                     false,
                 )?;
+                let supports_resolve = Self::optional_bool(
+                    &discover_tbl,
+                    "resolve",
+                    "info().capabilities.discover",
+                    false,
+                )?;
                 if supports_details {
                     Self::require_table_function(&discover_api, "details", "module.discover")?;
                 }
                 if supports_download {
                     Self::require_table_function(&discover_api, "download", "module.discover")?;
+                }
+                if supports_resolve {
+                    Self::require_table_function(&discover_api, "resolve", "module.discover")?;
                 }
                 let sorts = Self::optional_discover_sorts(&discover_tbl)?;
                 let tags = Self::optional_string_sequence(
@@ -517,12 +618,17 @@ impl SourceManager {
                     "tags",
                     "info().capabilities.discover",
                 )?;
+                // An optional `discover.tags(ctx)` function supplies the filter
+                // taxonomy at runtime; the static `tags` above is the fallback.
+                let dynamic_tags = discover_api.get::<LuaFunction>("tags").is_ok();
                 Some(DiscoverCapability {
                     supports_search: true,
                     supports_details,
                     supports_download,
+                    supports_resolve,
                     sorts,
                     tags,
+                    dynamic_tags,
                 })
             }
             None => None,
@@ -553,8 +659,21 @@ impl SourceManager {
             }
         }
 
+        let settings = Self::parse_source_settings(&info_table)?;
+        let actions = Self::parse_source_actions(&info_table)?;
+        let status = Self::parse_source_status(&info_table)?;
+        let display_name = {
+            let dn = Self::optional_string(&info_table, "display_name", "info()")?;
+            if dn.is_empty() {
+                name.clone()
+            } else {
+                dn
+            }
+        };
+
         Ok(LoadedPluginInfo {
             name,
+            display_name,
             plugin_id: plugin_id.to_owned(),
             version: plugin_version.to_owned(),
             capabilities: PluginCapabilities {
@@ -563,7 +682,148 @@ impl SourceManager {
                 discover,
                 wallpaper,
             },
+            settings,
+            actions,
+            status,
         })
+    }
+
+    /// Parse the optional `info().actions` sequence (`{id,label,group,order}`).
+    fn parse_source_actions(info: &LuaTable) -> Result<Vec<SourceAction>> {
+        let mut out = Vec::new();
+        for entry in Self::info_sequence(info, "actions")? {
+            let id: String = entry
+                .get("id")
+                .map_err(|e| Error::Internal(anyhow!("info().actions.id: {e}")))?;
+            if id.trim().is_empty() {
+                return Err(Error::Internal(anyhow!(
+                    "info().actions entry requires a non-empty id"
+                )));
+            }
+            out.push(SourceAction {
+                id,
+                label: Self::optional_string(&entry, "label", "info().actions")?,
+                group: Self::optional_string(&entry, "group", "info().actions")?,
+                order: entry
+                    .get::<Option<i32>>("order")
+                    .unwrap_or(None)
+                    .unwrap_or(0),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Parse the optional `info().status` sequence (`{id,label,group,order}`).
+    fn parse_source_status(info: &LuaTable) -> Result<Vec<SourceStatus>> {
+        let mut out = Vec::new();
+        for entry in Self::info_sequence(info, "status")? {
+            let id: String = entry
+                .get("id")
+                .map_err(|e| Error::Internal(anyhow!("info().status.id: {e}")))?;
+            if id.trim().is_empty() {
+                return Err(Error::Internal(anyhow!(
+                    "info().status entry requires a non-empty id"
+                )));
+            }
+            out.push(SourceStatus {
+                id,
+                label: Self::optional_string(&entry, "label", "info().status")?,
+                group: Self::optional_string(&entry, "group", "info().status")?,
+                order: entry
+                    .get::<Option<i32>>("order")
+                    .unwrap_or(None)
+                    .unwrap_or(0),
+                value: String::new(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Read an optional top-level `info()` sequence-of-tables field.
+    fn info_sequence(info: &LuaTable, field: &str) -> Result<Vec<LuaTable>> {
+        let val: LuaValue = info
+            .get(field)
+            .map_err(|e| Error::Internal(anyhow!("info().{field}: {e}")))?;
+        let tbl = match val {
+            LuaValue::Nil => return Ok(Vec::new()),
+            LuaValue::Table(t) => t,
+            _ => {
+                return Err(Error::Internal(anyhow!(
+                    "info().{field} must be a sequence of tables"
+                )));
+            }
+        };
+        let mut out = Vec::new();
+        for entry in tbl.sequence_values::<LuaTable>() {
+            out.push(entry.map_err(|e| Error::Internal(anyhow!("info().{field} entry: {e}")))?);
+        }
+        Ok(out)
+    }
+
+    /// Parse the optional `info().settings` sequence into UI-renderable specs.
+    fn parse_source_settings(info: &LuaTable) -> Result<Vec<SourceSetting>> {
+        let val: LuaValue = info
+            .get("settings")
+            .map_err(|e| Error::Internal(anyhow!("info().settings: {e}")))?;
+        let tbl = match val {
+            LuaValue::Nil => return Ok(Vec::new()),
+            LuaValue::Table(t) => t,
+            _ => {
+                return Err(Error::Internal(anyhow!(
+                    "info().settings must be a sequence of tables"
+                )));
+            }
+        };
+        let mut out = Vec::new();
+        for entry in tbl.sequence_values::<LuaTable>() {
+            let s = entry.map_err(|e| Error::Internal(anyhow!("info().settings entry: {e}")))?;
+            let key: String = s
+                .get("key")
+                .map_err(|e| Error::Internal(anyhow!("info().settings.key: {e}")))?;
+            if key.trim().is_empty() {
+                return Err(Error::Internal(anyhow!(
+                    "info().settings entry requires a non-empty key"
+                )));
+            }
+            let ty = Self::optional_string(&s, "type", "info().settings")?;
+            let ty = if ty.is_empty() { "string".into() } else { ty };
+            let default = match s
+                .get::<LuaValue>("default")
+                .map_err(|e| Error::Internal(anyhow!("info().settings.default: {e}")))?
+            {
+                LuaValue::Nil => String::new(),
+                LuaValue::Boolean(b) => b.to_string(),
+                LuaValue::Integer(i) => i.to_string(),
+                LuaValue::Number(n) => n.to_string(),
+                LuaValue::String(v) => v.to_str()?.to_owned(),
+                _ => String::new(),
+            };
+            let order: i32 = s
+                .get::<Option<i32>>("order")
+                .map_err(|e| Error::Internal(anyhow!("info().settings.order: {e}")))?
+                .unwrap_or(0);
+            let choices = match s
+                .get::<LuaValue>("choices")
+                .map_err(|e| Error::Internal(anyhow!("info().settings.choices: {e}")))?
+            {
+                LuaValue::Table(c) => c
+                    .sequence_values::<String>()
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|e| Error::Internal(anyhow!("info().settings.choices: {e}")))?,
+                _ => Vec::new(),
+            };
+            out.push(SourceSetting {
+                key,
+                ty,
+                default,
+                label: Self::optional_string(&s, "label", "info().settings")?,
+                description: Self::optional_string(&s, "description", "info().settings")?,
+                group: Self::optional_string(&s, "group", "info().settings")?,
+                order,
+                choices,
+            });
+        }
+        Ok(out)
     }
 
     /// Load a single Lua entry, tagging it with the owning installable
@@ -774,6 +1034,31 @@ impl SourceManager {
             .create_function(|_, name: String| Ok(std::env::var(&name).ok()))?;
         ctx.set("env", env_fn)?;
 
+        // ctx.plugin_config(key) -> string|nil. Reads the plugin's
+        // `[plugin."<id>"]` table from config.toml. No-op without a settings store.
+        let cfg_settings = self.settings.clone();
+        let cfg_plugin = plugin_name.map(str::to_owned);
+        let plugin_config_fn = self.lua.create_function(move |_, key: String| {
+            let value = match (cfg_settings.as_ref(), cfg_plugin.as_ref()) {
+                (Some(store), Some(name)) => {
+                    store.plugin(name).and_then(|kv| kv.get(&key).cloned())
+                }
+                _ => None,
+            };
+            Ok(value)
+        })?;
+        ctx.set("plugin_config", plugin_config_fn)?;
+
+        // ctx.steam_access_token() -> string|nil. The access token from the
+        // daemon-owned Steam sign-in, used to browse the workshop without a
+        // separate Web API key. Nil when signed out.
+        let steam_token_fn = self.lua.create_function(|_, ()| {
+            Ok(crate::steam_session::load()
+                .map(|s| s.access_token)
+                .filter(|t| !t.is_empty()))
+        })?;
+        ctx.set("steam_access_token", steam_token_fn)?;
+
         // ctx.libraries() -> list of absolute library paths registered
         // for this plugin in the daemon DB.
         let libs_for_closure: Vec<String> = libraries.to_vec();
@@ -828,6 +1113,33 @@ impl SourceManager {
                     Err(e) => Err(mlua::Error::external(e)),
                 })?;
         ctx.set("remove_file", remove_file_fn)?;
+
+        // ctx.remove_dir(path) -> bool. Recursively removes a directory, guarded
+        // to the calling plugin's remote content dir (canonicalized, so `..` and
+        // symlink escapes are rejected).
+        let rd_plugin = plugin_name.map(str::to_owned);
+        let remove_dir_fn = self.lua.create_function(move |_, path: String| {
+            let Some(name) = rd_plugin.as_ref() else {
+                return Ok(false);
+            };
+            let root = crate::settings::remote_content_dir(name)
+                .canonicalize()
+                .map_err(|e| mlua::Error::external(format!("remote dir unavailable: {e}")))?;
+            let target = std::path::Path::new(&path)
+                .canonicalize()
+                .map_err(mlua::Error::external)?;
+            if !target.starts_with(&root) {
+                return Err(mlua::Error::external(format!(
+                    "remove_dir refused: {path} is outside the plugin remote directory"
+                )));
+            }
+            match std::fs::remove_dir_all(&target) {
+                Ok(()) => Ok(true),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(e) => Err(mlua::Error::external(e)),
+            }
+        })?;
+        ctx.set("remove_dir", remove_dir_fn)?;
 
         // ctx.probe(path) -> table|nil
         // Returns present file/media fields, or nil if nothing was found.
@@ -1146,9 +1458,14 @@ impl SourceManager {
             out.push(DiscoverSourceInfo {
                 plugin_id: info.name.clone(),
                 name: info.name.clone(),
+                display_name: info.display_name.clone(),
                 supports_search: disc.supports_search,
                 sorts: disc.sorts.clone(),
                 tags: disc.tags.clone(),
+                owner_plugin_id: info.plugin_id.clone(),
+                settings: info.settings.clone(),
+                actions: info.actions.clone(),
+                status: info.status.clone(),
             });
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1247,6 +1564,59 @@ impl SourceManager {
         Ok(DiscoverSearchResult { items, has_more })
     }
 
+    /// Fetch a plugin's live filter taxonomy via its `discover.tags(ctx)` Lua
+    /// function.
+    pub async fn call_tags(&self, plugin_name: &str) -> Result<Vec<String>> {
+        let key = self
+            .plugins
+            .get(plugin_name)
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+        let module: LuaTable = self.lua.registry_value(key)?;
+        let discover_api: LuaTable = module.get("discover")?;
+        let tags_fn: LuaFunction = discover_api
+            .get("tags")
+            .map_err(|_| Error::DiscoverUnsupported(plugin_name.to_string()))?;
+        let ctx = self.build_ctx(Some(plugin_name), &[])?;
+        tags_fn
+            .call_async(ctx)
+            .await
+            .map_err(|e| Error::DiscoverFailed {
+                plugin: plugin_name.to_string(),
+                message: e.to_string(),
+            })
+    }
+
+    /// Replace the declared filter tags of every plugin that supplies them
+    /// dynamically. Best-effort: a plugin whose fetch fails keeps its fallback.
+    pub async fn refresh_dynamic_tags(&mut self) {
+        let names: Vec<String> = self
+            .plugin_infos
+            .iter()
+            .filter(|(_, info)| {
+                info.capabilities
+                    .discover
+                    .as_ref()
+                    .is_some_and(|d| d.dynamic_tags)
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in names {
+            match self.call_tags(&name).await {
+                Ok(tags) if !tags.is_empty() => {
+                    if let Some(disc) = self
+                        .plugin_infos
+                        .get_mut(&name)
+                        .and_then(|info| info.capabilities.discover.as_mut())
+                    {
+                        disc.tags = tags;
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("refresh discover tags for {name}: {e:#}"),
+            }
+        }
+    }
+
     /// Relay a detail request to a plugin's `discover.details(ctx, id)` Lua function.
     pub async fn call_details(&self, plugin_name: &str, id: &str) -> Result<DiscoverDetails> {
         let key = self
@@ -1322,10 +1692,18 @@ impl SourceManager {
                 message: e.to_string(),
             })?;
 
+        // url/filename are optional: only the http provider needs them (validated
+        // in the download pipeline), so directory providers can omit them.
+        let provider =
+            Self::optional_string(&result, "provider", "module.discover.download result")?;
         Ok(DiscoverDownload {
             wp_type: Self::require_string(&result, "wp_type", "module.discover.download result")?,
-            url: Self::require_string(&result, "url", "module.discover.download result")?,
-            filename: Self::require_string(&result, "filename", "module.discover.download result")?,
+            url: Self::optional_string(&result, "url", "module.discover.download result")?,
+            filename: Self::optional_string(
+                &result,
+                "filename",
+                "module.discover.download result",
+            )?,
             title: Self::require_string(&result, "title", "module.discover.download result")?,
             preview_url: Self::optional_string(
                 &result,
@@ -1351,6 +1729,79 @@ impl SourceManager {
             width: result.get::<u32>("width").ok(),
             height: result.get::<u32>("height").ok(),
             content_rating: result.get::<String>("content_rating").ok(),
+            provider: if provider.is_empty() {
+                None
+            } else {
+                Some(provider)
+            },
+        })
+    }
+
+    /// Classify a directory fetched by a download provider. `dir` is the absolute
+    /// path of the fetched item directory; returned paths are relative to it.
+    pub async fn call_resolve(
+        &self,
+        plugin_name: &str,
+        id: &str,
+        dir: &str,
+    ) -> Result<DiscoverResolve> {
+        let key = self
+            .plugins
+            .get(plugin_name)
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+        let Some(info) = self.plugin_infos.get(plugin_name) else {
+            return Err(Error::SourcePluginNotFound(plugin_name.to_string()));
+        };
+        let Some(discover) = &info.capabilities.discover else {
+            return Err(Error::DiscoverUnsupported(plugin_name.to_string()));
+        };
+        if !discover.supports_resolve {
+            return Err(Error::DiscoverUnsupported(plugin_name.to_string()));
+        }
+        let module: LuaTable = self.lua.registry_value(key)?;
+        let discover_api: LuaTable = module.get("discover")?;
+        let resolve_fn: LuaFunction = discover_api
+            .get("resolve")
+            .map_err(|_| Error::DiscoverUnsupported(plugin_name.to_string()))?;
+
+        let ctx = self.build_ctx(Some(plugin_name), &[])?;
+        let params = self.lua.create_table()?;
+        params.set("id", id.to_string())?;
+        params.set("dir", dir.to_string())?;
+        let result: LuaTable =
+            resolve_fn
+                .call_async((ctx, params))
+                .await
+                .map_err(|e| Error::ResolveFailed {
+                    plugin: plugin_name.to_string(),
+                    message: e.to_string(),
+                })?;
+
+        Ok(DiscoverResolve {
+            name: Self::require_string(&result, "name", "module.discover.resolve result")?,
+            wp_type: Self::require_string(&result, "wp_type", "module.discover.resolve result")?,
+            resource: Self::require_string(&result, "resource", "module.discover.resolve result")?,
+            preview: result
+                .get::<String>("preview")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            description: Self::optional_string(
+                &result,
+                "description",
+                "module.discover.resolve result",
+            )?,
+            tags: Self::optional_string_sequence(
+                &result,
+                "tags",
+                "module.discover.resolve result",
+            )?,
+            external_id: Self::optional_string(
+                &result,
+                "external_id",
+                "module.discover.resolve result",
+            )?,
+            size: result.get::<i64>("size").ok(),
+            content_rating: result.get::<String>("content_rating").ok(),
         })
     }
 
@@ -1367,6 +1818,7 @@ impl SourceManager {
                 version: info.version.clone(),
                 library_label: source.library_label.clone(),
                 library_hint: source.library_hint.clone(),
+                settings: info.settings.clone(),
             });
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1961,6 +2413,142 @@ return M
         item.set("id", "abc").unwrap();
         let mapped: LuaTable = search_item.call(item).unwrap();
         assert_eq!(mapped.get::<String>("wp_type").unwrap(), "image");
+    }
+
+    #[test]
+    fn call_resolve_relays_directory_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("resolver.lua");
+        std::fs::write(
+            &path,
+            r#"
+local M = {}
+function M.info()
+    return { name = "resolver", capabilities = { discover = { search = true, resolve = true } } }
+end
+M.discover = {}
+function M.discover.search(ctx, params) return { items = {}, has_more = false } end
+function M.discover.resolve(ctx, params)
+    return {
+        name = "R " .. params.id,
+        wp_type = "scene",
+        resource = "scene.pkg",
+        preview = "preview.jpg",
+        description = "d",
+        tags = { "t" },
+        external_id = params.id,
+        size = 7,
+    }
+end
+return M
+"#,
+        )
+        .unwrap();
+
+        let mut mgr = SourceManager::new().unwrap();
+        mgr.load_plugin(&path, "test.plugin", "1.0", ENTRY_VERSION)
+            .unwrap();
+        let got =
+            block_value(async { mgr.call_resolve("resolver", "id1", "/some/dir").await }).unwrap();
+        assert_eq!(got.name, "R id1");
+        assert_eq!(got.wp_type, "scene");
+        assert_eq!(got.resource, "scene.pkg");
+        assert_eq!(got.preview.as_deref(), Some("preview.jpg"));
+        assert_eq!(got.external_id, "id1");
+        assert_eq!(got.size, Some(7));
+    }
+
+    #[test]
+    fn refresh_dynamic_tags_replaces_declared_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dyn.lua");
+        std::fs::write(
+            &path,
+            r#"
+local M = {}
+function M.info()
+    return {
+        name = "dyn",
+        capabilities = { discover = { search = true, tags = { "fallback" } } },
+    }
+end
+M.discover = {}
+function M.discover.search(ctx, params) return { items = {}, has_more = false } end
+function M.discover.tags(ctx) return { "Live1", "Live2" } end
+return M
+"#,
+        )
+        .unwrap();
+
+        let mut mgr = SourceManager::new().unwrap();
+        mgr.load_plugin(&path, "test.plugin", "1.0", ENTRY_VERSION)
+            .unwrap();
+        // Before the refresh, discovery advertises the static fallback.
+        assert_eq!(mgr.discover_sources().unwrap()[0].tags, vec!["fallback"]);
+
+        block_value(async { mgr.refresh_dynamic_tags().await });
+        assert_eq!(
+            mgr.discover_sources().unwrap()[0].tags,
+            vec!["Live1", "Live2"]
+        );
+    }
+
+    #[test]
+    fn remove_dir_guards_the_plugin_remote_dir() {
+        // remote_content_dir is derived from XDG_DATA_HOME; point it at a tempdir.
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_DATA_HOME", data.path());
+        let remote = crate::settings::remote_content_dir("guarded");
+        std::fs::create_dir_all(&remote).unwrap();
+
+        let plugin = tempfile::tempdir().unwrap();
+        let path = plugin.path().join("guarded.lua");
+        std::fs::write(
+            &path,
+            r#"
+local M = {}
+function M.info()
+    return { name = "guarded", capabilities = { discover = { search = true } } }
+end
+M.discover = {}
+function M.discover.search(ctx, params)
+    local ok = ctx.remove_dir(params.query)
+    return { items = { { id = tostring(ok), title = "", preview_url = "", author = "" } }, has_more = false }
+end
+return M
+"#,
+        )
+        .unwrap();
+        let mut mgr = SourceManager::new().unwrap();
+        mgr.load_plugin(&path, "test.plugin", "1.0", ENTRY_VERSION)
+            .unwrap();
+
+        let removed = |p: &str| -> Result<DiscoverSearchResult> {
+            block_value(async { mgr.call_discover("guarded", p, "", 1, &[]).await })
+        };
+
+        // Inside the remote dir: removed.
+        let inside = remote.join("item123");
+        std::fs::create_dir_all(&inside).unwrap();
+        let r = removed(inside.to_str().unwrap()).unwrap();
+        assert_eq!(r.items[0].id, "true");
+        assert!(!inside.exists());
+
+        // Outside the remote dir: refused (Lua error surfaces as DiscoverFailed).
+        let outside = tempfile::tempdir().unwrap();
+        assert!(removed(outside.path().to_str().unwrap()).is_err());
+
+        // `..` escape from inside the remote dir: refused.
+        let escape = format!("{}/../../escape", remote.display());
+        assert!(removed(&escape).is_err());
+
+        // Symlink escaping the remote dir: refused (canonicalize resolves it out).
+        let link = remote.join("link");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        assert!(removed(link.to_str().unwrap()).is_err());
+        assert!(outside.path().exists());
+
+        std::env::remove_var("XDG_DATA_HOME");
     }
 
     #[test]

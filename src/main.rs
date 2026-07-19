@@ -14,6 +14,7 @@ mod dma;
 mod error;
 mod event_process;
 mod events;
+mod fetcher;
 mod gpu;
 mod ipc;
 mod model;
@@ -28,6 +29,9 @@ mod routing;
 mod scheduler;
 mod session_monitor;
 mod settings;
+mod steam_auth;
+mod steam_login;
+mod steam_session;
 mod sync;
 mod tasks;
 mod tray;
@@ -326,6 +330,7 @@ async fn async_main() -> anyhow::Result<()> {
     {
         let mut sm = source_mgr.lock().await;
         sm.attach_db(db.clone());
+        sm.attach_settings(settings_store.clone());
     }
 
     let (shutdown_tx, shutdown_rx_for_tasks) = tokio::sync::watch::channel(false);
@@ -584,6 +589,14 @@ async fn async_main() -> anyhow::Result<()> {
                 state_for_task
                     .events
                     .publish(events::GlobalEvent::SourcesReady);
+
+                {
+                    let mut sm = state_for_task.source_manager.lock().await;
+                    sm.refresh_dynamic_tags().await;
+                }
+                state_for_task
+                    .events
+                    .publish(events::GlobalEvent::SettingsChanged);
                 Ok(())
             });
     }

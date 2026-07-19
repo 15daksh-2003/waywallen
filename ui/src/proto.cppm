@@ -90,6 +90,16 @@ using proto::RemoteSourceInfo;
 using proto::RemoteUninstallRequest;
 using proto::RemoteUninstallResponse;
 using proto::RemoteDownloadStateGadget::RemoteDownloadState;
+using proto::SteamLoginStartRequest;
+using proto::SteamLoginStartResponse;
+using proto::SteamLoginCancelRequest;
+using proto::SteamLoginCancelResponse;
+using proto::SteamLoginProgress;
+using proto::SteamLoginStateGadget::SteamLoginState;
+using proto::PluginActionDef;
+using proto::PluginStatusRow;
+using proto::PluginActionRequest;
+using proto::PluginActionResponse;
 
 using proto::GpuInfo;
 using proto::GpuListRequest;

@@ -33,7 +33,7 @@ MD.Page {
 
     function sourceName(id) {
         const s = sourceInfo(id);
-        return s ? s.name : "";
+        return s ? (s.displayName && s.displayName.length > 0 ? s.displayName : s.name) : "";
     }
 
     function sourceTags(id) {
@@ -248,12 +248,50 @@ MD.Page {
         }
     }
 
+    W.SettingsGetQuery {
+        id: settingsCfgQuery
+    }
+
+    function currentSourceConfig() {
+        const id = root.sourceId;
+        const list = availabilityQuery.sources || [];
+        for (let i = 0; i < list.length; ++i) {
+            if (list[i].id === id)
+                return list[i];
+        }
+        return null;
+    }
+
+    function currentSourceHasSettings() {
+        const c = root.currentSourceConfig();
+        return !!(c && ((c.settings && c.settings.length > 0)
+            || (c.actions && c.actions.length > 0)
+            || (c.status && c.status.length > 0)));
+    }
+
+    function openSourceConfig() {
+        const c = root.currentSourceConfig();
+        if (!c)
+            return;
+        const pid = c.id;
+        const p = settingsCfgQuery.plugins ? settingsCfgQuery.plugins[pid] : undefined;
+        MD.Util.showPopup('waywallen.ui/PagePopup', {
+            source: 'waywallen.ui/PluginSettingsPage',
+            props: {
+                pluginName: pid,
+                displayName: (c.displayName && c.displayName.length > 0) ? c.displayName : (c.name || pid),
+                schemaList: c.settings || [],
+                actionList: c.actions || [],
+                statusList: c.status || [],
+                allCurrentPlugins: settingsCfgQuery.plugins || ({}),
+                currentGlobal: settingsCfgQuery.global || ({}),
+                currentValues: p || ({})
+            }
+        }, root.Window.window);
+    }
+
     W.RemoteSearchQuery {
         id: searchQuery
-        onStateChanged: {
-            if (errorText.length > 0)
-                W.Action.toast(qsTr("Remote search failed: ") + errorText);
-        }
     }
 
     W.RemoteFilterDialog {
@@ -308,6 +346,7 @@ MD.Page {
 
     function reloadAll() {
         availabilityQuery.reload();
+        settingsCfgQuery.reload();
         if (root.sourceId.length > 0)
             searchQuery.reload();
     }
@@ -316,6 +355,12 @@ MD.Page {
         target: W.Notify
         function onDaemonReady() {
             root.reloadAll();
+        }
+        function onSettingsChanged() {
+            settingsCfgQuery.reload();
+            availabilityQuery.reload();
+            if (root.sourceId.length > 0)
+                searchQuery.reload();
         }
     }
 
@@ -359,7 +404,7 @@ MD.Page {
                             model: availabilityQuery.sources
                             contentDelegate: MD.MenuItem {
                                 required property var modelData
-                                text: modelData.name
+                                text: modelData.displayName && modelData.displayName.length > 0 ? modelData.displayName : modelData.name
                                 icon.name: modelData.id === root.sourceId ? MD.Token.icon.check : ' '
                                 onClicked: {
                                     root.setSource(modelData.id);
@@ -367,6 +412,24 @@ MD.Page {
                                 }
                             }
                         }
+                    }
+
+                    MD.IconButton {
+                        id: sourceConfigButton
+                        icon.name: MD.Token.icon.settings
+                        visible: {
+                            const list = availabilityQuery.sources || [];
+                            const id = root.sourceId;
+                            for (let i = 0; i < list.length; ++i) {
+                                const s = list[i];
+                                if (s.id === id)
+                                    return !!((s.settings && s.settings.length > 0)
+                                        || (s.actions && s.actions.length > 0)
+                                        || (s.status && s.status.length > 0));
+                            }
+                            return false;
+                        }
+                        onClicked: root.openSourceConfig()
                     }
 
                     MD.EmbedChip {
@@ -472,8 +535,12 @@ MD.Page {
 
                     ColumnLayout {
                         anchors.centerIn: parent
+                        width: Math.min(parent.width - 48, 420)
                         visible: m_grid.count === 0
-                        spacing: 8
+                        spacing: 12
+
+                        readonly property bool hasError: !searchQuery.querying && searchQuery.errorText.length > 0
+                        readonly property bool needsSetup: hasError && root.currentSourceHasSettings()
 
                         MD.BusyIndicator {
                             Layout.alignment: Qt.AlignHCenter
@@ -481,9 +548,49 @@ MD.Page {
                             visible: running
                         }
 
+                        // Setup / error prompt (replaces the ephemeral toast).
+                        MD.Icon {
+                            Layout.alignment: Qt.AlignHCenter
+                            visible: parent.needsSetup
+                            name: MD.Token.icon.settings
+                            size: 40
+                            color: MD.Token.color.on_surface_variant
+                        }
+                        MD.Label {
+                            Layout.fillWidth: true
+                            horizontalAlignment: Text.AlignHCenter
+                            visible: parent.hasError
+                            text: parent.needsSetup
+                                ? qsTr("%1 needs to be set up").arg(root.sourceName(root.sourceId))
+                                : qsTr("Couldn't load this source")
+                            typescale: MD.Token.typescale.title_medium
+                            color: MD.Token.color.on_surface
+                            wrapMode: Text.WordWrap
+                        }
+                        MD.Label {
+                            Layout.fillWidth: true
+                            horizontalAlignment: Text.AlignHCenter
+                            visible: parent.hasError
+                            text: parent.needsSetup
+                                ? qsTr("Add the required settings to start browsing.")
+                                : searchQuery.errorText
+                            typescale: MD.Token.typescale.body_medium
+                            color: MD.Token.color.on_surface_variant
+                            wrapMode: Text.WordWrap
+                            maximumLineCount: 4
+                            elide: Text.ElideRight
+                        }
+                        MD.Button {
+                            Layout.alignment: Qt.AlignHCenter
+                            visible: parent.needsSetup
+                            text: qsTr("Set up %1").arg(root.sourceName(root.sourceId))
+                            mdState.type: MD.Enum.BtFilledTonal
+                            onClicked: root.openSourceConfig()
+                        }
+
                         MD.Label {
                             Layout.alignment: Qt.AlignHCenter
-                            visible: !searchQuery.querying
+                            visible: !searchQuery.querying && searchQuery.errorText.length === 0
                             text: qsTr("No wallpapers found")
                             typescale: MD.Token.typescale.body_large
                             color: MD.Token.color.on_surface_variant
