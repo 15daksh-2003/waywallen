@@ -80,17 +80,20 @@ async fn reload_source_entries(
     entries: Vec<crate::plugin::renderer_registry::EntryRef>,
     installed_plugin_id: &str,
 ) -> Result<()> {
+    app.qr_login.cancel_all_and_wait().await?;
     let installed_plugin_id = installed_plugin_id.to_string();
     let source_manager = app.source_manager.clone();
     let load_result = tokio::task::spawn_blocking(move || {
-        let mut sm = source_manager.blocking_lock();
-        sm.clear_plugins();
+        source_manager.clear_plugins();
 
         let mut installed_failures = Vec::new();
         for r in &entries {
-            if let Err(e) =
-                sm.load_plugin(&r.entry, &r.plugin_id, &r.plugin_version, r.entry_version)
-            {
+            if let Err(e) = source_manager.load_plugin(
+                &r.entry,
+                &r.plugin_id,
+                &r.plugin_version,
+                r.entry_version,
+            ) {
                 let msg = format!("load entry {}: {e:#}", r.entry.display());
                 log::warn!("{msg}");
                 if r.plugin_id == installed_plugin_id {
@@ -110,10 +113,7 @@ async fn reload_source_entries(
 
     load_result.map_err(Error::PluginInstallFailed)?;
 
-    let infos = {
-        let sm = app.source_manager.lock().await;
-        sm.plugins()?
-    };
+    let infos = app.source_manager.plugins()?;
     for info in &infos {
         repo::upsert_plugin(&app.db, &info.name, &info.version)
             .await
@@ -992,8 +992,6 @@ pub async fn apply_wallpaper_with_options(
     let renderer_plugin_name = renderer.name.clone();
     let extras = app
         .source_manager
-        .lock()
-        .await
         .call_extras(&entry.plugin_name, &entry)
         .await?;
     let spawn_settings = app.settings.resolved_renderer_settings(&renderer);
@@ -1421,10 +1419,7 @@ pub async fn auto_detect_libraries(
 ) -> Result<Vec<crate::routing::LibrarySnapshot>> {
     use crate::routing::LibrarySnapshot;
 
-    let detected = {
-        let sm = app.source_manager.lock().await;
-        sm.auto_detect_all().await?
-    };
+    let detected = app.source_manager.auto_detect_all().await?;
     if detected.is_empty() {
         return Ok(Vec::new());
     }
@@ -1557,14 +1552,11 @@ pub async fn libraries_by_plugin_name(
 /// Re-scan every loaded source plugin against the current DB library
 /// set and persist the resulting entries. Returns the playlist size.
 pub async fn refresh_source_plugins(app: &Arc<AppState>) {
-    let plugins = {
-        let sm = app.source_manager.lock().await;
-        match sm.plugins() {
-            Ok(p) => p,
-            Err(e) => {
-                log::warn!("refresh_source_plugins: source_manager.plugins() failed: {e:#}");
-                Vec::new()
-            }
+    let plugins = match app.source_manager.plugins() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("refresh_source_plugins: source_manager.plugins() failed: {e:#}");
+            Vec::new()
         }
     };
     *app.source_plugins.write().await = plugins;
@@ -1618,8 +1610,8 @@ async fn refresh_sources_inner(app: &Arc<AppState>) -> Result<usize> {
     let libs_by_plugin = libraries_by_plugin_name(&app.db).await?;
 
     let source_mgr = app.source_manager.clone();
-    // Scan each physical directory once; symlinked Steam aliases otherwise
-    // emit duplicate workshop entries and duplicate UI rows.
+    // Scan each physical directory once so symlinked aliases do not emit
+    // duplicate entries and duplicate UI rows.
     let libs_for_scan: HashMap<String, Vec<String>> = libs_by_plugin
         .iter()
         .map(|(name, paths)| (name.clone(), dedup_paths_by_canonical(paths)))
@@ -1628,21 +1620,17 @@ async fn refresh_sources_inner(app: &Arc<AppState>) -> Result<usize> {
     // and do not wait behind this section.
     let handle = tokio::runtime::Handle::current();
     let snapshot: Vec<WallpaperEntry> = tokio::task::spawn_blocking(move || {
-        let mut sm = source_mgr.blocking_lock();
-        handle.block_on(sm.scan_all(&libs_for_scan))?;
-        Ok::<_, anyhow::Error>(sm.list().to_vec())
+        handle.block_on(source_mgr.scan_all(&libs_for_scan))?;
+        Ok::<_, anyhow::Error>(source_mgr.list())
     })
     .await
     .map_err(|e| Error::Internal(anyhow!("source scan join: {e}")))??;
 
-    let plugins = {
-        let sm = app.source_manager.lock().await;
-        match sm.plugins() {
-            Ok(p) => p,
-            Err(e) => {
-                log::warn!("refresh_sources: source_manager.plugins() failed: {e:#}");
-                Vec::new()
-            }
+    let plugins = match app.source_manager.plugins() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("refresh_sources: source_manager.plugins() failed: {e:#}");
+            Vec::new()
         }
     };
 

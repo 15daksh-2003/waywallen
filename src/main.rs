@@ -15,7 +15,6 @@ mod dma;
 mod error;
 mod event_process;
 mod events;
-mod fetcher;
 mod gpu;
 mod ipc;
 mod model;
@@ -24,15 +23,13 @@ mod notifications;
 pub mod playlist;
 mod plugin;
 mod probe;
+mod qr_login;
 mod queue;
 mod renderer_manager;
 mod routing;
 mod scheduler;
 mod session_monitor;
 mod settings;
-mod steam_auth;
-mod steam_login;
-mod steam_session;
 mod sync;
 mod tasks;
 mod tray;
@@ -47,7 +44,8 @@ mod ws_server;
 pub struct AppState {
     pub renderer_manager: Arc<renderer_manager::RendererManager>,
     pub audio: audio::AudioService,
-    pub source_manager: Arc<tokio::sync::Mutex<plugin::source_manager::SourceManager>>,
+    pub source_manager: Arc<plugin::source_manager::SourceManager>,
+    pub qr_login: Arc<qr_login::QrLoginManager>,
     /// Active installable-plugin metadata from the startup scan.
     pub plugins: Arc<tokio::sync::RwLock<Vec<plugin::renderer_registry::PluginPackageMeta>>>,
     pub inactive_system: Arc<tokio::sync::RwLock<Vec<String>>>,
@@ -266,10 +264,10 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Create an empty source manager now; Lua loading and source scans
     // run later in a background task.
-    let source_mgr = Arc::new(tokio::sync::Mutex::new(
+    let source_mgr = Arc::new(
         plugin::source_manager::SourceManager::with_probe(probe.clone())
             .expect("failed to create source manager"),
-    ));
+    );
 
     let renderer_mgr = Arc::new(renderer_manager::RendererManager::new(registry));
     let router = routing::Router::new(renderer_mgr.clone());
@@ -329,14 +327,14 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Hand the DB to the source manager so `ctx.library_meta_*`
     // mlua functions can read and write library metadata.
-    {
-        let mut sm = source_mgr.lock().await;
-        sm.attach_db(db.clone());
-        sm.attach_settings(settings_store.clone());
-    }
+    source_mgr.attach_db(db.clone());
+    source_mgr.attach_settings(settings_store.clone());
 
     let (shutdown_tx, shutdown_rx_for_tasks) = tokio::sync::watch::channel(false);
     let task_mgr = tasks::TaskManager::spawn(shutdown_rx_for_tasks);
+    let events = events::EventBus::default();
+    let qr_login =
+        qr_login::QrLoginManager::new(source_mgr.clone(), events.sender(), shutdown_tx.subscribe());
 
     let (rotation_handle, rotation_rx) = queue::rotator::make_handle();
 
@@ -347,6 +345,7 @@ async fn async_main() -> anyhow::Result<()> {
         renderer_manager: renderer_mgr,
         audio: audio_service,
         source_manager: source_mgr.clone(),
+        qr_login,
         plugins: plugin_packages,
         inactive_system,
         inactive_user,
@@ -365,7 +364,7 @@ async fn async_main() -> anyhow::Result<()> {
         db: db.clone(),
         queue: tokio::sync::Mutex::new(control::QueueState::default()),
         rotation: rotation_handle,
-        events: events::EventBus::default(),
+        events,
         ws_port: std::sync::atomic::AtomicU16::new(0),
         scan_in_progress: std::sync::atomic::AtomicBool::new(false),
         ui_path: std::sync::Mutex::new(None),
@@ -532,9 +531,8 @@ async fn async_main() -> anyhow::Result<()> {
                 // Load Lua entries on the blocking pool; each ref carries
                 // the owning plugin domain id and entry ABI version.
                 tokio::task::spawn_blocking(move || {
-                    let mut sm = source_mgr.blocking_lock();
                     for r in &entry_refs {
-                        if let Err(e) = sm.load_plugin(
+                        if let Err(e) = source_mgr.load_plugin(
                             &r.entry,
                             &r.plugin_id,
                             &r.plugin_version,
@@ -550,10 +548,7 @@ async fn async_main() -> anyhow::Result<()> {
                 // Register loaded plugins before auto-detect so names resolve
                 // even when no libraries exist yet.
                 {
-                    let infos = {
-                        let sm = state_for_task.source_manager.lock().await;
-                        sm.plugins()
-                    };
+                    let infos = state_for_task.source_manager.plugins();
                     match infos {
                         Ok(infos) => {
                             for info in infos {
@@ -594,10 +589,7 @@ async fn async_main() -> anyhow::Result<()> {
                     .events
                     .publish(events::GlobalEvent::SourcesReady);
 
-                {
-                    let mut sm = state_for_task.source_manager.lock().await;
-                    sm.refresh_dynamic_tags().await;
-                }
+                state_for_task.source_manager.refresh_dynamic_tags().await;
                 state_for_task
                     .events
                     .publish(events::GlobalEvent::SettingsChanged);
@@ -769,6 +761,9 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Whatever woke us, make sure every subscriber observes shutdown.
     state.shutdown_now();
+    if let Err(error) = state.qr_login.cancel_all_and_wait().await {
+        log::warn!("QR login shutdown cleanup failed: {error:#}");
+    }
 
     // Flush settings synchronously so any pending debounced write lands.
     state.settings.flush_now().await;

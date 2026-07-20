@@ -52,14 +52,16 @@ void RemoteAvailabilityQuery::reload() {
                 QStringList tags;
                 for (const auto& tag : src.tags()) tags.push_back(tag);
                 QVariantMap m;
-                m[u"id"_s]             = src.id_proto();
-                m[u"name"_s]           = src.name();
-                m[u"supportsSearch"_s] = src.supportsSearch();
-                m[u"sorts"_s]          = sorts;
-                m[u"tags"_s]           = tags;
-                m[u"contentDir"_s]     = src.contentDir();
-                m[u"ownerPluginId"_s]  = src.ownerPluginId();
-                m[u"displayName"_s]    = src.displayName();
+                m[u"id"_s]               = src.id_proto();
+                m[u"name"_s]             = src.name();
+                m[u"supportsSearch"_s]   = src.supportsSearch();
+                m[u"sorts"_s]            = sorts;
+                m[u"tags"_s]             = tags;
+                m[u"contentDir"_s]       = src.contentDir();
+                m[u"ownerPluginId"_s]    = src.ownerPluginId();
+                m[u"displayName"_s]      = src.displayName();
+                m[u"remoteCapability"_s] = static_cast<int>(src.remoteCapability());
+                m[u"remoteHint"_s]       = src.remoteHint();
 
                 QVariantList settings;
                 for (const auto& ss : src.settings()) {
@@ -87,10 +89,13 @@ void RemoteAvailabilityQuery::reload() {
                 QVariantList actions;
                 for (const auto& a : src.actions()) {
                     QVariantMap am;
-                    am[u"id"_s]    = a.id_proto();
-                    am[u"label"_s] = a.label();
-                    am[u"group"_s] = a.group();
-                    am[u"order"_s] = static_cast<int>(a.order());
+                    am[u"id"_s]      = a.id_proto();
+                    am[u"label"_s]   = a.label();
+                    am[u"group"_s]   = a.group();
+                    am[u"order"_s]   = static_cast<int>(a.order());
+                    am[u"kind"_s]    = static_cast<int>(a.kind());
+                    am[u"visible"_s] = a.visible();
+                    am[u"enabled"_s] = a.enabled();
                     actions.append(am);
                 }
                 m[u"actions"_s] = actions;
@@ -212,7 +217,7 @@ void RemoteSearchQuery::fetchPage(quint32 page, bool append) {
                     it.previewUrl(),
                     it.author(),
                     it.wpType(),
-                    it.installed(),
+                    it.downloaded() ? 3 : 0,
                 });
             }
             auto t = self->model();
@@ -351,6 +356,113 @@ void RemoteDownloadQuery::uninstall(const QString& sourceId, const QString& id) 
             } else {
                 Q_EMIT self->uninstallFailed(sourceId, id, ur.error());
             }
+        });
+        co_return;
+    });
+}
+
+RemoteSubscriptionQuery::RemoteSubscriptionQuery(QObject* parent): Query(parent) {}
+
+void RemoteSubscriptionQuery::reload() {}
+
+void RemoteSubscriptionQuery::refresh(const QString& sourceId, const QStringList& itemIds) {
+    if (sourceId.isEmpty()) return;
+    const auto generation = ++m_refresh_generation;
+    if (itemIds.isEmpty()) {
+        Q_EMIT statesLoaded(sourceId, QVariantList {}, QString {});
+        return;
+    }
+    constexpr qsizetype max_batch = 200;
+    for (qsizetype offset = 0; offset < itemIds.size(); offset += max_batch) {
+        refreshBatch(sourceId, itemIds.mid(offset, max_batch), generation);
+    }
+}
+
+void RemoteSubscriptionQuery::refreshBatch(const QString& sourceId, const QStringList& itemIds,
+                                           quint64 generation) {
+    setStatus(Status::Querying);
+    auto backend = App::instance()->backend();
+
+    auto req   = proto::Request {};
+    auto inner = proto::SubscriptionStatusRequest {};
+    inner.setSourceId(sourceId);
+    inner.setItemIds(itemIds);
+    req.setSubscriptionStatus(std::move(inner));
+
+    auto self = QWatcher { this };
+    spawn([self, backend, req = std::move(req), sourceId, itemIds, generation]() mutable
+              -> task<void> {
+        auto result = co_await backend->send(std::move(req));
+        if (! co_await QAsyncResult::qexecutor()) co_return;
+        if (! self) co_return;
+        if (self->m_refresh_generation != generation) co_return;
+
+        if (! result) {
+            self->inspect_set(result, [](const proto::Response&) {
+            });
+            QVariantList items;
+            items.reserve(itemIds.size());
+            for (const auto& id : itemIds) {
+                QVariantMap row;
+                row[u"id"_s]    = id;
+                row[u"state"_s] = 0;
+                items.push_back(row);
+            }
+            Q_EMIT self->statesLoaded(sourceId, items, self->error());
+            co_return;
+        }
+
+        self->inspect_set(result, [self, sourceId, itemIds](const proto::Response& rsp) {
+            const auto&  status = rsp.subscriptionStatus();
+            QVariantList items;
+            items.reserve(itemIds.size());
+            for (const auto& id : itemIds) {
+                QVariantMap row;
+                row[u"id"_s]    = id;
+                row[u"state"_s] = 0;
+                for (const auto& item : status.items()) {
+                    if (item.id_proto() == id) {
+                        row[u"state"_s] = static_cast<int>(item.state());
+                        break;
+                    }
+                }
+                items.push_back(row);
+            }
+            Q_EMIT self->statesLoaded(sourceId, items, status.error());
+        });
+        co_return;
+    });
+}
+
+void RemoteSubscriptionQuery::setSubscribed(const QString& sourceId, const QString& id,
+                                            bool subscribed) {
+    if (sourceId.isEmpty() || id.isEmpty()) return;
+    setStatus(Status::Querying);
+    auto backend = App::instance()->backend();
+
+    auto req   = proto::Request {};
+    auto inner = proto::SubscriptionSetRequest {};
+    inner.setSourceId(sourceId);
+    inner.setItemId(id);
+    inner.setSubscribed(subscribed);
+    req.setSubscriptionSet(std::move(inner));
+
+    auto self = QWatcher { this };
+    spawn([self, backend, req = std::move(req), sourceId, id, subscribed]() mutable -> task<void> {
+        auto result = co_await backend->send(std::move(req));
+        if (! co_await QAsyncResult::qexecutor()) co_return;
+        if (! self) co_return;
+
+        if (! result) {
+            self->inspect_set(result, [](const proto::Response&) {
+            });
+            Q_EMIT self->setFinished(sourceId, id, subscribed, false, self->error());
+            co_return;
+        }
+
+        self->inspect_set(result, [self, sourceId, id, subscribed](const proto::Response& rsp) {
+            const auto& update = rsp.subscriptionSet();
+            Q_EMIT self->setFinished(sourceId, id, subscribed, update.accepted(), update.error());
         });
         co_return;
     });

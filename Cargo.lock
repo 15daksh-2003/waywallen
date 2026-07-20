@@ -3491,7 +3491,6 @@ dependencies = [
  "bytes",
  "cc",
  "env_logger",
- "flate2",
  "futures-util",
  "glob",
  "libc",

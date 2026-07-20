@@ -14,8 +14,7 @@ namespace waywallen
 // QML singleton exposing miscellaneous UI helpers that are too heavy or
 // regex-bound to write inline as QML JavaScript. Surfaces grow here as
 // the QML side needs them.
-//   * bbcodeToHtml(src) — Steam Workshop BBCode (used in WE
-//     `project.json` descriptions) → Qt.StyledText HTML subset.
+//   * bbcodeToHtml(src) — provider-supplied BBCode → Qt.StyledText HTML subset.
 export class Util : public QObject {
     Q_OBJECT
     QML_ELEMENT

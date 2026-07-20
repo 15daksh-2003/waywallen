@@ -63,8 +63,8 @@ bool Util::isFlatpak() const {
 // --- BBCode → Qt StyledText HTML subset --------------------------------
 //
 // All regexes are static QRegularExpression so they compile once. PCRE
-// `DotMatchesEverythingOption` lets `.*?` span newlines (Steam authors
-// freely mix `\n` inside BBCode blocks).
+// `DotMatchesEverythingOption` lets `.*?` span newlines because provider
+// content may freely mix `\n` inside BBCode blocks.
 
 namespace
 {
@@ -152,7 +152,7 @@ QString Util::bbcodeToHtml(const QString& src) const {
         stage.replace(re, QStringLiteral("<i>“\\1”</i>"));
     }
 
-    // Headings — drop a tier so Workshop's [h1] doesn't dwarf the panel.
+    // Headings — drop a tier so provider content does not dwarf the panel.
     stage =
         replaceTag(stage, QStringLiteral("h1"), QStringLiteral("<h2>"), QStringLiteral("</h2>"));
     stage =

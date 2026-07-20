@@ -109,7 +109,7 @@ MD.ApplicationWindow {
     }
 
     W.DaemonNotRunDialog {}
-    W.SteamLoginDialog {}
+    W.QrLoginDialog {}
 
     ColumnLayout {
         anchors.fill: parent

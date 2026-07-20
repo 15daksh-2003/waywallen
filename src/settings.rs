@@ -541,31 +541,10 @@ where
     })
 }
 
-/// DepotDownloader-backed Steam Workshop download settings (`[workshop]`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct WorkshopSettings {
-    /// DepotDownloader binary, resolved via PATH by default.
-    pub depotdownloader_bin: String,
-    /// Steam login that owns Wallpaper Engine (used with `-remember-password`).
-    pub steam_username: String,
-}
-
-impl Default for WorkshopSettings {
-    fn default() -> Self {
-        Self {
-            depotdownloader_bin: "DepotDownloader".to_string(),
-            steam_username: String::new(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
     pub global: GlobalSettings,
-    #[serde(default)]
-    pub workshop: WorkshopSettings,
     /// Per-plugin string-to-string bag keyed by `RendererDef.name`.
     /// String values map cleanly to TOML and protobuf.
     #[serde(default, rename = "plugin")]
@@ -654,6 +633,17 @@ pub fn default_db_path() -> PathBuf {
     PathBuf::from("waywallen-v2.db")
 }
 
+pub fn data_dir() -> PathBuf {
+    default_db_path()
+        .parent()
+        .map(|path| path.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+pub fn plugin_state_dir() -> PathBuf {
+    data_dir().join("plugin-state")
+}
+
 /// Map a path segment to a safe `[A-Za-z0-9._-]` string (others become `_`).
 pub fn sanitize_path_segment(input: &str) -> String {
     let s: String = input
@@ -680,50 +670,6 @@ pub fn remote_content_dir(source_id: &str) -> PathBuf {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("remote").join(sanitize_path_segment(source_id))
-}
-
-/// Pinned .NET single-file extraction dir for DepotDownloader. Fixing it keeps
-/// its IsolatedStorage path (where its login token lives) stable across runs.
-pub fn dd_extract_dir() -> PathBuf {
-    let base = default_db_path()
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("depotdownloader").join("extract")
-}
-
-/// Root of .NET IsolatedStorage (`$XDG_DATA_HOME/IsolatedStorage`), where
-/// DepotDownloader keeps its `account.config`.
-pub fn isolated_storage_root() -> PathBuf {
-    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(xdg).join("IsolatedStorage");
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".local/share/IsolatedStorage");
-    }
-    PathBuf::from("IsolatedStorage")
-}
-
-/// Where the daemon persists the Steam sign-in (refresh/access token + account
-/// name): `<data dir>/steam-session.json`. Its presence means "signed in".
-pub fn steam_session_path() -> PathBuf {
-    let base = default_db_path()
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("steam-session.json")
-}
-
-/// Directory the daemon caches the Wallpaper Engine shared assets tree in
-/// (shaders, materials, models), fetched once via DepotDownloader:
-/// `<data dir>/wallpaper_engine/assets/`. Scene and web wallpapers render
-/// against it; video and image items do not need it.
-pub fn we_assets_dir() -> PathBuf {
-    let base = default_db_path()
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("wallpaper_engine").join("assets")
 }
 
 pub struct SettingsStore {
@@ -1373,7 +1319,6 @@ baz = "7"
         Arc::new(SettingsStore {
             inner: Arc::new(StdRwLock::new(Settings {
                 global: GlobalSettings::default(),
-                workshop: WorkshopSettings::default(),
                 plugins,
                 displays: HashMap::new(),
             })),

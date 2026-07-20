@@ -15,7 +15,6 @@ pub mod renderer_manager;
 pub mod routing;
 pub mod scheduler;
 pub mod settings;
-pub mod steam_session;
 pub mod sync;
 pub mod tasks;
 pub mod wallpaper;

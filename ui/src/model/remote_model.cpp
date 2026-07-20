@@ -26,17 +26,20 @@ QVariant RemoteListModel::data(const QModelIndex& index, int role) const {
     case PreviewUrlRole: return r.previewUrl;
     case AuthorRole: return r.author;
     case WpTypeRole: return r.wpType;
-    case InstalledRole: return r.installed;
+    case AcquisitionStateRole: return r.acquisitionState;
     default: return {};
     }
 }
 
 QHash<int, QByteArray> RemoteListModel::roleNames() const {
     return {
-        { ItemIdRole, "itemId"_ba },       { SourceIdRole, "sourceId"_ba },
-        { TitleRole, "title"_ba },         { PreviewUrlRole, "previewUrl"_ba },
-        { AuthorRole, "author"_ba },       { WpTypeRole, "wpType"_ba },
-        { InstalledRole, "installed"_ba },
+        { ItemIdRole, "itemId"_ba },
+        { SourceIdRole, "sourceId"_ba },
+        { TitleRole, "title"_ba },
+        { PreviewUrlRole, "previewUrl"_ba },
+        { AuthorRole, "author"_ba },
+        { WpTypeRole, "wpType"_ba },
+        { AcquisitionStateRole, "acquisitionState"_ba },
     };
 }
 
@@ -84,30 +87,37 @@ void RemoteListModel::append(const QList<RemoteRow>& rows, bool hasMore) {
     if (has_more_changed) Q_EMIT hasMoreChanged(m_has_more);
 }
 
-void RemoteListModel::setInstalled(const QString& sourceId, const QString& id, bool installed) {
+void RemoteListModel::setAcquisitionState(const QString& sourceId, const QString& id, int state) {
     for (int i = 0; i < m_rows.size(); ++i) {
         if (m_rows.at(i).sourceId == sourceId && m_rows.at(i).id == id) {
-            if (m_rows[i].installed != installed) {
-                m_rows[i].installed = installed;
-                const auto idx      = index(i, 0);
-                Q_EMIT dataChanged(idx, idx);
+            if (m_rows[i].acquisitionState != state) {
+                m_rows[i].acquisitionState = state;
+                const auto idx             = index(i, 0);
+                Q_EMIT dataChanged(idx, idx, { AcquisitionStateRole });
             }
             return;
         }
     }
 }
 
+QStringList RemoteListModel::itemIds() const {
+    QStringList ids;
+    ids.reserve(m_rows.size());
+    for (const auto& row : m_rows) ids.push_back(row.id);
+    return ids;
+}
+
 QVariantMap RemoteListModel::get(int row) const {
     QVariantMap m;
     if (row < 0 || row >= m_rows.size()) return m;
-    const auto& r      = m_rows.at(row);
-    m["sourceId"_L1]   = r.sourceId;
-    m["itemId"_L1]     = r.id;
-    m["title"_L1]      = r.title;
-    m["previewUrl"_L1] = r.previewUrl;
-    m["author"_L1]     = r.author;
-    m["wpType"_L1]     = r.wpType;
-    m["installed"_L1]  = r.installed;
+    const auto& r            = m_rows.at(row);
+    m["sourceId"_L1]         = r.sourceId;
+    m["itemId"_L1]           = r.id;
+    m["title"_L1]            = r.title;
+    m["previewUrl"_L1]       = r.previewUrl;
+    m["author"_L1]           = r.author;
+    m["wpType"_L1]           = r.wpType;
+    m["acquisitionState"_L1] = r.acquisitionState;
     return m;
 }
 

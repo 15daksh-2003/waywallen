@@ -296,14 +296,14 @@ fn info_from_manifest(
             checked_at_ms,
         );
     };
-    if manifest.entry_version != source_manager::ENTRY_VERSION {
+    if !source_manager::supports_entry_version(manifest.entry_version) {
         return unsupported_info(
             pkg,
             manifest.version,
             format!(
-                "entry_version {} is unsupported; expected {}",
+                "entry_version {} is unsupported; supported versions are {:?}",
                 manifest.entry_version,
-                source_manager::ENTRY_VERSION
+                source_manager::SUPPORTED_ENTRY_VERSIONS
             ),
             checked_at_ms,
         );
@@ -458,6 +458,38 @@ mod tests {
         let info = info_from_manifest(&pkg, manifest, 7);
         assert_eq!(info.state, PluginUpdateState::Unsupported);
         assert_eq!(info.checked_at_ms, 7);
+    }
+
+    #[test]
+    fn accepts_update_manifests_for_entry_v2_and_v3() {
+        let pkg = PluginPackageMeta {
+            id: "org.test".into(),
+            name: "Test".into(),
+            version: "1.0.0".into(),
+            update: Some("https://example.invalid/update.json".into()),
+            has_entry: true,
+            system: true,
+        };
+        let package = PluginUpdatePackage {
+            zip_url: "https://example.invalid/plugin.zip".into(),
+            sha256: "00".repeat(32),
+        };
+        for entry_version in [
+            source_manager::ENTRY_VERSION_V2,
+            source_manager::ENTRY_VERSION_V3,
+        ] {
+            let manifest = PluginUpdateManifest {
+                version: "2.0.0".into(),
+                entry_version,
+                spawn_version: renderer_manager::SPAWN_VERSION,
+                x86_64: Some(package.clone()),
+                aarch64: Some(package.clone()),
+            };
+            assert_eq!(
+                info_from_manifest(&pkg, manifest, 7).state,
+                PluginUpdateState::Available
+            );
+        }
     }
 
     #[test]

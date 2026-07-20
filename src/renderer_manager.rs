@@ -875,7 +875,7 @@ impl RendererManager {
         let mut cmd = Command::new(&renderer_def.bin);
         cmd.arg("--ipc").arg(&sock_path);
         // SPAWN_VERSION 3: extras (canonical `path` + plugin-specific
-        // keys like `assets`/`workshop_id`) ride as `--<key> <value>`
+        // keys like `assets`/`external_id`) ride as `--<key> <value>`
         let mut extra_keys: Vec<&String> = req.extras.keys().collect();
         extra_keys.sort();
         for k in extra_keys {
@@ -2162,7 +2162,7 @@ mod init_handshake_tests {
             types: vec!["scene".into()],
             priority: 100,
             spawn_version: Some(1),
-            extras: vec!["assets".into(), "workshop_id".into()],
+            extras: vec!["assets".into(), "external_id".into()],
             settings: Default::default(),
             legacy_events: None,
         }

@@ -11,6 +11,8 @@ MD.Page {
     property var item: null
     property var details: null
     property string sourceName: ""
+    property int remoteCapability: 0
+    property string remoteHint: ""
 
     readonly property string formattedSize: formatSize(details?.size)
     readonly property string tagsText: formatList(details?.tags)
@@ -61,6 +63,15 @@ MD.Page {
         if (unit === "B")
             return formatBytes(num);
         return num.toFixed(1) + " " + unit;
+    }
+
+    function subscriptionText(state) {
+        switch (Number(state ?? 0)) {
+        case 1: return qsTr("Unsubscribed");
+        case 2: return qsTr("Subscribed");
+        case 3: return qsTr("Updating");
+        default: return qsTr("Unknown");
+        }
     }
 
     component InfoLabel: MD.Text {
@@ -171,8 +182,32 @@ MD.Page {
                 text: String(root.details?.height ?? 0)
             }
 
-            InfoLabel { label: "Installed" }
-            InfoValue { text: root.item?.installed ? "true" : "false" }
+            InfoLabel {
+                visible: root.remoteCapability === 1
+                label: "Downloaded"
+            }
+            InfoValue {
+                visible: root.remoteCapability === 1
+                text: Number(root.item?.acquisitionState ?? 0) === 3 ? "true" : "false"
+            }
+
+            InfoLabel {
+                visible: root.remoteCapability === 2
+                label: "Subscription"
+            }
+            InfoValue {
+                visible: root.remoteCapability === 2
+                text: root.subscriptionText(root.item?.acquisitionState)
+            }
+
+            InfoLabel {
+                visible: root.hasText(root.remoteHint)
+                label: "Acquisition"
+            }
+            InfoValue {
+                visible: root.hasText(root.remoteHint)
+                text: root.remoteHint
+            }
 
             InfoLabel {
                 visible: root.hasText(root.tagsText)

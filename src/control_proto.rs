@@ -54,11 +54,18 @@ pub fn source_setting_to_proto(s: &crate::plugin::source_manager::SourceSetting)
 }
 
 pub fn source_action_to_proto(a: &crate::plugin::source_manager::SourceAction) -> PluginActionDef {
+    use crate::plugin::source_manager::SourceActionKind;
     PluginActionDef {
         id: a.id.clone(),
         label: a.label.clone(),
         group: a.group.clone(),
         order: a.order,
+        kind: match a.kind {
+            SourceActionKind::Invoke => PluginActionKind::Invoke,
+            SourceActionKind::QrLogin => PluginActionKind::QrLogin,
+        } as i32,
+        visible: a.visible,
+        enabled: a.enabled,
     }
 }
 

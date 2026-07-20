@@ -11,12 +11,13 @@ MD.Page {
     padding: MD.MProp.size.isCompact ? 0 : 12
 
     property var detailRow: null
-    property int detailState: 0
+    property int detailDownloadState: 0
 
     property string sourceId: ""
     property var sortOptions: []
     property int sortIndex: 0
     property var discoverTweakSheet: null
+    property var subscriptionPreviousStates: ({})
 
     W.TweakState {
         id: discoverTweakState
@@ -39,6 +40,16 @@ MD.Page {
     function sourceTags(id) {
         const s = sourceInfo(id);
         return s && s.tags ? s.tags : [];
+    }
+
+    function sourceCapability(id) {
+        const s = sourceInfo(id);
+        return s ? Number(s.remoteCapability ?? 0) : 0;
+    }
+
+    function sourceRemoteHint(id) {
+        const s = sourceInfo(id);
+        return s ? String(s.remoteHint ?? "") : "";
     }
 
     function sameList(a, b) {
@@ -97,7 +108,7 @@ MD.Page {
         searchQuery.sortKey = sortOptions.length > 0 ? sortOptions[sortIndex].key : "";
         if (sourceChanged) {
             detailRow = null;
-            detailState = 0;
+            detailDownloadState = 0;
             detailsQuery.itemId = "";
         }
     }
@@ -111,14 +122,15 @@ MD.Page {
 
     function selectItem(index) {
         detailRow = searchQuery.model.get(index);
-        detailState = detailRow.installed ? 3 : 0;
+        detailDownloadState = root.sourceCapability(detailRow.sourceId) === 1
+            ? Number(detailRow.acquisitionState ?? 0) : 0;
         detailsQuery.sourceId = detailRow.sourceId;
         detailsQuery.itemId = detailRow.itemId;
     }
 
     function closeDetail() {
         detailRow = null;
-        detailState = 0;
+        detailDownloadState = 0;
         detailsQuery.itemId = "";
         m_grid.currentIndex = -1;
     }
@@ -131,9 +143,25 @@ MD.Page {
             props: {
                 item: root.detailRow,
                 details: detailsQuery,
-                sourceName: root.sourceName(root.detailRow.sourceId)
+                sourceName: root.sourceName(root.detailRow.sourceId),
+                remoteCapability: root.sourceCapability(root.detailRow.sourceId),
+                remoteHint: root.sourceRemoteHint(root.detailRow.sourceId)
             }
         }, root.Window.window);
+    }
+
+    function setDetailSubscription(subscribed) {
+        if (!root.detailRow)
+            return;
+        const sourceId = root.detailRow.sourceId;
+        const itemId = root.detailRow.itemId;
+        const key = sourceId + "\n" + itemId;
+        const pending = Object.assign({}, root.subscriptionPreviousStates);
+        pending[key] = Number(root.detailRow.acquisitionState ?? 0);
+        root.subscriptionPreviousStates = pending;
+        root.detailRow.acquisitionState = 3;
+        searchQuery.model.setAcquisitionState(sourceId, itemId, 3);
+        subscriptionQuery.setSubscribed(sourceId, itemId, subscribed);
     }
 
     function formatBytes(bytes) {
@@ -292,6 +320,10 @@ MD.Page {
 
     W.RemoteSearchQuery {
         id: searchQuery
+        onStateChanged: {
+            if (root.sourceCapability(root.sourceId) === 2)
+                subscriptionQuery.refresh(root.sourceId, model.itemIds());
+        }
     }
 
     W.RemoteFilterDialog {
@@ -312,10 +344,10 @@ MD.Page {
     W.RemoteDownloadQuery {
         id: dlQuery
         function onUninstalled(sourceId, id) {
-            searchQuery.model.setInstalled(sourceId, id, false);
+            searchQuery.model.setAcquisitionState(sourceId, id, 0);
             if (root.detailRow && root.detailRow.sourceId === sourceId && root.detailRow.itemId === id) {
-                root.detailRow.installed = false;
-                root.detailState = 0;
+                root.detailRow.acquisitionState = 0;
+                root.detailDownloadState = 0;
             }
             W.Action.toast(qsTr("Uninstalled"));
         }
@@ -324,20 +356,61 @@ MD.Page {
         }
         function onRejected(sourceId, id, error) {
             if (root.detailRow && root.detailRow.sourceId === sourceId && root.detailRow.itemId === id)
-                root.detailState = 0;
+                root.detailDownloadState = 0;
             W.Action.toast(qsTr("Download rejected: ") + error);
+        }
+    }
+
+    W.RemoteSubscriptionQuery {
+        id: subscriptionQuery
+        function onStatesLoaded(sourceId, items, error) {
+            if (sourceId !== root.sourceId)
+                return;
+            for (const item of items) {
+                const key = sourceId + "\n" + item.id;
+                if (key in root.subscriptionPreviousStates)
+                    continue;
+                searchQuery.model.setAcquisitionState(sourceId, item.id, item.state);
+                if (root.detailRow && root.detailRow.sourceId === sourceId
+                        && root.detailRow.itemId === item.id) {
+                    root.detailRow.acquisitionState = item.state;
+                }
+            }
+            if (error.length > 0)
+                W.Action.toast(qsTr("Couldn't load subscription status: ") + error);
+        }
+        function onSetFinished(sourceId, id, subscribed, accepted, error) {
+            const key = sourceId + "\n" + id;
+            const previous = Number(root.subscriptionPreviousStates[key] ?? 0);
+            const state = accepted ? 3 : previous;
+            const pending = Object.assign({}, root.subscriptionPreviousStates);
+            delete pending[key];
+            root.subscriptionPreviousStates = pending;
+            searchQuery.model.setAcquisitionState(sourceId, id, state);
+            if (root.detailRow && root.detailRow.sourceId === sourceId
+                    && root.detailRow.itemId === id) {
+                root.detailRow.acquisitionState = state;
+            }
+            if (accepted) {
+                subscriptionQuery.refresh(sourceId, [id]);
+                const message = subscribed
+                    ? qsTr("Subscription request accepted")
+                    : qsTr("Unsubscribe request accepted");
+                const hint = root.sourceRemoteHint(sourceId);
+                W.Action.toast(hint.length > 0 ? message + "\n" + hint : message);
+            } else {
+                W.Action.toast(qsTr("Subscription update failed: ") + error);
+            }
         }
     }
 
     Connections {
         target: W.Notify
         function onRemoteDownloadProgress(sourceId, id, state, error) {
-            if (state === 3)
-                searchQuery.model.setInstalled(sourceId, id, true);
+            searchQuery.model.setAcquisitionState(sourceId, id, state);
             if (root.detailRow && root.detailRow.sourceId === sourceId && root.detailRow.itemId === id) {
-                root.detailState = state;
-                if (state === 3)
-                    root.detailRow.installed = true;
+                root.detailDownloadState = state;
+                root.detailRow.acquisitionState = state;
             }
             if (state === 5 && error.length > 0)
                 W.Action.toast(qsTr("Download failed: ") + error);
@@ -361,6 +434,12 @@ MD.Page {
             availabilityQuery.reload();
             if (root.sourceId.length > 0)
                 searchQuery.reload();
+        }
+        function onPluginStateChanged() {
+            settingsCfgQuery.reload();
+            availabilityQuery.reload();
+            if (root.sourceCapability(root.sourceId) === 2)
+                subscriptionQuery.refresh(root.sourceId, searchQuery.model.itemIds());
         }
     }
 
@@ -508,6 +587,7 @@ MD.Page {
                         model: searchQuery.model
 
                         delegate: RemoteCard {
+                            remoteCapability: root.sourceCapability(root.sourceId)
                             itemWidth: m_grid._displayItemWidth
                             itemHeight: m_grid._displayItemHeight
                             onClicked: {
@@ -765,14 +845,15 @@ MD.Page {
                 }
 
                 MD.Button {
+                    visible: root.sourceCapability(root.sourceId) === 1
                     Layout.fillWidth: true
                     Layout.leftMargin: 16
                     Layout.rightMargin: 16
                     Layout.bottomMargin: 16
-                    mdState.type: root.detailState === 3 ? MD.Enum.BtFilledTonal : MD.Enum.BtFilled
-                    enabled: root.detailState === 0 || root.detailState === 3
+                    mdState.type: root.detailDownloadState === 3 ? MD.Enum.BtFilledTonal : MD.Enum.BtFilled
+                    enabled: root.detailDownloadState === 0 || root.detailDownloadState === 3
                     text: {
-                        switch (root.detailState) {
+                        switch (root.detailDownloadState) {
                         case 1: return qsTr("Pending");
                         case 2: return qsTr("Downloading");
                         case 3: return qsTr("Uninstall");
@@ -783,13 +864,78 @@ MD.Page {
                     }
                     onClicked: {
                         if (!root.detailRow) return;
-                        if (root.detailState === 3) {
+                        if (root.detailDownloadState === 3) {
                             dlQuery.uninstall(root.detailRow.sourceId, root.detailRow.itemId);
                         } else {
-                            root.detailState = 1;
+                            root.detailDownloadState = 1;
                             dlQuery.start(root.detailRow.sourceId, root.detailRow.itemId);
                         }
                     }
+                }
+
+                MD.Label {
+                    visible: root.sourceCapability(root.sourceId) === 2
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 16
+                    Layout.rightMargin: 16
+                    horizontalAlignment: Text.AlignHCenter
+                    color: MD.Token.color.on_surface_variant
+                    text: {
+                        const state = root.detailRow
+                            ? Number(root.detailRow.acquisitionState ?? 0) : 0;
+                        switch (state) {
+                        case 1: return qsTr("Not subscribed");
+                        case 2: return qsTr("Subscribed");
+                        case 3: return qsTr("Updating subscription…");
+                        default: return qsTr("Subscription status unknown");
+                        }
+                    }
+                }
+
+                MD.Button {
+                    visible: root.sourceCapability(root.sourceId) === 2
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 16
+                    Layout.rightMargin: 16
+                    Layout.bottomMargin: 16
+                    readonly property int subscriptionState: root.detailRow
+                        ? Number(root.detailRow.acquisitionState ?? 0) : 0
+                    mdState.type: subscriptionState === 2 ? MD.Enum.BtFilledTonal : MD.Enum.BtFilled
+                    enabled: subscriptionState !== 3
+                    text: {
+                        switch (subscriptionState) {
+                        case 2: return qsTr("Unsubscribe");
+                        case 3: return qsTr("Updating…");
+                        default: return qsTr("Subscribe");
+                        }
+                    }
+                    onClicked: root.setDetailSubscription(subscriptionState !== 2)
+                }
+
+                MD.Button {
+                    readonly property int subscriptionState: root.detailRow
+                        ? Number(root.detailRow.acquisitionState ?? 0) : 0
+                    visible: root.sourceCapability(root.sourceId) === 2
+                        && subscriptionState === 0
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 16
+                    Layout.rightMargin: 16
+                    Layout.bottomMargin: 16
+                    mdState.type: MD.Enum.BtFilledTonal
+                    text: qsTr("Unsubscribe")
+                    onClicked: root.setDetailSubscription(false)
+                }
+
+                MD.Label {
+                    visible: root.sourceCapability(root.sourceId) === 2
+                        && root.sourceRemoteHint(root.sourceId).length > 0
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 16
+                    Layout.rightMargin: 16
+                    Layout.bottomMargin: 16
+                    wrapMode: Text.WordWrap
+                    color: MD.Token.color.on_surface_variant
+                    text: root.sourceRemoteHint(root.sourceId)
                 }
             }
         }

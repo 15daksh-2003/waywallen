@@ -25,7 +25,7 @@ message ServerFrame {
 }
 
 message Request {
-  reserved 55, 56;
+  reserved 55, 56, 67, 68;
 
   uint64 request_id = 1;
   oneof payload {
@@ -83,14 +83,15 @@ message Request {
     PluginUpdateInstallRequest plugin_update_install = 64;
     AutostartGetRequest       autostart_get = 65;
     AutostartSetRequest       autostart_set = 66;
-    SteamLoginStartRequest    steam_login_start = 67;
-    SteamLoginCancelRequest   steam_login_cancel = 68;
     PluginActionRequest       plugin_action = 69;
+    SubscriptionStatusRequest subscription_status = 70;
+    SubscriptionSetRequest    subscription_set = 71;
+    QrLoginCancelRequest      qr_login_cancel = 72;
   }
 }
 
 message Response {
-  reserved 55, 56;
+  reserved 55, 56, 67, 68;
 
   uint64 request_id = 1;
   // Coarse status class, kept for back-compat with clients that haven't
@@ -156,9 +157,10 @@ message Response {
     PluginUpdateInstallResponse plugin_update_install = 64;
     AutostartGetResponse       autostart_get = 65;
     AutostartSetResponse       autostart_set = 66;
-    SteamLoginStartResponse    steam_login_start = 67;
-    SteamLoginCancelResponse   steam_login_cancel = 68;
     PluginActionResponse       plugin_action = 69;
+    SubscriptionStatusResponse subscription_status = 70;
+    SubscriptionSetResponse    subscription_set = 71;
+    QrLoginCancelResponse      qr_login_cancel = 72;
   }
 }
 
@@ -371,7 +373,7 @@ message WallpaperEntry {
   // Source-provided free-form description (e.g. Wallpaper Engine
   // `project.description`). Empty when the source didn't set one.
   string description = 14;
-  // Stable source/plugin identifier (e.g. Wallpaper Engine workshop id).
+  // Stable identifier assigned by the source plugin.
   // Empty when the source didn't set one.
   string external_id = 15;
   // Per-wallpaper display layout override. When set, this whole layout
@@ -476,7 +478,7 @@ message SourcePluginInfo {
   repeated string types = 2;
   string version = 3;
   // Short label a UI shows as the placeholder when prompting for a
-  // library path (e.g. "Steam Library Path"). Empty = UI falls back
+  // library path (e.g. "Media Library Path"). Empty = UI falls back
   // to a generic label.
   string library_label = 4;
   // Longer helper text describing what kind of path to choose. May
@@ -678,8 +680,8 @@ message RemoteSourceInfo {
   repeated RemoteSortOption sorts = 4;
   repeated string tags = 5;
   string content_dir = 6;
-  // Domain id of the owning plugin (e.g. org.waywallen.open-wallpaper-engine) — the key of
-  // its `[plugin."<id>"]` config table for SettingsSet.
+  // Domain id of the owning installable plugin (e.g. org.waywallen.open-wallpaper-engine).
+  // Source settings remain keyed by this source's `id` in SettingsSet.
   string owner_plugin_id = 7;
   // Settings the source plugin declares via `info().settings`, so the UI can
   // offer a config affordance for this source.
@@ -690,6 +692,21 @@ message RemoteSourceInfo {
   repeated PluginActionDef actions = 10;
   // Read-only status rows (`info().status`) with daemon-computed values.
   repeated PluginStatusRow status = 11;
+  RemoteCapability remote_capability = 12;
+  // Provider-owned explanation of the acquisition flow. The host displays it verbatim.
+  string remote_hint = 13;
+}
+
+enum RemoteCapability {
+  REMOTE_CAPABILITY_UNSPECIFIED = 0;
+  REMOTE_CAPABILITY_DOWNLOAD = 1;
+  REMOTE_CAPABILITY_SUBSCRIPTION = 2;
+}
+
+enum PluginActionKind {
+  PLUGIN_ACTION_KIND_UNSPECIFIED = 0;
+  PLUGIN_ACTION_KIND_INVOKE = 1;
+  PLUGIN_ACTION_KIND_QR_LOGIN = 2;
 }
 
 message PluginActionDef {
@@ -697,6 +714,9 @@ message PluginActionDef {
   string label = 2;
   string group = 3;
   int32 order = 4;
+  PluginActionKind kind = 5;
+  bool visible = 6;
+  bool enabled = 7;
 }
 message PluginStatusRow {
   string id = 1;
@@ -706,8 +726,8 @@ message PluginStatusRow {
   string value = 5;
 }
 
-// Trigger a plugin-declared action (e.g. the workshop Steam sign-in/out). The
-// daemon routes `action_id` to plugin-specific handling.
+// Trigger a plugin-declared action. The daemon routes `action_id` to the
+// owning plugin.
 message PluginActionRequest {
   string plugin_id = 1;
   string action_id = 2;
@@ -715,6 +735,7 @@ message PluginActionRequest {
 message PluginActionResponse {
   bool accepted = 1;
   string error = 2;
+  string session_id = 3;
 }
 
 message RemoteAvailabilityResponse {
@@ -727,7 +748,7 @@ message RemoteItem {
   string title = 2;
   string preview_url = 3;
   string author = 4;
-  bool   installed = 5;
+  bool   downloaded = 5;
   string source_id = 6;
   string wp_type = 7;
 }
@@ -791,34 +812,64 @@ message RemoteDownloadProgress {
   string error = 4;
 }
 
-// In-UI Steam login: the daemon drives DepotDownloader's own `-qr` flow and
-// relays its ASCII-art QR (DepotDownloader never prints the challenge URL) plus
-// status to the UI. Used by the org.waywallen.open-wallpaper-engine plugin's downloads.
-message SteamLoginStartRequest {}
-message SteamLoginStartResponse {
-  bool   accepted = 1;
+enum SubscriptionState {
+  SUBSCRIPTION_STATE_UNKNOWN = 0;
+  SUBSCRIPTION_STATE_UNSUBSCRIBED = 1;
+  SUBSCRIPTION_STATE_SUBSCRIBED = 2;
+}
+
+message SubscriptionItemState {
+  string id = 1;
+  SubscriptionState state = 2;
+}
+
+message SubscriptionStatusRequest {
+  string source_id = 1;
+  repeated string item_ids = 2;
+}
+message SubscriptionStatusResponse {
+  repeated SubscriptionItemState items = 1;
   string error = 2;
 }
-message SteamLoginCancelRequest {}
-message SteamLoginCancelResponse {
+
+message SubscriptionSetRequest {
+  string source_id = 1;
+  string item_id = 2;
+  bool subscribed = 3;
+}
+message SubscriptionSetResponse {
+  bool accepted = 1;
+  string error = 2;
+}
+
+message QrLoginCancelRequest {
+  string session_id = 1;
+}
+message QrLoginCancelResponse {
   bool cancelled = 1;
 }
-enum SteamLoginState {
-  STEAM_LOGIN_STATE_UNSPECIFIED = 0;
-  STEAM_LOGIN_STATE_STARTING = 1;
-  STEAM_LOGIN_STATE_AWAITING_SCAN = 2;
-  STEAM_LOGIN_STATE_SUCCESS = 3;
-  STEAM_LOGIN_STATE_FAILED = 4;
-  STEAM_LOGIN_STATE_CANCELLED = 5;
+
+enum QrLoginState {
+  QR_LOGIN_STATE_UNSPECIFIED = 0;
+  QR_LOGIN_STATE_STARTING = 1;
+  QR_LOGIN_STATE_AWAITING_SCAN = 2;
+  QR_LOGIN_STATE_AWAITING_CONFIRMATION = 3;
+  QR_LOGIN_STATE_CHALLENGE_CHANGED = 4;
+  QR_LOGIN_STATE_SUCCEEDED = 5;
+  QR_LOGIN_STATE_EXPIRED = 6;
+  QR_LOGIN_STATE_FAILED = 7;
+  QR_LOGIN_STATE_CANCELLED = 8;
 }
-message SteamLoginProgress {
-  SteamLoginState state = 1;
-  // QR image (SVG `data:` URL) to render for scanning, set when
-  // state == AWAITING_SCAN.
-  string qr_image = 2;
-  // Steam account name, set when state == SUCCESS.
-  string account_name = 3;
-  string error = 4;
+message QrLoginProgress {
+  string session_id = 1;
+  string plugin_id = 2;
+  string action_id = 3;
+  QrLoginState state = 4;
+  string qr_image = 5;
+  string display_value = 6;
+  string error = 7;
+  string title = 8;
+  string instruction = 9;
 }
 
 message DisplayListRequest {}
@@ -887,8 +938,8 @@ message LibraryRemoveRequest {
   int64 id = 1;
 }
 
-// Ask every source plugin to look in well-known locations (Pictures,
-// Steam workshop, etc.) and auto-register anything it finds as a new
+// Ask every source plugin to look in well-known locations and
+// auto-register anything it finds as a new
 // library. Returns the paths that were actually added (already-known
 // paths are silently skipped).
 message LibraryAutoDetectRequest {}
@@ -901,6 +952,7 @@ message LibraryAutoDetectResponse {
 // ---------------------------------------------------------------------------
 
 message Event {
+  reserved 22;
   oneof payload {
     DisplaySnapshot        display_snapshot          = 1;
     DisplayChanged         display_changed           = 2;
@@ -922,7 +974,8 @@ message Event {
     TaskProgress           task_progress             = 19;
     PluginRestartFailed    plugin_restart_failed     = 20;
     Empty                  plugin_changed            = 21;
-    SteamLoginProgress     steam_login_progress      = 22;
+    QrLoginProgress        qr_login_progress         = 23;
+    Empty                  plugin_state_changed      = 24;
   }
 }
 

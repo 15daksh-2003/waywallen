@@ -19,7 +19,7 @@ export struct RemoteRow {
     QString previewUrl;
     QString author;
     QString wpType;
-    bool    installed { false };
+    int     acquisitionState { 0 };
 };
 
 export class RemoteListModel : public QAbstractListModel {
@@ -38,7 +38,7 @@ public:
         PreviewUrlRole,
         AuthorRole,
         WpTypeRole,
-        InstalledRole,
+        AcquisitionStateRole,
     };
 
     explicit RemoteListModel(QObject* parent = nullptr);
@@ -55,7 +55,8 @@ public:
 
     void             reset(QList<RemoteRow> rows, bool hasMore);
     void             append(const QList<RemoteRow>& rows, bool hasMore);
-    Q_INVOKABLE void setInstalled(const QString& sourceId, const QString& id, bool installed);
+    Q_INVOKABLE void setAcquisitionState(const QString& sourceId, const QString& id, int state);
+    Q_INVOKABLE QStringList itemIds() const;
 
     Q_INVOKABLE QVariantMap get(int row) const;
 

@@ -911,20 +911,28 @@ fn global_event_to_pb(e: &GlobalEvent, state: &Arc<AppState>) -> Option<pb::Even
                 },
             )),
         }),
-        GlobalEvent::SteamLoginProgress {
-            state: login_state,
+        GlobalEvent::QrLoginProgress {
+            session_id,
+            plugin_id,
+            action_id,
+            state,
             qr_image,
-            account_name,
+            display_value,
             error,
+            title,
+            instruction,
         } => Some(pb::Event {
-            payload: Some(pb::event::Payload::SteamLoginProgress(
-                pb::SteamLoginProgress {
-                    state: *login_state,
-                    qr_image: qr_image.clone(),
-                    account_name: account_name.clone(),
-                    error: error.clone(),
-                },
-            )),
+            payload: Some(pb::event::Payload::QrLoginProgress(pb::QrLoginProgress {
+                session_id: session_id.clone(),
+                plugin_id: plugin_id.clone(),
+                action_id: action_id.clone(),
+                state: *state,
+                qr_image: qr_image.clone(),
+                display_value: display_value.clone(),
+                error: error.clone(),
+                title: title.clone(),
+                instruction: instruction.clone(),
+            })),
         }),
         GlobalEvent::SettingsChanged => {
             let snap = state.settings.snapshot();
@@ -944,6 +952,9 @@ fn global_event_to_pb(e: &GlobalEvent, state: &Arc<AppState>) -> Option<pb::Even
         }),
         GlobalEvent::PluginChanged => Some(pb::Event {
             payload: Some(pb::event::Payload::PluginChanged(pb::Empty {})),
+        }),
+        GlobalEvent::PluginStateChanged => Some(pb::Event {
+            payload: Some(pb::event::Payload::PluginStateChanged(pb::Empty {})),
         }),
         GlobalEvent::TaskProgress(progress) => Some(pb::Event {
             payload: Some(pb::event::Payload::TaskProgress(pb::TaskProgress {
@@ -1008,54 +1019,8 @@ fn publish_remote_download_progress(
     });
 }
 
-fn publish_steam_login(
-    state: &Arc<AppState>,
-    login_state: pb::SteamLoginState,
-    qr_image: impl Into<String>,
-    account_name: impl Into<String>,
-    error: impl Into<String>,
-) {
-    state.events.publish(GlobalEvent::SteamLoginProgress {
-        state: login_state as i32,
-        qr_image: qr_image.into(),
-        account_name: account_name.into(),
-        error: error.into(),
-    });
-}
-
-/// Compute the current value of a plugin-declared status row. Plugin-specific;
-/// isolated here so the wire/UI stay generic.
-fn compute_source_status(_state: &Arc<AppState>, source_id: &str, status_id: &str) -> String {
-    match (source_id, status_id) {
-        ("wallpaper_engine", "steam_account") => match crate::steam_login::account_name() {
-            Some(user) if !user.trim().is_empty() => format!("Signed in as {user}"),
-            Some(_) => "Signed in".to_string(),
-            None => "Not signed in".to_string(),
-        },
-        _ => String::new(),
-    }
-}
-
-fn publish_steam_login_update(state: &Arc<AppState>, update: crate::steam_login::LoginUpdate) {
-    use crate::steam_login::LoginUpdate;
-    use pb::SteamLoginState as S;
-    match update {
-        LoginUpdate::AwaitingScan(qr_image) => {
-            publish_steam_login(state, S::AwaitingScan, qr_image, "", "")
-        }
-        LoginUpdate::Success(account) => {
-            publish_steam_login(state, S::Success, "", account, "");
-            // Refresh the "signed in" status/actions shown in the config page.
-            state.events.publish(GlobalEvent::SettingsChanged);
-        }
-        LoginUpdate::Failed(error) => publish_steam_login(state, S::Failed, "", "", error),
-        LoginUpdate::Cancelled => publish_steam_login(state, S::Cancelled, "", "", ""),
-    }
-}
-
 async fn default_remote_source_id(state: &Arc<AppState>) -> Result<String> {
-    let sm = state.source_manager.lock().await;
-    let sources = sm.discover_sources()?;
+    let sources = state.source_manager.discover_sources()?;
     sources
         .into_iter()
         .next()
@@ -1070,9 +1035,23 @@ async fn resolve_remote_source_id(state: &Arc<AppState>, source_id: &str) -> Res
     default_remote_source_id(state).await
 }
 
+fn remote_capability(
+    state: &Arc<AppState>,
+    source_id: &str,
+) -> Result<Option<crate::plugin::source_manager::RemoteCapability>> {
+    state
+        .source_manager
+        .discover_sources()?
+        .into_iter()
+        .find(|source| source.plugin_id == source_id)
+        .map(|source| source.remote_capability)
+        .ok_or_else(|| anyhow!("remote source '{source_id}' not found"))
+}
+
 async fn source_plugin_version(state: &Arc<AppState>, source_id: &str) -> String {
-    let sm = state.source_manager.lock().await;
-    sm.plugin_version(source_id)
+    state
+        .source_manager
+        .plugin_version(source_id)
         .unwrap_or_else(|| "0.0.0".to_string())
 }
 
@@ -1211,10 +1190,7 @@ async fn run_remote_download(state: Arc<AppState>, source_id: String, id: String
         "",
     );
 
-    let info = {
-        let sm = state.source_manager.lock().await;
-        sm.call_download(&source_id, &id).await?
-    };
+    let info = state.source_manager.call_download(&source_id, &id).await?;
 
     let dir = remote_content_dir(&source_id);
     tokio::fs::create_dir_all(&dir).await?;
@@ -1226,108 +1202,17 @@ async fn run_remote_download(state: Arc<AppState>, source_id: String, id: String
         "",
     );
 
-    match info.provider.as_deref().unwrap_or("http") {
-        "steam_workshop" => {
-            let item_dir =
-                crate::fetcher::steam_workshop::fetch(&state, &source_id, &id, &dir).await?;
-            let resolved = {
-                let sm = state.source_manager.lock().await;
-                sm.call_resolve(&source_id, &id, &item_dir.to_string_lossy())
-                    .await?
-            };
-            upsert_remote_resolved(&state, &source_id, &dir, &item_dir, &resolved).await?;
-            // Scene/web items render against the shared WE assets tree. Fetch it
-            // once so machines without a Steam WE install can still render.
-            // Best-effort: the item downloaded fine, and a Steam install may
-            // already supply the assets the plugin auto-detects.
-            if matches!(resolved.wp_type.as_str(), "scene" | "web") {
-                let assets = crate::settings::we_assets_dir();
-                if !assets.join("shaders").is_dir() {
-                    if let Err(e) =
-                        crate::fetcher::steam_workshop::ensure_assets(&state, &assets).await
-                    {
-                        log::warn!("could not fetch Wallpaper Engine assets: {e}");
-                    }
-                }
-            }
-        }
-        _ => {
-            if info.url.trim().is_empty() {
-                return Err(anyhow!("download url is empty"));
-            }
-            let filename = safe_remote_filename(&info.filename, &id);
-            let target = dir.join(filename);
-            download_remote_file(&info.url, &target).await?;
-            write_remote_sidecar(&target, &info).await?;
-            upsert_remote_download(&state, &source_id, &dir, &target, &info).await?;
-        }
+    if info.url.trim().is_empty() {
+        return Err(anyhow!("download url is empty"));
     }
+    let filename = safe_remote_filename(&info.filename, &id);
+    let target = dir.join(filename);
+    download_remote_file(&info.url, &target).await?;
+    write_remote_sidecar(&target, &info).await?;
+    upsert_remote_download(&state, &source_id, &dir, &target, &info).await?;
 
     control::notify_wallpaper_db_changed(&state, 1).await;
     publish_remote_download_progress(&state, &source_id, &id, pb::RemoteDownloadState::Done, "");
-    Ok(())
-}
-
-/// Upsert a directory item resolved by `discover.resolve`. `item_dir` is the
-/// fetched directory; `resolved.resource`/`preview` are relative to it, and the
-/// DB `path` is relative to the remote library dir (e.g. `<id>/scene.pkg`).
-async fn upsert_remote_resolved(
-    state: &Arc<AppState>,
-    source_id: &str,
-    dir: &Path,
-    item_dir: &Path,
-    resolved: &crate::plugin::source_manager::DiscoverResolve,
-) -> Result<()> {
-    if resolved.wp_type.trim().is_empty() {
-        return Err(anyhow!("resolved wp_type is empty"));
-    }
-    let lib = ensure_remote_library(state, source_id, dir).await?;
-    let rel_of = |p: &Path| -> Option<String> {
-        p.strip_prefix(dir)
-            .ok()
-            .and_then(|r| r.to_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-    };
-    let resource = item_dir.join(&resolved.resource);
-    let rel = rel_of(&resource)
-        .ok_or_else(|| anyhow!("resolved resource is not under remote library"))?;
-    let preview_abs = resolved.preview.as_ref().map(|p| item_dir.join(p));
-    let preview_rel = preview_abs.as_deref().and_then(rel_of);
-    let title = if resolved.name.trim().is_empty() {
-        resource
-            .file_name()
-            .and_then(|v| v.to_str())
-            .unwrap_or("Workshop wallpaper")
-    } else {
-        resolved.name.as_str()
-    };
-    let item = repo::upsert_item(
-        &state.db,
-        repo::ItemUpsertArgs {
-            plugin_id: lib.plugin_id,
-            library_id: lib.id,
-            path: &rel,
-            ty: &resolved.wp_type,
-            display_name: title,
-            preview_path: preview_rel.as_deref(),
-            description: (!resolved.description.trim().is_empty())
-                .then_some(resolved.description.as_str()),
-            external_id: (!resolved.external_id.trim().is_empty())
-                .then_some(resolved.external_id.as_str()),
-            size: resolved.size,
-            width: None,
-            height: None,
-            content_rating: resolved
-                .content_rating
-                .as_deref()
-                .filter(|v| !v.trim().is_empty()),
-        },
-    )
-    .await?;
-    let tags = repo::upsert_tags(&state.db, &resolved.tags).await?;
-    let tag_ids: Vec<i64> = tags.into_iter().map(|tag| tag.id).collect();
-    repo::replace_item_tags(&state.db, item.id, &tag_ids).await?;
     Ok(())
 }
 
@@ -1350,11 +1235,10 @@ async fn remove_wallpaper_entry_files_and_db(
     entry: &crate::wallpaper::types::WallpaperEntry,
 ) -> Result<()> {
     let libraries = source_libraries_for_plugin(state, &entry.plugin_name).await?;
-    {
-        let sm = state.source_manager.lock().await;
-        sm.remove_item(&entry.plugin_name, entry, &libraries)
-            .await?;
-    }
+    state
+        .source_manager
+        .remove_item(&entry.plugin_name, entry, &libraries)
+        .await?;
     repo::delete_item(&state.db, entry.item_id).await?;
     Ok(())
 }
@@ -1761,13 +1645,15 @@ async fn dispatch_inner(
             // an N+1 round-trip when paginating large libraries).
             let page_item_ids: Vec<i64> = page_entries.iter().map(|e| e.item_id).collect();
             let tag_map = repo::list_tags_for_items(&state.db, &page_item_ids).await?;
-            let remove_support_by_item = {
-                let sm = state.source_manager.lock().await;
-                page_entries
-                    .iter()
-                    .map(|e| (e.item_id, sm.supports_item_remove(&e.plugin_name)))
-                    .collect::<std::collections::HashMap<_, _>>()
-            };
+            let remove_support_by_item = page_entries
+                .iter()
+                .map(|e| {
+                    (
+                        e.item_id,
+                        state.source_manager.supports_item_remove(&e.plugin_name),
+                    )
+                })
+                .collect::<std::collections::HashMap<_, _>>();
 
             // WallpaperList skips property schema/overrides; WallpaperGet
             // loads those on demand per item.
@@ -1804,17 +1690,17 @@ async fn dispatch_inner(
             let tags = entry.tags.clone();
             // Source plugin owns the property schema; empty string means
             // the plugin exposes no properties for this item.
-            let (schema, supports_item_remove) = {
-                let sm = state.source_manager.lock().await;
-                let schema = sm
-                    .call_properties(&entry.plugin_name, &entry)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|schema| dedupe_predefined_schema(&schema))
-                    .unwrap_or_default();
-                (schema, sm.supports_item_remove(&entry.plugin_name))
-            };
+            let schema = state
+                .source_manager
+                .call_properties(&entry.plugin_name, &entry)
+                .await
+                .ok()
+                .flatten()
+                .map(|schema| dedupe_predefined_schema(&schema))
+                .unwrap_or_default();
+            let supports_item_remove = state
+                .source_manager
+                .supports_item_remove(&entry.plugin_name);
             let overrides = repo::get_user_property_overrides_raw(&state.db, entry.item_id)
                 .await?
                 .unwrap_or_default();
@@ -1902,8 +1788,6 @@ async fn dispatch_inner(
                     let effective_value = if value.is_none() {
                         let schema = state
                             .source_manager
-                            .lock()
-                            .await
                             .call_properties(&entry.plugin_name, &entry)
                             .await
                             .ok()
@@ -1984,10 +1868,9 @@ async fn dispatch_inner(
             }
 
             let layout_override = layout.map(WallpaperLayoutOverride::from_resolved);
-            let supports_item_remove = {
-                let sm = state.source_manager.lock().await;
-                sm.supports_item_remove(&entry.plugin_name)
-            };
+            let supports_item_remove = state
+                .source_manager
+                .supports_item_remove(&entry.plugin_name);
             Res::WallpaperLayoutSet(pb::WallpaperLayoutSetResponse {
                 entry: Some(entry_to_pb(
                     &entry,
@@ -2169,10 +2052,7 @@ async fn dispatch_inner(
         }
 
         Req::RemoteAvailability(_) => {
-            let sources = {
-                let sm = state.source_manager.lock().await;
-                sm.discover_sources()?
-            };
+            let sources = state.source_manager.discover_sources_with_status().await?;
             let default_source_id = sources
                 .first()
                 .map(|s| s.plugin_id.clone())
@@ -2186,29 +2066,32 @@ async fn dispatch_inner(
                             .iter()
                             .map(crate::control_proto::source_setting_to_proto)
                             .collect();
-                        let signed_in = crate::steam_login::is_signed_in();
                         let actions = s
                             .actions
                             .iter()
-                            .filter(|a| match (s.plugin_id.as_str(), a.id.as_str()) {
-                                ("wallpaper_engine", "steam_sign_in") => !signed_in,
-                                ("wallpaper_engine", "steam_sign_out") => signed_in,
-                                _ => true,
-                            })
                             .map(crate::control_proto::source_action_to_proto)
                             .collect();
                         let status = s
                             .status
                             .iter()
-                            .map(|st| {
-                                let mut row = crate::control_proto::source_status_to_proto(st);
-                                row.value = compute_source_status(state, &s.plugin_id, &st.id);
-                                row
-                            })
+                            .map(crate::control_proto::source_status_to_proto)
                             .collect();
-                        let content_dir = remote_content_dir(&s.plugin_id)
-                            .to_string_lossy()
-                            .to_string();
+                        let remote_capability = match s.remote_capability {
+                            Some(crate::plugin::source_manager::RemoteCapability::Download) => {
+                                pb::RemoteCapability::Download
+                            }
+                            Some(crate::plugin::source_manager::RemoteCapability::Subscription) => {
+                                pb::RemoteCapability::Subscription
+                            }
+                            None => pb::RemoteCapability::Unspecified,
+                        };
+                        let content_dir = if remote_capability == pb::RemoteCapability::Download {
+                            remote_content_dir(&s.plugin_id)
+                                .to_string_lossy()
+                                .to_string()
+                        } else {
+                            String::new()
+                        };
                         pb::RemoteSourceInfo {
                             id: s.plugin_id,
                             name: s.name,
@@ -2228,6 +2111,8 @@ async fn dispatch_inner(
                             display_name: s.display_name,
                             actions,
                             status,
+                            remote_capability: remote_capability as i32,
+                            remote_hint: s.remote_hint,
                         }
                     })
                     .collect(),
@@ -2247,8 +2132,9 @@ async fn dispatch_inner(
                 }
             };
             let sort_key = if r.sort_key.trim().is_empty() {
-                let sm = state.source_manager.lock().await;
-                sm.discover_sources()?
+                state
+                    .source_manager
+                    .discover_sources()?
                     .into_iter()
                     .find(|s| s.plugin_id == source_id)
                     .and_then(|s| s.sorts.into_iter().next())
@@ -2257,24 +2143,33 @@ async fn dispatch_inner(
             } else {
                 r.sort_key.clone()
             };
-            let result = {
-                let sm = state.source_manager.lock().await;
-                sm.call_discover(&source_id, &r.query, &sort_key, r.page, &r.required_tags)
-                    .await
-            };
+            let result = state
+                .source_manager
+                .call_discover(&source_id, &r.query, &sort_key, r.page, &r.required_tags)
+                .await;
             match result {
                 Ok(result) => {
+                    let downloaded_capability = state
+                        .source_manager
+                        .discover_sources()?
+                        .into_iter()
+                        .find(|source| source.plugin_id == source_id)
+                        .and_then(|source| source.remote_capability)
+                        == Some(crate::plugin::source_manager::RemoteCapability::Download);
                     let mut items = Vec::with_capacity(result.items.len());
                     for item in result.items {
-                        let installed =
+                        let downloaded = if downloaded_capability {
                             repo::has_item_by_plugin_external_id(&state.db, &source_id, &item.id)
-                                .await?;
+                                .await?
+                        } else {
+                            false
+                        };
                         items.push(pb::RemoteItem {
                             id: item.id,
                             title: item.title,
                             preview_url: item.preview_url,
                             author: item.author,
-                            installed,
+                            downloaded,
                             source_id: source_id.clone(),
                             wp_type: item.wp_type,
                         });
@@ -2307,6 +2202,14 @@ async fn dispatch_inner(
                 return Ok(Res::RemoteDownload(pb::RemoteDownloadResponse {
                     accepted: false,
                     error: "remote id is empty".into(),
+                }));
+            }
+            if remote_capability(state, &source_id)?
+                != Some(crate::plugin::source_manager::RemoteCapability::Download)
+            {
+                return Ok(Res::RemoteDownload(pb::RemoteDownloadResponse {
+                    accepted: false,
+                    error: "remote source does not support downloads".into(),
                 }));
             }
             let task_state = state.clone();
@@ -2351,11 +2254,19 @@ async fn dispatch_inner(
                     }));
                 }
             };
+            if remote_capability(state, &source_id)?
+                != Some(crate::plugin::source_manager::RemoteCapability::Download)
+            {
+                return Ok(Res::RemoteUninstall(pb::RemoteUninstallResponse {
+                    removed: false,
+                    error: "remote source does not own downloaded content".into(),
+                }));
+            }
             let rows = repo::list_items_by_plugin_external_id(&state.db, &source_id, &r.id).await?;
             if rows.is_empty() {
                 Res::RemoteUninstall(pb::RemoteUninstallResponse {
                     removed: false,
-                    error: "remote item is not installed".into(),
+                    error: "remote item is not downloaded".into(),
                 })
             } else {
                 for (item, lib) in rows {
@@ -2389,10 +2300,7 @@ async fn dispatch_inner(
                     }));
                 }
             };
-            let result = {
-                let sm = state.source_manager.lock().await;
-                sm.call_details(&source_id, &r.id).await
-            };
+            let result = state.source_manager.call_details(&source_id, &r.id).await;
             match result {
                 Ok(details) => Res::RemoteDetails(pb::RemoteDetailsResponse {
                     description: details.description,
@@ -2457,74 +2365,139 @@ async fn dispatch_inner(
                 .await?,
         }),
 
-        Req::SteamLoginStart(_) => {
-            let task_state = state.clone();
-            state.tasks.spawn_async_unique(
-                tasks::TaskKind::Generic,
-                "steam/login".to_string(),
-                "steam/login".to_string(),
-                async move {
-                    publish_steam_login(&task_state, pb::SteamLoginState::Starting, "", "", "");
-                    let ev_state = task_state.clone();
-                    crate::steam_login::start(&task_state, |u| {
-                        publish_steam_login_update(&ev_state, u)
-                    })
-                    .await;
-                    Ok(())
-                },
-            );
-            Res::SteamLoginStart(pb::SteamLoginStartResponse {
-                accepted: true,
-                error: String::new(),
-            })
-        }
-
-        Req::SteamLoginCancel(_) => {
-            crate::steam_login::cancel();
-            Res::SteamLoginCancel(pb::SteamLoginCancelResponse { cancelled: true })
-        }
-
-        Req::PluginAction(r) => match (r.plugin_id.as_str(), r.action_id.as_str()) {
-            ("wallpaper_engine", "steam_sign_in") => {
-                let task_state = state.clone();
-                state.tasks.spawn_async_unique(
-                    tasks::TaskKind::Generic,
-                    "steam/login".to_string(),
-                    "steam/login".to_string(),
-                    async move {
-                        publish_steam_login(&task_state, pb::SteamLoginState::Starting, "", "", "");
-                        let ev_state = task_state.clone();
-                        crate::steam_login::start(&task_state, |u| {
-                            publish_steam_login_update(&ev_state, u)
-                        })
-                        .await;
-                        Ok(())
-                    },
-                );
-                Res::PluginAction(pb::PluginActionResponse {
-                    accepted: true,
-                    error: String::new(),
-                })
+        Req::PluginAction(r) => {
+            use crate::plugin::source_manager::SourceActionKind;
+            match state.source_manager.action_kind(&r.plugin_id, &r.action_id) {
+                Some(SourceActionKind::Invoke) => {
+                    match state
+                        .source_manager
+                        .invoke_action(&r.plugin_id, &r.action_id)
+                        .await
+                    {
+                        Ok(()) => {
+                            state.events.publish(GlobalEvent::PluginStateChanged);
+                            Res::PluginAction(pb::PluginActionResponse {
+                                accepted: true,
+                                error: String::new(),
+                                session_id: String::new(),
+                            })
+                        }
+                        Err(error) => Res::PluginAction(pb::PluginActionResponse {
+                            accepted: false,
+                            error: error.to_string(),
+                            session_id: String::new(),
+                        }),
+                    }
+                }
+                Some(SourceActionKind::QrLogin) => {
+                    match state.qr_login.start(&r.plugin_id, &r.action_id).await {
+                        Ok(session_id) => Res::PluginAction(pb::PluginActionResponse {
+                            accepted: true,
+                            error: String::new(),
+                            session_id,
+                        }),
+                        Err(error) => Res::PluginAction(pb::PluginActionResponse {
+                            accepted: false,
+                            error: error.to_string(),
+                            session_id: String::new(),
+                        }),
+                    }
+                }
+                None => Res::PluginAction(pb::PluginActionResponse {
+                    accepted: false,
+                    error: format!("unknown action {}.{}", r.plugin_id, r.action_id),
+                    session_id: String::new(),
+                }),
             }
-            ("wallpaper_engine", "steam_sign_out") => match crate::steam_login::sign_out().await {
+        }
+
+        Req::QrLoginCancel(r) => {
+            let cancelled = state.qr_login.cancel(&r.session_id).await;
+            Res::QrLoginCancel(pb::QrLoginCancelResponse { cancelled })
+        }
+
+        Req::SubscriptionStatus(r) => {
+            let source_id = match resolve_remote_source_id(state, &r.source_id).await {
+                Ok(source_id) => source_id,
+                Err(error) => {
+                    return Ok(Res::SubscriptionStatus(pb::SubscriptionStatusResponse {
+                        items: Vec::new(),
+                        error: error.to_string(),
+                    }));
+                }
+            };
+            if r.item_ids.len() > 200 {
+                return Ok(Res::SubscriptionStatus(pb::SubscriptionStatusResponse {
+                    items: Vec::new(),
+                    error: "subscription status accepts at most 200 item ids".into(),
+                }));
+            }
+            match state
+                .source_manager
+                .subscription_status(&source_id, &r.item_ids)
+                .await
+            {
+                Ok(items) => Res::SubscriptionStatus(pb::SubscriptionStatusResponse {
+                    items: items
+                        .into_iter()
+                        .map(|item| pb::SubscriptionItemState {
+                            id: item.id,
+                            state: match item.state {
+                                crate::plugin::source_manager::SubscriptionState::Unknown => {
+                                    pb::SubscriptionState::Unknown
+                                }
+                                crate::plugin::source_manager::SubscriptionState::Unsubscribed => {
+                                    pb::SubscriptionState::Unsubscribed
+                                }
+                                crate::plugin::source_manager::SubscriptionState::Subscribed => {
+                                    pb::SubscriptionState::Subscribed
+                                }
+                            } as i32,
+                        })
+                        .collect(),
+                    error: String::new(),
+                }),
+                Err(error) => Res::SubscriptionStatus(pb::SubscriptionStatusResponse {
+                    items: Vec::new(),
+                    error: error.to_string(),
+                }),
+            }
+        }
+
+        Req::SubscriptionSet(r) => {
+            let source_id = match resolve_remote_source_id(state, &r.source_id).await {
+                Ok(source_id) => source_id,
+                Err(error) => {
+                    return Ok(Res::SubscriptionSet(pb::SubscriptionSetResponse {
+                        accepted: false,
+                        error: error.to_string(),
+                    }));
+                }
+            };
+            if r.item_id.trim().is_empty() {
+                return Ok(Res::SubscriptionSet(pb::SubscriptionSetResponse {
+                    accepted: false,
+                    error: "subscription item id is empty".into(),
+                }));
+            }
+            match state
+                .source_manager
+                .set_subscription(&source_id, &r.item_id, r.subscribed)
+                .await
+            {
                 Ok(()) => {
-                    // Nudge the UI to re-read the "signed in" status.
-                    state.events.publish(GlobalEvent::SettingsChanged);
-                    Res::PluginAction(pb::PluginActionResponse {
+                    state.events.publish(GlobalEvent::PluginStateChanged);
+                    Res::SubscriptionSet(pb::SubscriptionSetResponse {
                         accepted: true,
                         error: String::new(),
                     })
                 }
-                Err(e) => Res::PluginAction(pb::PluginActionResponse {
+                Err(error) => Res::SubscriptionSet(pb::SubscriptionSetResponse {
                     accepted: false,
-                    error: e.to_string(),
+                    error: error.to_string(),
                 }),
-            },
-            _ => Res::PluginAction(pb::PluginActionResponse {
-                accepted: false,
-                error: format!("unknown action {}.{}", r.plugin_id, r.action_id),
-            }),
-        },
+            }
+        }
 
         Req::SettingsGet(_) => {
             let snap = state.settings.snapshot();

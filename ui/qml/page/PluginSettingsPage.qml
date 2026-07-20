@@ -23,6 +23,10 @@ MD.Page {
 
     W.PluginActionQuery {
         id: actionQuery
+        onCompleted: function(accepted, error, sessionId) {
+            if (!accepted)
+                W.Action.toast(error.length > 0 ? error : qsTr("Action failed"));
+        }
     }
     function runAction(actionId) {
         actionQuery.pluginId = root.pluginName;
@@ -49,6 +53,9 @@ MD.Page {
     Connections {
         target: W.Notify
         function onSettingsChanged() {
+            availabilityQuery.reload();
+        }
+        function onPluginStateChanged() {
             availabilityQuery.reload();
         }
     }
@@ -222,7 +229,6 @@ MD.Page {
             leftPadding: 4
         }
 
-        // Plugin-declared status rows + action buttons (e.g. Steam sign-in).
         footer: ColumnLayout {
             width: settingsList.contentWidth
             spacing: 6
@@ -281,6 +287,8 @@ MD.Page {
                     delegate: MD.Button {
                         required property var modelData
                         text: modelData.label
+                        visible: modelData.visible === undefined || modelData.visible
+                        enabled: modelData.enabled === undefined || modelData.enabled
                         mdState.type: MD.Enum.BtFilledTonal
                         onClicked: root.runAction(modelData.id)
                     }

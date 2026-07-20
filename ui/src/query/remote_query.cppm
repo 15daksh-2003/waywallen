@@ -150,4 +150,28 @@ public:
     Q_SIGNAL void uninstallFailed(const QString& sourceId, const QString& id, const QString& error);
 };
 
+export class RemoteSubscriptionQuery
+    : public Query,
+      public QueryExtra<control::v1::Response, RemoteSubscriptionQuery> {
+    Q_OBJECT
+    QML_ELEMENT
+
+public:
+    RemoteSubscriptionQuery(QObject* parent = nullptr);
+
+    void             reload() override;
+    Q_INVOKABLE void refresh(const QString& sourceId, const QStringList& itemIds);
+    Q_INVOKABLE void setSubscribed(const QString& sourceId, const QString& id, bool subscribed);
+
+    Q_SIGNAL void statesLoaded(const QString& sourceId, const QVariantList& items,
+                               const QString& error);
+    Q_SIGNAL void setFinished(const QString& sourceId, const QString& id, bool subscribed,
+                              bool accepted, const QString& error);
+
+private:
+    void refreshBatch(const QString& sourceId, const QStringList& itemIds, quint64 generation);
+
+    quint64 m_refresh_generation { 0 };
+};
+
 } // namespace waywallen

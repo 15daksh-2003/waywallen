@@ -43,7 +43,15 @@ void PluginActionQuery::reload() {
         auto result = co_await backend->send(std::move(req));
         if (! co_await QAsyncResult::qexecutor()) co_return;
         if (! self) co_return;
-        self->inspect_set(result, [](const proto::Response&) {
+        if (! result) {
+            self->inspect_set(result, [](const proto::Response&) {
+            });
+            Q_EMIT self->completed(false, self->error(), QString {});
+            co_return;
+        }
+        self->inspect_set(result, [self](const proto::Response& rsp) {
+            const auto& action = rsp.pluginAction();
+            Q_EMIT self->completed(action.accepted(), action.error(), action.sessionId());
         });
         co_return;
     });

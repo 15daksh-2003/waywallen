@@ -53,15 +53,20 @@ pub enum GlobalEvent {
         state: i32,
         error: String,
     },
-    /// Progress of the in-UI Steam QR login.
-    SteamLoginProgress {
+    QrLoginProgress {
+        session_id: String,
+        plugin_id: String,
+        action_id: String,
         state: i32,
         qr_image: String,
-        account_name: String,
+        display_value: String,
         error: String,
+        title: String,
+        instruction: String,
     },
     PlaylistChanged,
     PluginChanged,
+    PluginStateChanged,
     PluginUpdateChanged,
     PluginRestartFailed {
         plugin_id: String,
