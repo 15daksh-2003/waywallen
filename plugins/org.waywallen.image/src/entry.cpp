@@ -4,13 +4,9 @@ module;
 
 #include "av_image.hpp"
 
-#include <cmath>
 #include <errno.h>
 #include <signal.h>
-#include <string.h>
-
-#include <ctype.h>
-#include <stdlib.h>
+#include <stdio.h>
 
 #include <sys/prctl.h>
 #include <sys/socket.h>
@@ -64,12 +60,12 @@ constexpr const char* kSchemeColorKey = "waywallen.scheme_color";
 }
 
 std::string to_std_string(const rstd::string::String& value) {
-    return { value.data(), value.size() };
+    return rstd::cppstd::to_string(value);
 }
 
 void write_cli_output(rstd::ref<rstd::str> text, rstd::argparse::OutputTarget::Tag target) {
     FILE* stream = target == rstd::argparse::OutputTarget::Tag::Stderr ? stderr : stdout;
-    std::fwrite(text.data(), 1, text.size(), stream);
+    std::fwrite(text.data(), 1, text.size().to_primitive(), stream);
 }
 
 rstd::prelude::Vec<rstd::ffi::OsString> cli_argv(int argc, char** argv) {
@@ -174,14 +170,14 @@ ParseArgsResult parse_args(int argc, char** argv) {
         auto error  = std::move(parsed).unwrap_err();
         auto report = parser.render_error(error);
         write_cli_output(report.text(), report.target());
-        return { .exit_code = report.exit_code() };
+        return { .exit_code = report.exit_code().to_primitive() };
     }
 
     auto outcome = std::move(parsed).unwrap();
     if (outcome.is_Display()) {
         const auto& request = outcome.as_Display().request;
         write_cli_output(request.text(), request.target());
-        return { .exit_code = request.exit_code() };
+        return { .exit_code = request.exit_code().to_primitive() };
     }
 
     auto    known   = std::move(outcome).as_Parsed().value;
@@ -254,7 +250,7 @@ static void maybe_dump_producer_frame(const HostState& host, const ww_pool_direc
     if (! f) {
         rstd_warn("waywallen-image-renderer: dump open {}: {}",
                   static_cast<const char*>(path),
-                  static_cast<const char*>(::strerror(errno)));
+                  static_cast<const char*>(std::strerror(errno)));
         return;
     }
     size_t w = std::fwrite(host.rgba_data, 1, host.rgba_size, f);
@@ -355,8 +351,11 @@ UploadStatus upload_to_slot(HostState& host, wavsen::video::Producer& producer,
     maybe_dump_producer_frame(
         host, directive, s, g_dump_seq.fetch_add(1, std::memory_order_relaxed));
 
-    auto upload_res = producer.upload_into(
-        reinterpret_cast<VkImage>(s.vk_image), s.width, s.height, host.rgba_data, host.rgba_size);
+    auto upload_res = producer.upload_into(reinterpret_cast<VkImage>(s.vk_image),
+                                           s.width,
+                                           s.height,
+                                           host.rgba_data,
+                                           rstd::usize(host.rgba_size));
     if (upload_res.is_err()) {
         ww_bridge_pool_abort_acquired_slot(host.pool, &acquired.identity);
         rstd_error("waywallen-image-renderer: upload_into failed: {}",
@@ -554,7 +553,7 @@ static int print_caps_json(const Options& opt) {
     int sv[2] = { -1, -1 };
     if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
         rstd_error("waywallen-image-renderer: socketpair: {}",
-                   static_cast<const char*>(::strerror(errno)));
+                   static_cast<const char*>(std::strerror(errno)));
         return 1;
     }
 
@@ -782,7 +781,7 @@ int run(int argc, char** argv) {
      * double-send but we ignore it here. */
     HostState host;
     host.sock = ww_bridge_connect(opt.ipc_path.c_str());
-    if (host.sock < 0) die("ww_bridge_connect: " + std::string(::strerror(-host.sock)));
+    if (host.sock < 0) die("ww_bridge_connect: " + std::string(std::strerror(-host.sock)));
 
     ww_bridge_init_t init {};
     if (int rc = ww_bridge_recv_init(host.sock, &init); rc < 0) {

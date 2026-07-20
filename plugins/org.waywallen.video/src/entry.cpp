@@ -1,17 +1,10 @@
 module;
 
-#include <atomic>
-#include <chrono>
-
 #include <rstd/macro.hpp>
 
-#include <cmath>
 #include <errno.h>
 #include <signal.h>
-#include <string.h>
-
-#include <ctype.h>
-#include <stdlib.h>
+#include <stdio.h>
 
 #include <sys/prctl.h>
 #include <sys/socket.h>
@@ -63,12 +56,12 @@ constexpr const char* kEnableAudioKey = "waywallen.enable_audio";
 }
 
 std::string to_std_string(const rstd::string::String& value) {
-    return { value.data(), value.size() };
+    return rstd::cppstd::to_string(value);
 }
 
 void write_cli_output(rstd::ref<rstd::str> text, rstd::argparse::OutputTarget::Tag target) {
     FILE* stream = target == rstd::argparse::OutputTarget::Tag::Stderr ? stderr : stdout;
-    std::fwrite(text.data(), 1, text.size(), stream);
+    std::fwrite(text.data(), 1, text.size().to_primitive(), stream);
 }
 
 rstd::prelude::Vec<rstd::ffi::OsString> cli_argv(int argc, char** argv) {
@@ -195,14 +188,14 @@ ParseArgsResult parse_args(int argc, char** argv) {
         auto error  = std::move(parsed).unwrap_err();
         auto report = parser.render_error(error);
         write_cli_output(report.text(), report.target());
-        return { .exit_code = report.exit_code() };
+        return { .exit_code = report.exit_code().to_primitive() };
     }
 
     auto outcome = std::move(parsed).unwrap();
     if (outcome.is_Display()) {
         const auto& request = outcome.as_Display().request;
         write_cli_output(request.text(), request.target());
-        return { .exit_code = request.exit_code() };
+        return { .exit_code = request.exit_code().to_primitive() };
     }
 
     auto    known   = std::move(outcome).as_Parsed().value;
@@ -637,8 +630,13 @@ int run_selftest(const Options& opt) {
         parse_hwdec(opt.hwdec.empty() ? nullptr : opt.hwdec.c_str()),
         rstd::string::String::make(opt.render_node.c_str()),
     };
-    auto decoder_res = wavsen::video::VideoDecoder::open_with_vk(
-        opt.video_path, even_w, even_h, /*loop=*/false, *producer, dec_opts);
+    auto decoder_res =
+        wavsen::video::VideoDecoder::open_with_vk(rstd::cppstd::as_str(opt.video_path),
+                                                  even_w,
+                                                  even_h,
+                                                  /*loop=*/false,
+                                                  *producer,
+                                                  dec_opts);
     if (decoder_res.is_err()) {
         rstd_error("selftest decode: {}", std::move(decoder_res).unwrap_err().message.as_str());
         return 1;
@@ -672,7 +670,7 @@ int run_selftest(const Options& opt) {
         vkGetImageMemoryRequirements(producer->device(), dst_img, &mr);
         VkPhysicalDeviceMemoryProperties mp {};
         vkGetPhysicalDeviceMemoryProperties(producer->physical_device(), &mp);
-        uint32_t type = UINT32_MAX;
+        uint32_t type = std::numeric_limits<uint32_t>::max();
         for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
             if ((mr.memoryTypeBits & (1u << i)) &&
                 (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
@@ -680,7 +678,7 @@ int run_selftest(const Options& opt) {
                 break;
             }
         }
-        if (type == UINT32_MAX) {
+        if (type == std::numeric_limits<uint32_t>::max()) {
             rstd_error("selftest no DEVICE_LOCAL memory");
             return 1;
         }
@@ -849,7 +847,7 @@ int run(int argc, char** argv) {
 
     HostState host;
     host.sock = ww_bridge_connect(opt.ipc_path.c_str());
-    if (host.sock < 0) die("ww_bridge_connect: " + std::string(::strerror(-host.sock)));
+    if (host.sock < 0) die("ww_bridge_connect: " + std::string(std::strerror(-host.sock)));
 
     ww_bridge_init_t init {};
     if (int rc = ww_bridge_recv_init(host.sock, &init); rc < 0) {
@@ -907,7 +905,8 @@ int run(int argc, char** argv) {
      * main, not inside VideoDecoder. */
     uint32_t native_w = 0, native_h = 0;
     {
-        auto probe_res = wavsen::video::VideoDecoder::probe_native(opt.video_path);
+        auto probe_res =
+            wavsen::video::VideoDecoder::probe_native(rstd::cppstd::as_str(opt.video_path));
         if (probe_res.is_err()) {
             die("probe_native " + opt.video_path + ": " +
                 to_std_string(std::move(probe_res).unwrap_err().message));
@@ -941,7 +940,7 @@ int run(int argc, char** argv) {
         rstd::string::String::make(opt.render_node.c_str()),
     };
     auto decoder_res = wavsen::video::VideoDecoder::open_with_vk(
-        opt.video_path, even_w, even_h, opt.loop_file, *producer, dec_opts);
+        rstd::cppstd::as_str(opt.video_path), even_w, even_h, opt.loop_file, *producer, dec_opts);
     if (decoder_res.is_err()) {
         die("decode " + opt.video_path + ": " +
             to_std_string(std::move(decoder_res).unwrap_err().message));
@@ -959,7 +958,7 @@ int run(int argc, char** argv) {
     std::unique_ptr<wavsen::audio::AvPlayer> av_player;
     {
         auto audio_file_res = wavsen::audio::open_file(
-            rstd::ref<rstd::path::Path>(rstd::ref<rstd::str>(opt.video_path)));
+            rstd::ref<rstd::path::Path>(rstd::cppstd::as_str(opt.video_path)));
         if (audio_file_res.is_err()) {
             rstd_warn("waywallen-video-renderer: audio file open failed");
         } else {
@@ -1175,7 +1174,7 @@ int run(int argc, char** argv) {
                         new_h, rstd::string::String::make(opt.render_node.c_str())
                     };
                     auto re_res = wavsen::video::VideoDecoder::open_with_vk(
-                        opt.video_path,
+                        rstd::cppstd::as_str(opt.video_path),
                         even_w,
                         even_h,
                         host.loop_value.load(std::memory_order_acquire),

@@ -39,9 +39,9 @@ public:
 
     void save_settings() {}
 
-    App*                       m_p;
-    QPointer<QQuickWindow>     m_main_win;
-    QmlNetworkDiskCache        m_qml_network_cache;
+    App*                   m_p;
+    QPointer<QQuickWindow> m_main_win;
+    QmlNetworkDiskCache    m_qml_network_cache;
     // Reverse dependency order keeps the QML engine first and Backend last during destruction.
     Box<Backend>               m_backend;
     Box<DisplayManager>        m_display_mgr;
@@ -75,7 +75,7 @@ void App::init() {
     auto engine = this->engine();
     d->m_qml_network_cache.install(*engine);
 
-    QAsyncResult::initEx(this, 4, [](QStringView error) {
+    QAsyncResult::initEx(this, rstd::usize(4), [](QStringView error) {
         qWarning("async error: %s", qPrintable(error.toString()));
     });
 

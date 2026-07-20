@@ -20,6 +20,7 @@ public:
     using store_type      = Store;
     using item_type       = typename store_type::item_type;
     using store_item_type = typename store_type::store_item_type;
+    using handle_type     = typename store_type::handle_type;
 
     StoreItem(Store store, QObject* parent): QObject(parent), m_item(store) {}
     ~StoreItem() { unreg(); }
@@ -34,7 +35,8 @@ public:
         auto key = kstore::ItemTrait<item_type>::key(v);
         if (key != m_item.key()) {
             m_item = m_item.store().store_insert(v).first;
-            m_item.store().store_changed_callback(std::span { &key, 1 }, m_handle ? *m_handle : 0);
+            m_item.store().store_changed_callback(std::span { &key, 1 },
+                                                  m_handle ? *m_handle : handle_type {});
             static_cast<CRTP*>(this)->itemChanged();
 
             unreg();
@@ -51,8 +53,8 @@ private:
         }
     }
 
-    rstd::Option<rstd::i64> m_handle;
-    store_item_type         m_item;
+    rstd::Option<handle_type> m_handle;
+    store_item_type           m_item;
 };
 
 class WallpaperStoreItem

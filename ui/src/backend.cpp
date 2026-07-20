@@ -25,7 +25,7 @@ using ResponseHandle = rstd::async::CompletionHandle<proto::Response, QString>;
 
 auto as_byte_array_view(slice<rstd::byte> bytes) -> QByteArrayView {
     return { reinterpret_cast<const char*>(bytes.as_raw_ptr()),
-             static_cast<qsizetype>(bytes.len()) };
+             static_cast<qsizetype>(bytes.len().to_primitive()) };
 }
 
 class BackendTransport : public QObject {
@@ -38,7 +38,7 @@ public:
 
         m_client->set_on_error_callback([this](ref<str> error) {
             auto message = QString::fromUtf8(reinterpret_cast<const char*>(error.data()),
-                                             static_cast<qsizetype>(error.size()));
+                                             static_cast<qsizetype>(error.size().to_primitive()));
             qWarning("ws error: %s", qPrintable(message));
             fail_pending(message);
             Q_EMIT m_backend->error(message);
@@ -81,8 +81,8 @@ public:
             });
     }
 
-    void connect_to(std::string url) {
-        if (m_client) (void)m_client->connect(url);
+    void connect_to(String url) {
+        if (m_client) (void)m_client->connect(url.as_str());
     }
 
     void disconnect_from_server() {
@@ -198,7 +198,7 @@ void Backend::connectTo() {
 
     m_disconnect_requested = false;
     m_reconnect_delay      = 1000;
-    auto url               = std::format("ws://127.0.0.1:{}", m_port);
+    auto url               = rstd::format("ws://127.0.0.1:{}", m_port);
     (void)QMetaObject::invokeMethod(
         m_transport,
         [transport = m_transport, url = rstd::move(url)]() mutable {
