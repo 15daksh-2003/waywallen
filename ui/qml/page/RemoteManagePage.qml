@@ -139,7 +139,7 @@ MD.Page {
                 return;
             root.inFlightWrites = Math.max(0, root.inFlightWrites - 1);
             if (!accepted) {
-                W.Action.toast(error.length > 0 ? error : qsTr("Couldn't save remote settings"), 6000, 1, null);
+                W.Global.toastError(error.length > 0 ? error : qsTr("Couldn't save remote settings"));
             }
             if (Object.keys(root.pendingValues).length > 0)
                 saveTimer.restart();
@@ -153,7 +153,7 @@ MD.Page {
         id: actionQuery
         onCompleted: function (accepted, error, sessionId) {
             if (!accepted) {
-                W.Action.toast(error.length > 0 ? error : qsTr("Login action failed"), 6000, 1, null);
+                W.Global.toastError(error.length > 0 ? error : qsTr("Login action failed"));
             } else {
                 availabilityQuery.reload();
             }

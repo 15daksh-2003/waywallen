@@ -2,12 +2,31 @@ pragma Singleton
 import QtCore
 import QtQuick
 import Qcm.Material as MD
+import waywallen.ui as W
 
 // App-wide singleton state and derived theming.
 QtObject {
     id: root
 
     property bool sidebarAutoExpand: true
+
+    readonly property Component errorToastAction: Component {
+        MD.Action {
+            required property string error
+            text: qsTr("Copy")
+            onTriggered: {
+                W.Action.copyToClipboard(error);
+                W.Action.toast(qsTr("Copied to clipboard"), 2000);
+            }
+        }
+    }
+
+    function toastError(error) {
+        const action = errorToastAction.createObject(root, {
+            error: error
+        });
+        W.Action.toast(error, 0, MD.Enum.TFCloseable, action);
+    }
 
     readonly property Settings _generalSettings: Settings {
         property alias sidebarAutoExpand: root.sidebarAutoExpand
