@@ -1557,6 +1557,27 @@ impl LuaPluginRuntime {
         Ok(())
     }
 
+    fn install_json_context(&self, ctx: &LuaTable) -> LuaResult<()> {
+        let json = mlua_extra::json::create_nullable_module(&self.lua)?;
+        let parse = json.get::<LuaFunction>("parse")?;
+        let encode = json.get::<LuaFunction>("encode")?;
+        ctx.set("json_parse", parse)?;
+        ctx.set("json_encode", encode)?;
+        ctx.set("json", json)
+    }
+
+    fn install_remote_utility_context(&self, ctx: &LuaTable) -> LuaResult<()> {
+        self.install_json_context(ctx)?;
+
+        let base64 = mlua_extra::base64::create_module(&self.lua)?;
+        ctx.set("base64_decode", base64.get::<LuaFunction>("decode")?)?;
+        ctx.set("base64", base64)?;
+
+        let time = mlua_extra::time::create_module(&self.lua)?;
+        ctx.set("time_unix", time.get::<LuaFunction>("unix")?)?;
+        ctx.set("time", time)
+    }
+
     /// Build the `ctx` table passed to Lua callbacks.
     /// `libraries` is exposed through `ctx.libraries()`.
     fn build_ctx(&self, plugin_name: Option<&str>, libraries: &[String]) -> Result<LuaTable> {
@@ -1673,25 +1694,7 @@ impl LuaPluginRuntime {
         })?;
         ctx.set("libraries", libraries_fn)?;
 
-        // ctx.json_parse(str) -> table|nil
-        let json_parse_fn =
-            self.lua.create_function(|lua, s: String| {
-                match serde_json::from_str::<serde_json::Value>(&s) {
-                    Ok(val) => json_to_lua(lua, &val),
-                    Err(_) => Ok(mlua::Value::Nil),
-                }
-            })?;
-        ctx.set("json_parse", json_parse_fn.clone())?;
-
-        // ctx.json_encode(value) -> string|nil
-        let json_encode_fn = self.lua.create_function(|_, val: mlua::Value| {
-            Ok(lua_to_json(&val).and_then(|j| serde_json::to_string(&j).ok()))
-        })?;
-        ctx.set("json_encode", json_encode_fn.clone())?;
-        let json = self.lua.create_table()?;
-        json.set("parse", json_parse_fn)?;
-        json.set("encode", json_encode_fn)?;
-        ctx.set("json", json)?;
+        self.install_json_context(&ctx)?;
 
         // ctx.log(msg)
         let log_fn = self.lua.create_function(|_, msg: String| {
@@ -1891,46 +1894,7 @@ impl LuaPluginRuntime {
         config.set("get", plugin_config)?;
         ctx.set("config", config)?;
 
-        let json_parse =
-            self.lua.create_function(|lua, value: String| {
-                match serde_json::from_str::<serde_json::Value>(&value) {
-                    Ok(value) => json_to_lua(lua, &value),
-                    Err(_) => Ok(LuaValue::Nil),
-                }
-            })?;
-        let json_encode = self.lua.create_function(|_, value: LuaValue| {
-            Ok(lua_to_json(&value).and_then(|json| serde_json::to_string(&json).ok()))
-        })?;
-        ctx.set("json_parse", json_parse.clone())?;
-        ctx.set("json_encode", json_encode.clone())?;
-        let json = self.lua.create_table()?;
-        json.set("parse", json_parse)?;
-        json.set("encode", json_encode)?;
-        ctx.set("json", json)?;
-
-        let base64_decode = self.lua.create_function(|lua, value: String| {
-            use base64::Engine as _;
-            let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(value.as_bytes())
-                .or_else(|_| base64::engine::general_purpose::STANDARD.decode(value.as_bytes()))
-                .map_err(LuaError::external)?;
-            lua.create_string(decoded)
-        })?;
-        ctx.set("base64_decode", base64_decode.clone())?;
-        let base64 = self.lua.create_table()?;
-        base64.set("decode", base64_decode)?;
-        ctx.set("base64", base64)?;
-
-        let time_unix = self.lua.create_function(|_, ()| {
-            Ok(std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs())
-        })?;
-        ctx.set("time_unix", time_unix.clone())?;
-        let time = self.lua.create_table()?;
-        time.set("unix", time_unix)?;
-        ctx.set("time", time)?;
+        self.install_remote_utility_context(&ctx)?;
         let log_plugin = plugin_name.to_owned();
         ctx.set(
             "log",
@@ -2101,7 +2065,7 @@ impl LuaPluginRuntime {
         let result = match result {
             mlua::Value::Nil => None,
             mlua::Value::String(s) => Some(s.to_str()?.to_string()),
-            other => lua_to_json(&other).map(|j| j.to_string()),
+            other => mlua_extra::json::encode(&other),
         };
         self.persist_state(plugin_name)?;
         Ok(result)
@@ -3629,88 +3593,6 @@ fn parse_lua_string_map(
     Ok(map)
 }
 
-fn json_to_lua(lua: &Lua, val: &serde_json::Value) -> LuaResult<LuaValue> {
-    match val {
-        serde_json::Value::Null => Ok(LuaValue::Nil),
-        serde_json::Value::Bool(b) => Ok(LuaValue::Boolean(*b)),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(LuaValue::Integer(i))
-            } else {
-                Ok(LuaValue::Number(n.as_f64().unwrap_or(0.0)))
-            }
-        }
-        serde_json::Value::String(s) => Ok(LuaValue::String(lua.create_string(s)?)),
-        serde_json::Value::Array(arr) => {
-            let t = lua.create_table()?;
-            for (i, v) in arr.iter().enumerate() {
-                t.set(i + 1, json_to_lua(lua, v)?)?;
-            }
-            Ok(LuaValue::Table(t))
-        }
-        serde_json::Value::Object(obj) => {
-            let t = lua.create_table()?;
-            for (k, v) in obj {
-                t.set(k.as_str(), json_to_lua(lua, v)?)?;
-            }
-            Ok(LuaValue::Table(t))
-        }
-    }
-}
-
-/// Convert a `LuaValue` back to `serde_json::Value`.
-/// Lua tables become arrays only with contiguous 1..=N integer keys.
-fn lua_to_json(val: &LuaValue) -> Option<serde_json::Value> {
-    match val {
-        LuaValue::Nil => Some(serde_json::Value::Null),
-        LuaValue::Boolean(b) => Some(serde_json::Value::Bool(*b)),
-        LuaValue::Integer(i) => Some(serde_json::Value::Number((*i).into())),
-        LuaValue::Number(n) => serde_json::Number::from_f64(*n).map(serde_json::Value::Number),
-        LuaValue::String(s) => s
-            .to_str()
-            .ok()
-            .map(|cow| serde_json::Value::String(cow.to_string())),
-        LuaValue::Table(t) => {
-            let len = t.raw_len();
-            let mut all_int = len > 0;
-            let mut count = 0;
-            for pair in t.clone().pairs::<LuaValue, LuaValue>() {
-                count += 1;
-                let Ok((k, _)) = pair else {
-                    all_int = false;
-                    break;
-                };
-                if !matches!(&k, LuaValue::Integer(_)) {
-                    all_int = false;
-                    break;
-                }
-            }
-            if all_int && count == len {
-                let mut arr = Vec::with_capacity(len);
-                for i in 1..=len {
-                    let v: LuaValue = t.get(i).ok()?;
-                    arr.push(lua_to_json(&v)?);
-                }
-                Some(serde_json::Value::Array(arr))
-            } else {
-                let mut map = serde_json::Map::new();
-                for pair in t.clone().pairs::<LuaValue, LuaValue>() {
-                    let (k, v) = pair.ok()?;
-                    let key = match k {
-                        LuaValue::String(s) => s.to_str().ok()?.to_string(),
-                        LuaValue::Integer(i) => i.to_string(),
-                        LuaValue::Number(n) => n.to_string(),
-                        _ => continue,
-                    };
-                    map.insert(key, lua_to_json(&v)?);
-                }
-                Some(serde_json::Value::Object(map))
-            }
-        }
-        _ => None,
-    }
-}
-
 fn redact_secrets(message: &str) -> String {
     let mut out = message.to_string();
     for marker in ["Authorization:", "authorization:", "Cookie:", "cookie:"] {
@@ -4467,12 +4349,20 @@ function M.info()
 end
 M.discover = {}
 function M.discover.search(ctx, params)
+    local parsed = ctx.json.parse('{"ok":true}')
     return {
         items = { {
             id = tostring(
                 ctx.remove_dir == nil and ctx.libraries == nil and ctx.fs == nil
                 and ctx.config ~= nil and ctx.json ~= nil
                 and ctx.base64 ~= nil and ctx.time ~= nil
+                and parsed.ok and ctx.json_parse('{"ok":true}').ok
+                and ctx.json.encode({1, 2}) == "[1,2]"
+                and ctx.json_encode({1, 2}) == "[1,2]"
+                and ctx.base64.decode("d2FsbA==") == "wall"
+                and ctx.base64_decode("d2FsbA==") == "wall"
+                and ctx.time.unix() > 1000000000
+                and ctx.time_unix() > 1000000000
             ),
             title = "",
             preview_url = "",

@@ -1593,8 +1593,9 @@ dependencies = [
 [[package]]
 name = "mlua-extra"
 version = "0.1.0"
-source = "git+https://github.com/hypengw/mlua-extra?rev=16fc20f1445e6b723da78fb08b236dfeaad10db0#16fc20f1445e6b723da78fb08b236dfeaad10db0"
+source = "git+https://github.com/hypengw/mlua-extra?rev=c890c9346ebf9d1c7eeec8d2315d730a7e744fab#c890c9346ebf9d1c7eeec8d2315d730a7e744fab"
 dependencies = [
+ "base64",
  "log",
  "mlua",
  "reqwest",
