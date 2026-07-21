@@ -203,6 +203,7 @@ MD.Page {
             rotationSecs: 0,
             audioFadeMs: 500,
             muteWhenOtherAudio: false,
+            audioCaptureEnabled: true,
             "renderer.enable_audio": true,
             "renderer.volume": 100,
             pluginUpdateNotifications: true,
@@ -234,6 +235,7 @@ MD.Page {
             rotationSecs: Number(g.rotationSecs ?? 0),
             audioFadeMs: Number(g.audioFadeMs ?? 500),
             muteWhenOtherAudio: Boolean(g.muteWhenOtherAudio ?? false),
+            audioCaptureEnabled: Boolean(g.audioCaptureEnabled),
             rendererEnableAudio: root._rendererAudioEnabled(g),
             rendererVolume: root._rendererVolume(g),
             pluginUpdateNotifications: Boolean(g.pluginUpdateNotifications ?? true),
@@ -489,6 +491,33 @@ MD.Page {
                         target: m_renderer_enable_audio
                         property: "checked"
                         value: root._rendererAudioEnabled(root._currentGlobal())
+                    }
+                }
+            }
+
+            SettingItem {
+                first: false
+                last: false
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Enable audio capture")
+                    }
+
+                    MD.Switch {
+                        id: m_audio_capture_enabled
+                        onToggled: root._mut(g => {
+                            g.audioCaptureEnabled = checked;
+                        })
+                    }
+                    Binding {
+                        target: m_audio_capture_enabled
+                        property: "checked"
+                        value: Boolean(root._currentGlobal()?.audioCaptureEnabled)
                     }
                 }
             }

@@ -1196,6 +1196,9 @@ message GlobalSettings {
   // Mute wallpaper renderers while another application's active playback
   // stream is visible through PulseAudio/PipeWire-Pulse.
   optional bool mute_when_other_audio = 21;
+
+  // Allow audio-response wallpapers to capture the system output spectrum.
+  bool audio_capture_enabled = 22;
 }
 
 enum AutoAction {

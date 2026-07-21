@@ -187,6 +187,8 @@ pub struct GlobalSettings {
     pub audio_fade_ms: u32,
     /// Mute renderer audio while another PulseAudio playback stream is active.
     pub mute_when_other_audio: bool,
+    /// Allow audio-response wallpapers to capture the system output spectrum.
+    pub audio_capture_enabled: bool,
     pub renderer: GlobalRendererSettings,
     /// Manual global mute requested through daemon controls.
     pub manual_muted: bool,
@@ -245,6 +247,7 @@ impl Default for GlobalSettings {
             rotation_secs: 0,
             audio_fade_ms: DEFAULT_AUDIO_FADE_MS,
             mute_when_other_audio: false,
+            audio_capture_enabled: true,
             renderer: GlobalRendererSettings::default(),
             manual_muted: false,
             layout: LayoutDefaults::default(),
@@ -1063,6 +1066,7 @@ mod tests {
         assert!(s.global.last_wallpaper.is_none());
         assert_eq!(s.global.audio_fade_ms, DEFAULT_AUDIO_FADE_MS);
         assert!(!s.global.mute_when_other_audio);
+        assert!(s.global.audio_capture_enabled);
         assert!(!s.global.manual_muted);
         assert!(s.global.plugin_update_notifications);
         assert!(!s.global.duplicate_renderers_for_same_wallpaper);
@@ -1105,6 +1109,19 @@ manual_muted = true
         let s: Settings = toml::from_str(src).unwrap();
         assert!(s.global.manual_muted);
         assert!(toml::to_string(&s).unwrap().contains("manual_muted = true"));
+    }
+
+    #[test]
+    fn audio_capture_setting_roundtrip() {
+        let src = r#"
+[global]
+audio_capture_enabled = false
+"#;
+        let s: Settings = toml::from_str(src).unwrap();
+        assert!(!s.global.audio_capture_enabled);
+        assert!(toml::to_string(&s)
+            .unwrap()
+            .contains("audio_capture_enabled = false"));
     }
 
     #[test]

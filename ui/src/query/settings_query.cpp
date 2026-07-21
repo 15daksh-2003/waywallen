@@ -88,6 +88,7 @@ auto global_to_map(const proto::GlobalSettings& g) -> QVariantMap {
     m[u"rotationSecs"_s]              = g.rotationSecs();
     m[u"audioFadeMs"_s]               = g.audioFadeMs();
     m[u"muteWhenOtherAudio"_s]        = g.hasMuteWhenOtherAudio() && g.muteWhenOtherAudio();
+    m[u"audioCaptureEnabled"_s]       = g.audioCaptureEnabled();
     m[u"pluginUpdateNotifications"_s] = ! g.disablePluginUpdateNotifications();
     m[u"duplicateRenderers"_s]        = g.duplicateRenderersForSameWallpaper();
     const auto has_renderer           = g.hasRenderer();
@@ -164,6 +165,7 @@ auto map_to_global(const QVariantMap& m) -> proto::GlobalSettings {
     if (m.contains(u"muteWhenOtherAudio"_s)) {
         g.setMuteWhenOtherAudio(m.value(u"muteWhenOtherAudio"_s).toBool());
     }
+    g.setAudioCaptureEnabled(m.value(u"audioCaptureEnabled"_s).toBool());
     if (m.contains(u"pluginUpdateNotifications"_s)) {
         g.setDisablePluginUpdateNotifications(! m.value(u"pluginUpdateNotifications"_s).toBool());
     }

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
-use super::analyzer::{AudioSpectrumFrame, SpectrumAnalyzer};
+use super::analyzer::{AudioSpectrumFrame, SpectrumAnalyzer, AUDIO_SPECTRUM_BINS};
 use super::playback::{has_external_playback, PlaybackObserverBackend};
 use super::pulse::{AudioCaptureBackend, CaptureErrorKind, PulseCapture, PulsePlaybackObserver};
 use crate::events::GlobalEvent;
@@ -28,7 +28,7 @@ pub enum AudioServiceState {
 }
 
 enum CaptureWorkerCommand {
-    Demand(bool),
+    Configure { enabled: bool, demanded: bool },
     Shutdown,
 }
 
@@ -71,11 +71,15 @@ impl AudioService {
 
         let mut subscriptions = manager.subscribe_subscriptions();
         tokio::spawn(async move {
-            let initial_demand = !subscriptions
+            let mut capture_demand = !subscriptions
                 .borrow()
                 .subscribers(RendererEventKind::Audio)
                 .is_empty();
-            let _ = command_tx.send(CaptureWorkerCommand::Demand(initial_demand));
+            let mut capture_enabled = settings.global().audio_capture_enabled;
+            let _ = command_tx.send(CaptureWorkerCommand::Configure {
+                enabled: capture_enabled,
+                demanded: capture_demand,
+            });
             let mut frame_rx = frame_rx;
             let mut playback_rx = playback_rx;
             let mut playback_demand = settings.global().mute_when_other_audio;
@@ -90,14 +94,17 @@ impl AudioService {
                         if changed.is_err() {
                             break;
                         }
-                        let demanded = !subscriptions
+                        capture_demand = !subscriptions
                             .borrow()
                             .subscribers(RendererEventKind::Audio)
                             .is_empty();
-                        if !demanded {
+                        if !capture_demand {
                             last_sent = None;
                         }
-                        if command_tx.send(CaptureWorkerCommand::Demand(demanded)).is_err() {
+                        if command_tx.send(CaptureWorkerCommand::Configure {
+                            enabled: capture_enabled,
+                            demanded: capture_demand,
+                        }).is_err() {
                             break;
                         }
                     }
@@ -112,7 +119,32 @@ impl AudioService {
                         match event {
                             Ok(GlobalEvent::SettingsChanged)
                             | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                let demanded = settings.global().mute_when_other_audio;
+                                let global = settings.global();
+                                if global.audio_capture_enabled != capture_enabled {
+                                    capture_enabled = global.audio_capture_enabled;
+                                    if command_tx.send(CaptureWorkerCommand::Configure {
+                                        enabled: capture_enabled,
+                                        demanded: capture_demand,
+                                    }).is_err() {
+                                        break;
+                                    }
+                                    if capture_enabled {
+                                        if let Some(frame) = frame_rx.borrow_and_update().as_ref() {
+                                            last_sent = last_sent.max(Some((frame.generation, frame.sequence)));
+                                        }
+                                    } else {
+                                        let frame_identity = frame_rx
+                                            .borrow_and_update()
+                                            .as_ref()
+                                            .map(|frame| (frame.generation, frame.sequence));
+                                        let (generation, sequence) = next_audio_identity(
+                                            last_sent.max(frame_identity),
+                                        );
+                                        last_sent = Some((generation, sequence));
+                                        send_silence(&manager, generation, sequence).await;
+                                    }
+                                }
+                                let demanded = global.mute_when_other_audio;
                                 if demanded != playback_demand {
                                     playback_demand = demanded;
                                     if playback_command_tx
@@ -128,11 +160,14 @@ impl AudioService {
                         }
                     }
                     _ = dispatch.tick() => {
+                        if !capture_enabled {
+                            continue;
+                        }
                         let Some(frame) = frame_rx.borrow_and_update().clone() else {
                             continue;
                         };
                         let identity = (frame.generation, frame.sequence);
-                        if last_sent == Some(identity) {
+                        if last_sent.is_some_and(|sent| identity <= sent) {
                             continue;
                         }
                         last_sent = Some(identity);
@@ -178,6 +213,40 @@ impl AudioService {
     }
 }
 
+fn next_audio_identity(last: Option<(u64, u64)>) -> (u64, u64) {
+    match last {
+        None => (0, 1),
+        Some((generation, sequence)) => sequence
+            .checked_add(1)
+            .map(|next| (generation, next))
+            .unwrap_or_else(|| (generation.saturating_add(1), 0)),
+    }
+}
+
+async fn send_silence(manager: &RendererManager, generation: u64, sequence: u64) {
+    let targets = manager
+        .subscription_snapshot()
+        .subscribers(RendererEventKind::Audio);
+    let silence = vec![0.0; AUDIO_SPECTRUM_BINS];
+    let captured_at_ns = monotonic_now_ns();
+    for (id, revision) in targets {
+        if let Err(error) = manager
+            .send_audio_spectrum_latest(
+                &id,
+                revision,
+                generation,
+                sequence,
+                captured_at_ns,
+                silence.clone(),
+                silence.clone(),
+            )
+            .await
+        {
+            log::debug!("renderer {id}: audio silence dispatch dropped: {error}");
+        }
+    }
+}
+
 fn run_worker<F>(
     commands: std::sync::mpsc::Receiver<CaptureWorkerCommand>,
     frames: watch::Sender<Option<AudioSpectrumFrame>>,
@@ -189,6 +258,7 @@ fn run_worker<F>(
 {
     let mut backend: Option<Box<dyn AudioCaptureBackend>> = None;
     let mut analyzer = SpectrumAnalyzer::default();
+    let mut enabled = true;
     let mut demand = false;
     let mut idle_deadline: Option<Instant> = None;
     let mut retry_deadline: Option<Instant> = None;
@@ -206,16 +276,26 @@ fn run_worker<F>(
                 .min(INACTIVE_POLL_INTERVAL)
         };
         match commands.recv_timeout(timeout) {
-            Ok(CaptureWorkerCommand::Demand(next)) => {
-                if next == demand {
+            Ok(CaptureWorkerCommand::Configure {
+                enabled: next_enabled,
+                demanded,
+            }) => {
+                let next_demand = next_enabled && demanded;
+                if next_enabled == enabled && next_demand == demand {
                     continue;
                 }
-                demand = next;
+                enabled = next_enabled;
+                demand = next_demand;
                 frames.send_replace(None);
                 analyzer.clear();
                 retry_deadline = None;
                 backoff = Duration::from_secs(1);
-                if demand {
+                if !enabled {
+                    idle_deadline = None;
+                    unavailable_latched = false;
+                    drop(backend.take());
+                    states.send_replace(AudioServiceState::Closed);
+                } else if demand {
                     idle_deadline = None;
                     unavailable_latched = false;
                     if let Some(capture) = backend.as_mut() {
@@ -469,6 +549,16 @@ mod tests {
         }
     }
 
+    fn configure_capture(
+        commands: &std::sync::mpsc::Sender<CaptureWorkerCommand>,
+        enabled: bool,
+        demanded: bool,
+    ) {
+        commands
+            .send(CaptureWorkerCommand::Configure { enabled, demanded })
+            .unwrap();
+    }
+
     #[test]
     fn playback_demand_opens_observer_and_closes_it_when_disabled() {
         let (commands_tx, commands_rx) = std::sync::mpsc::channel();
@@ -568,27 +658,63 @@ mod tests {
             )
         });
 
-        commands_tx
-            .send(CaptureWorkerCommand::Demand(true))
-            .unwrap();
+        configure_capture(&commands_tx, true, true);
         std::thread::sleep(Duration::from_millis(15));
         assert_eq!(*states_rx.borrow(), AudioServiceState::Active);
-        commands_tx
-            .send(CaptureWorkerCommand::Demand(false))
-            .unwrap();
+        configure_capture(&commands_tx, true, false);
         std::thread::sleep(Duration::from_millis(10));
-        commands_tx
-            .send(CaptureWorkerCommand::Demand(true))
-            .unwrap();
+        configure_capture(&commands_tx, true, true);
         std::thread::sleep(Duration::from_millis(10));
         assert_eq!(opens.load(Ordering::Relaxed), 1);
 
-        commands_tx
-            .send(CaptureWorkerCommand::Demand(false))
-            .unwrap();
+        configure_capture(&commands_tx, true, false);
         std::thread::sleep(Duration::from_millis(60));
         assert_eq!(*states_rx.borrow(), AudioServiceState::Closed);
         assert_eq!(stops.load(Ordering::Relaxed), 1);
+        commands_tx.send(CaptureWorkerCommand::Shutdown).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn disabling_capture_closes_immediately_and_preserves_demand() {
+        let (commands_tx, commands_rx) = std::sync::mpsc::channel();
+        let (frames_tx, _) = watch::channel(None);
+        let (states_tx, states_rx) = watch::channel(AudioServiceState::Closed);
+        let opens = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let test_opens = Arc::clone(&opens);
+        let test_stops = Arc::clone(&stops);
+        let worker = std::thread::spawn(move || {
+            run_worker(
+                commands_rx,
+                frames_tx,
+                states_tx,
+                Duration::from_secs(1),
+                move || {
+                    let generation = test_opens.fetch_add(1, Ordering::Relaxed) as u64 + 1;
+                    Ok(Box::new(FakeCapture {
+                        generation,
+                        stops: Arc::clone(&test_stops),
+                    }) as Box<dyn AudioCaptureBackend>)
+                },
+            )
+        });
+
+        configure_capture(&commands_tx, true, true);
+        std::thread::sleep(Duration::from_millis(15));
+        assert_eq!(*states_rx.borrow(), AudioServiceState::Active);
+        assert_eq!(opens.load(Ordering::Relaxed), 1);
+
+        configure_capture(&commands_tx, false, true);
+        std::thread::sleep(Duration::from_millis(15));
+        assert_eq!(*states_rx.borrow(), AudioServiceState::Closed);
+        assert_eq!(stops.load(Ordering::Relaxed), 1);
+
+        configure_capture(&commands_tx, true, true);
+        std::thread::sleep(Duration::from_millis(15));
+        assert_eq!(*states_rx.borrow(), AudioServiceState::Active);
+        assert_eq!(opens.load(Ordering::Relaxed), 2);
+
         commands_tx.send(CaptureWorkerCommand::Shutdown).unwrap();
         worker.join().unwrap();
     }
@@ -615,17 +741,11 @@ mod tests {
                 },
             )
         });
-        commands_tx
-            .send(CaptureWorkerCommand::Demand(true))
-            .unwrap();
+        configure_capture(&commands_tx, true, true);
         std::thread::sleep(Duration::from_millis(25));
         assert_eq!(attempts.load(Ordering::Relaxed), 1);
-        commands_tx
-            .send(CaptureWorkerCommand::Demand(false))
-            .unwrap();
-        commands_tx
-            .send(CaptureWorkerCommand::Demand(true))
-            .unwrap();
+        configure_capture(&commands_tx, true, false);
+        configure_capture(&commands_tx, true, true);
         std::thread::sleep(Duration::from_millis(15));
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
         commands_tx.send(CaptureWorkerCommand::Shutdown).unwrap();
