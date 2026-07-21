@@ -1192,6 +1192,10 @@ message GlobalSettings {
 
   // Daemon-wide gates applied over renderer-specific settings.
   GlobalRendererSettings renderer = 20;
+
+  // Mute wallpaper renderers while another application's active playback
+  // stream is visible through PulseAudio/PipeWire-Pulse.
+  optional bool mute_when_other_audio = 21;
 }
 
 enum AutoAction {

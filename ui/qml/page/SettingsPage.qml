@@ -202,6 +202,7 @@ MD.Page {
             queueMode: "sequential",
             rotationSecs: 0,
             audioFadeMs: 500,
+            muteWhenOtherAudio: false,
             "renderer.enable_audio": true,
             "renderer.volume": 100,
             pluginUpdateNotifications: true,
@@ -232,6 +233,7 @@ MD.Page {
             queueMode: g.queueMode ?? "sequential",
             rotationSecs: Number(g.rotationSecs ?? 0),
             audioFadeMs: Number(g.audioFadeMs ?? 500),
+            muteWhenOtherAudio: Boolean(g.muteWhenOtherAudio ?? false),
             rendererEnableAudio: root._rendererAudioEnabled(g),
             rendererVolume: root._rendererVolume(g),
             pluginUpdateNotifications: Boolean(g.pluginUpdateNotifications ?? true),
@@ -528,6 +530,33 @@ MD.Page {
                         text: qsTr("%")
                         typescale: MD.Token.typescale.body_medium
                         color: MD.Token.color.on_surface_variant
+                    }
+                }
+            }
+
+            SettingItem {
+                first: false
+                last: false
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Mute for other active playback streams")
+                    }
+
+                    MD.Switch {
+                        id: m_mute_when_other_audio
+                        onToggled: root._mut(g => {
+                            g.muteWhenOtherAudio = checked;
+                        })
+                    }
+                    Binding {
+                        target: m_mute_when_other_audio
+                        property: "checked"
+                        value: Boolean(root._currentGlobal()?.muteWhenOtherAudio ?? false)
                     }
                 }
             }

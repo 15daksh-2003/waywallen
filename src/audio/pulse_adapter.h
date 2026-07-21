@@ -8,7 +8,16 @@
 extern "C" {
 #endif
 
-typedef struct ww_pulse_capture ww_pulse_capture_t;
+typedef struct ww_pulse_capture           ww_pulse_capture_t;
+typedef struct ww_pulse_playback_observer ww_pulse_playback_observer_t;
+
+typedef struct ww_pulse_playback_stream {
+    uint32_t index;
+    int32_t  process_id;
+    int      corked;
+    int      muted;
+    int      has_nonzero_volume;
+} ww_pulse_playback_stream_t;
 
 enum ww_pulse_error
 {
@@ -30,6 +39,16 @@ size_t ww_pulse_capture_read(ww_pulse_capture_t* capture, float* samples, size_t
 
 uint64_t ww_pulse_capture_generation(ww_pulse_capture_t* capture);
 int      ww_pulse_capture_failed(ww_pulse_capture_t* capture, char* error, size_t error_capacity);
+
+ww_pulse_playback_observer_t* ww_pulse_playback_observer_open(int* error_code, char* error,
+                                                              size_t error_capacity);
+void ww_pulse_playback_observer_close(ww_pulse_playback_observer_t* observer);
+
+/* Returns the total stream count. Up to `capacity` records are copied. */
+size_t ww_pulse_playback_observer_snapshot(ww_pulse_playback_observer_t* observer,
+                                           ww_pulse_playback_stream_t* streams, size_t capacity);
+int    ww_pulse_playback_observer_failed(ww_pulse_playback_observer_t* observer, char* error,
+                                         size_t error_capacity);
 
 #ifdef __cplusplus
 }

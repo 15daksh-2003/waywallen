@@ -22,6 +22,32 @@ unsafe extern "C" {
         error: *mut c_char,
         error_capacity: usize,
     ) -> c_int;
+    fn ww_pulse_playback_observer_open(
+        error_code: *mut c_int,
+        error: *mut c_char,
+        error_capacity: usize,
+    ) -> *mut c_void;
+    fn ww_pulse_playback_observer_close(observer: *mut c_void);
+    fn ww_pulse_playback_observer_snapshot(
+        observer: *mut c_void,
+        streams: *mut PulsePlaybackStream,
+        capacity: usize,
+    ) -> usize;
+    fn ww_pulse_playback_observer_failed(
+        observer: *mut c_void,
+        error: *mut c_char,
+        error_capacity: usize,
+    ) -> c_int;
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PulsePlaybackStream {
+    pub index: u32,
+    pub process_id: i32,
+    pub corked: c_int,
+    pub muted: c_int,
+    pub has_nonzero_volume: c_int,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +151,70 @@ impl AudioCaptureBackend for PulseCapture {
 impl Drop for PulseCapture {
     fn drop(&mut self) {
         unsafe { ww_pulse_capture_close(self.handle.as_ptr()) };
+    }
+}
+
+pub struct PulsePlaybackObserver {
+    handle: NonNull<c_void>,
+}
+
+// The opaque handle is polled and destroyed by one audio worker. PulseAudio
+// callbacks synchronize snapshots inside the adapter.
+unsafe impl Send for PulsePlaybackObserver {}
+
+impl PulsePlaybackObserver {
+    pub fn open() -> Result<Self, CaptureError> {
+        let mut code = 0;
+        let mut error = [0i8; ERROR_CAPACITY];
+        let handle =
+            unsafe { ww_pulse_playback_observer_open(&mut code, error.as_mut_ptr(), error.len()) };
+        let Some(handle) = NonNull::new(handle) else {
+            return Err(CaptureError {
+                kind: error_kind(code),
+                message: c_message(&error),
+            });
+        };
+        Ok(Self { handle })
+    }
+
+    pub fn snapshot(&self) -> Result<Vec<PulsePlaybackStream>, CaptureError> {
+        self.status()?;
+        let mut streams = Vec::new();
+        loop {
+            let count = unsafe {
+                ww_pulse_playback_observer_snapshot(
+                    self.handle.as_ptr(),
+                    streams.as_mut_ptr(),
+                    streams.capacity(),
+                )
+            };
+            if count <= streams.capacity() {
+                unsafe { streams.set_len(count) };
+                return Ok(streams);
+            }
+            streams.reserve(count - streams.capacity());
+        }
+    }
+
+    fn status(&self) -> Result<(), CaptureError> {
+        let mut error = [0i8; ERROR_CAPACITY];
+        let code = unsafe {
+            ww_pulse_playback_observer_failed(self.handle.as_ptr(), error.as_mut_ptr(), error.len())
+        };
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(CaptureError {
+                kind: error_kind(code),
+                message: c_message(&error),
+            })
+        }
+    }
+}
+
+impl Drop for PulsePlaybackObserver {
+    fn drop(&mut self) {
+        unsafe { ww_pulse_playback_observer_close(self.handle.as_ptr()) };
     }
 }
 

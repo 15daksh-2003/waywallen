@@ -75,6 +75,26 @@ pub struct RendererSubscriptionSnapshot {
     entries: Arc<BTreeMap<RendererId, RendererSubscription>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RendererProcessOwnershipSnapshot {
+    pub generation: u64,
+    process_groups: Arc<BTreeSet<i32>>,
+}
+
+impl RendererProcessOwnershipSnapshot {
+    pub fn owns_process_group(&self, process_group: i32) -> bool {
+        self.process_groups.contains(&process_group)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_process_groups(process_groups: impl IntoIterator<Item = i32>) -> Self {
+        Self {
+            generation: 0,
+            process_groups: Arc::new(process_groups.into_iter().collect()),
+        }
+    }
+}
+
 impl RendererSubscriptionSnapshot {
     pub fn revision_for(&self, id: &str, kind: RendererEventKind) -> Option<u64> {
         self.entries
@@ -534,6 +554,10 @@ pub struct RendererHandle {
     /// OS pid of the renderer child captured right after `spawn()`.
     /// `None` only if Tokio could not return a child pid.
     pub pid: Option<u32>,
+    /// Process group created for this renderer and inherited by normal
+    /// helper processes. Audio ownership uses this boundary rather than
+    /// renderer-controlled application names.
+    pub process_group: Option<i32>,
     /// DRM render-node id of the GPU the renderer's Vulkan instance
     /// picked. Reported in Ready and used by DMA-BUF negotiation.
     pub gpu: DrmNode,
@@ -734,15 +758,41 @@ pub struct RendererManager {
     reap_tx: tokio::sync::mpsc::UnboundedSender<RendererId>,
     reap_rx: StdMutex<Option<tokio::sync::mpsc::UnboundedReceiver<RendererId>>>,
     subscriptions: Arc<RendererSubscriptionRegistry>,
+    process_ownership: watch::Sender<RendererProcessOwnershipSnapshot>,
+    process_ownership_state: StdMutex<RendererProcessOwnershipState>,
 }
 
 struct Inner {
     renderers: HashMap<RendererId, Arc<RendererHandle>>,
 }
 
+#[derive(Default)]
+struct RendererProcessOwnershipState {
+    generation: u64,
+    process_groups: BTreeSet<i32>,
+}
+
+struct RendererProcessGroupRegistration<'a> {
+    manager: &'a RendererManager,
+    process_group: Option<i32>,
+}
+
+impl RendererProcessGroupRegistration<'_> {
+    fn commit(mut self) {
+        self.process_group = None;
+    }
+}
+
+impl Drop for RendererProcessGroupRegistration<'_> {
+    fn drop(&mut self) {
+        self.manager.unregister_process_group(self.process_group);
+    }
+}
+
 impl RendererManager {
     pub fn new(registry: RendererRegistry) -> Self {
         let (reap_tx, reap_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (process_ownership, _) = watch::channel(RendererProcessOwnershipSnapshot::default());
         Self {
             inner: TokioMutex::new(Inner {
                 renderers: HashMap::new(),
@@ -753,6 +803,8 @@ impl RendererManager {
             reap_tx,
             reap_rx: StdMutex::new(Some(reap_rx)),
             subscriptions: Arc::new(RendererSubscriptionRegistry::new()),
+            process_ownership,
+            process_ownership_state: StdMutex::new(RendererProcessOwnershipState::default()),
         }
     }
 
@@ -873,6 +925,7 @@ impl RendererManager {
         let init_msg = build_init_msg(&req, &renderer_def);
 
         let mut cmd = Command::new(&renderer_def.bin);
+        cmd.process_group(0);
         cmd.arg("--ipc").arg(&sock_path);
         // SPAWN_VERSION 3: extras (canonical `path` + plugin-specific
         // keys like `assets`/`external_id`) ride as `--<key> <value>`
@@ -892,6 +945,8 @@ impl RendererManager {
             .spawn()
             .with_context(|| format!("spawn {}", renderer_def.bin.display()))?;
         let child_pid = child.id();
+        let process_group = child_pid.and_then(|pid| i32::try_from(pid).ok());
+        let process_group_registration = self.register_process_group(process_group);
 
         // Accept, with a bound to avoid hanging forever on a broken host.
         let accept = listener.accept();
@@ -987,6 +1042,7 @@ impl RendererManager {
             name: renderer_def.name.clone(),
             plugin_id: renderer_def.plugin_id.clone(),
             pid: child_pid,
+            process_group,
             gpu,
             writer,
             events: events_tx,
@@ -1019,6 +1075,7 @@ impl RendererManager {
             let mut inner = self.inner.lock().await;
             inner.renderers.insert(id.clone(), handle);
         }
+        process_group_registration.commit();
         thread::spawn(move || {
             run_reader(
                 reader_id,
@@ -1394,6 +1451,50 @@ impl RendererManager {
         self.subscriptions.subscribe()
     }
 
+    pub fn subscribe_process_ownership(&self) -> watch::Receiver<RendererProcessOwnershipSnapshot> {
+        self.process_ownership.subscribe()
+    }
+
+    fn register_process_group(
+        &self,
+        process_group: Option<i32>,
+    ) -> RendererProcessGroupRegistration<'_> {
+        if let Some(process_group) = process_group {
+            self.update_process_group(process_group, true);
+        }
+        RendererProcessGroupRegistration {
+            manager: self,
+            process_group,
+        }
+    }
+
+    fn unregister_process_group(&self, process_group: Option<i32>) {
+        if let Some(process_group) = process_group {
+            self.update_process_group(process_group, false);
+        }
+    }
+
+    fn update_process_group(&self, process_group: i32, present: bool) {
+        let mut state = self
+            .process_ownership_state
+            .lock()
+            .expect("renderer process ownership poisoned");
+        let changed = if present {
+            state.process_groups.insert(process_group)
+        } else {
+            state.process_groups.remove(&process_group)
+        };
+        if !changed {
+            return;
+        }
+        state.generation = state.generation.wrapping_add(1);
+        self.process_ownership
+            .send_replace(RendererProcessOwnershipSnapshot {
+                generation: state.generation,
+                process_groups: Arc::new(state.process_groups.clone()),
+            });
+    }
+
     fn subscribed_to(&self, id: &str, kind: RendererEventKind) -> bool {
         self.subscription_snapshot()
             .revision_for(id, kind)
@@ -1453,6 +1554,7 @@ impl RendererManager {
             inner.renderers.remove(id)
         };
         let Some(handle) = handle else { return };
+        self.unregister_process_group(handle.process_group);
         self.subscriptions.remove(id);
         log::warn!("renderer {id}: evicting");
 
@@ -1475,6 +1577,7 @@ impl RendererManager {
             inner.renderers.remove(id)
         }
         .ok_or_else(|| Error::RendererNotFound(id.to_string()))?;
+        self.unregister_process_group(handle.process_group);
         self.subscriptions.remove(id);
 
         let writer = handle.writer.clone();
@@ -1966,6 +2069,7 @@ impl RendererHandle {
             name: "test-stub".into(),
             plugin_id: "test.plugin".into(),
             pid: None,
+            process_group: None,
             gpu: DrmNode::UNKNOWN,
             writer: Self::test_writer(id, a),
             events: events_tx,
@@ -1989,8 +2093,13 @@ impl RendererManager {
     /// spawning a child process. Used by routing-table unit tests.
     pub async fn register_test_handle(&self, handle: Arc<RendererHandle>) {
         self.subscriptions.register(handle.id.clone());
+        let process_group = handle.process_group;
         let mut inner = self.inner.lock().await;
         inner.renderers.insert(handle.id.clone(), handle);
+        drop(inner);
+        if let Some(process_group) = process_group {
+            self.update_process_group(process_group, true);
+        }
     }
 }
 
@@ -1998,6 +2107,23 @@ impl RendererManager {
 mod subscription_tests {
     use super::*;
     use crate::ipc::uds::recv_control;
+
+    #[test]
+    fn process_group_registration_publishes_generation_and_rolls_back() {
+        let manager = RendererManager::new_default();
+        let ownership = manager.subscribe_process_ownership();
+
+        {
+            let _registration = manager.register_process_group(Some(42));
+            let snapshot = ownership.borrow().clone();
+            assert_eq!(snapshot.generation, 1);
+            assert!(snapshot.owns_process_group(42));
+        }
+
+        let snapshot = ownership.borrow().clone();
+        assert_eq!(snapshot.generation, 2);
+        assert!(!snapshot.owns_process_group(42));
+    }
 
     #[test]
     fn subscription_registry_applies_complete_sets_atomically() {
@@ -2335,6 +2461,7 @@ mod reuse_tests {
             name: "waywallen-mpv".into(),
             plugin_id: "test.plugin".into(),
             pid: None,
+            process_group: None,
             gpu: DrmNode::UNKNOWN,
             writer: RendererHandle::test_writer(id, a),
             events: events_tx,
@@ -2435,6 +2562,7 @@ mod reuse_tests {
             name: "waywallen-mpv".into(),
             plugin_id: "test.plugin".into(),
             pid: None,
+            process_group: None,
             gpu: DrmNode::UNKNOWN,
             writer: RendererHandle::test_writer("h1", daemon_side),
             events: events_tx,

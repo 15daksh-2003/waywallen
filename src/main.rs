@@ -340,7 +340,13 @@ async fn async_main() -> anyhow::Result<()> {
 
     let source_plugins = Arc::new(tokio::sync::RwLock::new(Vec::new()));
 
-    let audio_service = audio::AudioService::start(renderer_mgr.clone(), shutdown_tx.subscribe());
+    let audio_service = audio::AudioService::start(
+        renderer_mgr.clone(),
+        router.clone(),
+        settings_store.clone(),
+        events.subscribe(),
+        shutdown_tx.subscribe(),
+    );
     let state = Arc::new(AppState {
         renderer_manager: renderer_mgr,
         audio: audio_service,

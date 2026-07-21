@@ -313,6 +313,7 @@ struct Inner {
     /// daemon-owned lifecycle path as auto replay.
     manual_paused: bool,
     manual_muted: bool,
+    other_playback_active: bool,
     /// Pending orphan-reap timers, keyed by renderer id. Inserted by
     /// `mark_orphan` and cleared by `cancel_orphan_timer`.
     orphan_timers: HashMap<RendererId, JoinHandle<()>>,
@@ -368,6 +369,7 @@ impl Router {
                 session_inactive: false,
                 manual_paused: false,
                 manual_muted: false,
+                other_playback_active: false,
             }),
             lifecycle_lock: TokioMutex::new(()),
             mgr,
@@ -1264,6 +1266,21 @@ impl Router {
         muted
     }
 
+    pub async fn set_other_playback_active(self: &Arc<Self>, active: bool) {
+        let changed = {
+            let mut inner = self.inner.lock().await;
+            if inner.other_playback_active == active {
+                false
+            } else {
+                inner.other_playback_active = active;
+                true
+            }
+        };
+        if changed {
+            self.reconcile_lifecycle().await;
+        }
+    }
+
     pub async fn manual_lifecycle_state(self: &Arc<Self>) -> ManualLifecycleState {
         let inner = self.inner.lock().await;
         ManualLifecycleState {
@@ -1971,8 +1988,12 @@ impl Router {
                 };
                 let manual_paused = inner.manual_paused;
                 let manual_muted = inner.manual_muted;
+                let other_playback_active = inner.other_playback_active;
                 let should_pause = manual_paused || !has_active_link || auto_pause_requested;
-                let should_mute = manual_muted || !has_active_link || auto_mute_decision.is_some();
+                let should_mute = manual_muted
+                    || other_playback_active
+                    || !has_active_link
+                    || auto_mute_decision.is_some();
                 let previous_state = inner
                     .renderer_states
                     .get(&rid)
@@ -2005,6 +2026,8 @@ impl Router {
                 };
                 let mute_cause = if manual_muted {
                     "manual"
+                } else if other_playback_active {
+                    "external-audio"
                 } else if has_active_link {
                     "auto-action"
                 } else {
@@ -3669,6 +3692,43 @@ mod tests {
 
         let got = reader.join().expect("reader joined");
         assert_eq!(got, vec![("mute", 750), ("unmute", 750)]);
+    }
+
+    #[tokio::test]
+    async fn external_audio_composes_with_manual_mute() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+
+        let (renderer, peer) = RendererHandle::test_stub_with_peer("r1", "scene");
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let reader = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            while got.len() < 2 {
+                let (msg, _fds) = crate::ipc::uds::recv_control(&peer).expect("recv control");
+                match msg {
+                    ControlMsg::Mute { .. } => got.push("mute"),
+                    ControlMsg::Unmute { .. } => got.push("unmute"),
+                    _ => {}
+                }
+            }
+            got
+        });
+
+        mgr.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer).await;
+        let _display = router.register_display(reg("HDMI-A-1", 1920, 1080)).await;
+
+        router.set_other_playback_active(true).await;
+        router.set_manual_mute(true).await;
+        router.set_other_playback_active(false).await;
+        assert!(router.is_muted("r1").await);
+        router.set_manual_mute(false).await;
+
+        assert_eq!(
+            reader.join().expect("reader joined"),
+            vec!["mute", "unmute"]
+        );
     }
 
     #[tokio::test(start_paused = true)]

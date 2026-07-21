@@ -33,6 +33,13 @@
 extern "C" {
 #endif
 
+/* Stable metadata for audio playback created by integrated renderer hosts.
+ * The daemon uses process ownership for classification; these values keep
+ * PulseAudio/PipeWire mixers and diagnostics consistent. */
+#define WW_BRIDGE_AUDIO_APPLICATION_NAME "Waywallen Renderer"
+#define WW_BRIDGE_AUDIO_APPLICATION_ID   "org.waywallen.renderer"
+#define WW_BRIDGE_AUDIO_STREAM_PREFIX    "waywallen.renderer."
+
 /* -----------------------------------------------------------------------
  * Connection
  * ----------------------------------------------------------------------- */

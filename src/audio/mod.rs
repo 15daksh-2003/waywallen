@@ -1,4 +1,5 @@
 mod analyzer;
+mod playback;
 mod pulse;
 mod service;
 

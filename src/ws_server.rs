@@ -678,6 +678,7 @@ fn global_to_pb(g: &crate::settings::GlobalSettings) -> pb::GlobalSettings {
         queue_mode: g.queue_mode.clone(),
         rotation_secs: g.rotation_secs,
         audio_fade_ms: g.effective_audio_fade_ms(),
+        mute_when_other_audio: Some(g.mute_when_other_audio),
         wallpaper_skip_types: g.wallpaper_skip_types.clone(),
         wallpaper_filter_tags: g.wallpaper_filter_tags.clone(),
         wallpaper_skip_content_ratings: g.wallpaper_skip_content_ratings.clone(),
@@ -2607,6 +2608,9 @@ async fn dispatch_inner(
                     s.global.rotation_secs = g.rotation_secs;
                     s.global.audio_fade_ms =
                         g.audio_fade_ms.min(crate::settings::MAX_AUDIO_FADE_MS);
+                    if let Some(mute_when_other_audio) = g.mute_when_other_audio {
+                        s.global.mute_when_other_audio = mute_when_other_audio;
+                    }
                     s.global.plugin_update_notifications = !g.disable_plugin_update_notifications;
                     s.global.duplicate_renderers_for_same_wallpaper =
                         g.duplicate_renderers_for_same_wallpaper;

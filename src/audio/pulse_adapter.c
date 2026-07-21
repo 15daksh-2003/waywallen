@@ -3,6 +3,8 @@
 #include <pulse/pulseaudio.h>
 
 #include <dlfcn.h>
+#include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -14,45 +16,54 @@
 #define WW_PULSE_NAME_CAPACITY 512u
 
 struct pulse_api {
-    __typeof__(&pa_threaded_mainloop_new)          threaded_mainloop_new;
-    __typeof__(&pa_threaded_mainloop_free)         threaded_mainloop_free;
-    __typeof__(&pa_threaded_mainloop_start)        threaded_mainloop_start;
-    __typeof__(&pa_threaded_mainloop_stop)         threaded_mainloop_stop;
-    __typeof__(&pa_threaded_mainloop_lock)         threaded_mainloop_lock;
-    __typeof__(&pa_threaded_mainloop_unlock)       threaded_mainloop_unlock;
-    __typeof__(&pa_threaded_mainloop_wait)         threaded_mainloop_wait;
-    __typeof__(&pa_threaded_mainloop_signal)       threaded_mainloop_signal;
-    __typeof__(&pa_threaded_mainloop_get_api)      threaded_mainloop_get_api;
-    __typeof__(&pa_context_new)                    context_new;
-    __typeof__(&pa_context_set_state_callback)     context_set_state_callback;
-    __typeof__(&pa_context_connect)                context_connect;
-    __typeof__(&pa_context_disconnect)             context_disconnect;
-    __typeof__(&pa_context_unref)                  context_unref;
-    __typeof__(&pa_context_get_state)              context_get_state;
-    __typeof__(&pa_context_errno)                  context_errno;
-    __typeof__(&pa_context_get_server_info)        context_get_server_info;
-    __typeof__(&pa_context_get_sink_info_by_name)  context_get_sink_info_by_name;
-    __typeof__(&pa_context_set_subscribe_callback) context_set_subscribe_callback;
-    __typeof__(&pa_context_subscribe)              context_subscribe;
-    __typeof__(&pa_operation_unref)                operation_unref;
-    __typeof__(&pa_stream_new)                     stream_new;
-    __typeof__(&pa_stream_set_state_callback)      stream_set_state_callback;
-    __typeof__(&pa_stream_set_read_callback)       stream_set_read_callback;
-    __typeof__(&pa_stream_connect_record)          stream_connect_record;
-    __typeof__(&pa_stream_get_state)               stream_get_state;
-    __typeof__(&pa_stream_get_sample_spec)         stream_get_sample_spec;
-    __typeof__(&pa_stream_get_channel_map)         stream_get_channel_map;
-    __typeof__(&pa_stream_readable_size)           stream_readable_size;
-    __typeof__(&pa_stream_peek)                    stream_peek;
-    __typeof__(&pa_stream_drop)                    stream_drop;
-    __typeof__(&pa_stream_disconnect)              stream_disconnect;
-    __typeof__(&pa_stream_unref)                   stream_unref;
-    __typeof__(&pa_strerror)                       strerror_fn;
+    __typeof__(&pa_threaded_mainloop_new)            threaded_mainloop_new;
+    __typeof__(&pa_threaded_mainloop_free)           threaded_mainloop_free;
+    __typeof__(&pa_threaded_mainloop_start)          threaded_mainloop_start;
+    __typeof__(&pa_threaded_mainloop_stop)           threaded_mainloop_stop;
+    __typeof__(&pa_threaded_mainloop_lock)           threaded_mainloop_lock;
+    __typeof__(&pa_threaded_mainloop_unlock)         threaded_mainloop_unlock;
+    __typeof__(&pa_threaded_mainloop_wait)           threaded_mainloop_wait;
+    __typeof__(&pa_threaded_mainloop_signal)         threaded_mainloop_signal;
+    __typeof__(&pa_threaded_mainloop_get_api)        threaded_mainloop_get_api;
+    __typeof__(&pa_context_new)                      context_new;
+    __typeof__(&pa_context_new_with_proplist)        context_new_with_proplist;
+    __typeof__(&pa_context_set_state_callback)       context_set_state_callback;
+    __typeof__(&pa_context_connect)                  context_connect;
+    __typeof__(&pa_context_disconnect)               context_disconnect;
+    __typeof__(&pa_context_unref)                    context_unref;
+    __typeof__(&pa_context_get_state)                context_get_state;
+    __typeof__(&pa_context_errno)                    context_errno;
+    __typeof__(&pa_context_get_server_info)          context_get_server_info;
+    __typeof__(&pa_context_get_sink_info_by_name)    context_get_sink_info_by_name;
+    __typeof__(&pa_context_get_sink_input_info_list) context_get_sink_input_info_list;
+    __typeof__(&pa_context_set_subscribe_callback)   context_set_subscribe_callback;
+    __typeof__(&pa_context_subscribe)                context_subscribe;
+    __typeof__(&pa_operation_unref)                  operation_unref;
+    __typeof__(&pa_proplist_new)                     proplist_new;
+    __typeof__(&pa_proplist_sets)                    proplist_sets;
+    __typeof__(&pa_proplist_gets)                    proplist_gets;
+    __typeof__(&pa_proplist_free)                    proplist_free;
+    __typeof__(&pa_stream_new)                       stream_new;
+    __typeof__(&pa_stream_set_state_callback)        stream_set_state_callback;
+    __typeof__(&pa_stream_set_read_callback)         stream_set_read_callback;
+    __typeof__(&pa_stream_connect_record)            stream_connect_record;
+    __typeof__(&pa_stream_get_state)                 stream_get_state;
+    __typeof__(&pa_stream_get_sample_spec)           stream_get_sample_spec;
+    __typeof__(&pa_stream_get_channel_map)           stream_get_channel_map;
+    __typeof__(&pa_stream_readable_size)             stream_readable_size;
+    __typeof__(&pa_stream_peek)                      stream_peek;
+    __typeof__(&pa_stream_drop)                      stream_drop;
+    __typeof__(&pa_stream_disconnect)                stream_disconnect;
+    __typeof__(&pa_stream_unref)                     stream_unref;
+    __typeof__(&pa_strerror)                         strerror_fn;
 };
 
 static pthread_mutex_t  api_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 static void*            api_cache_library;
-static struct pulse_api api_cache;
+static struct pulse_api api_cache_capture;
+static struct pulse_api api_cache_observer;
+static int              api_cache_capture_ready;
+static int              api_cache_observer_ready;
 static _Atomic uint64_t generation_counter;
 
 struct ww_pulse_capture {
@@ -79,6 +90,27 @@ struct ww_pulse_capture {
     int  query_found_sink;
 };
 
+struct ww_pulse_playback_observer {
+    void*                 library;
+    struct pulse_api      api;
+    pa_threaded_mainloop* loop;
+    int                   loop_started;
+    pa_context*           context;
+
+    pthread_mutex_t             state_mutex;
+    ww_pulse_playback_stream_t* streams;
+    size_t                      stream_count;
+    size_t                      stream_capacity;
+    ww_pulse_playback_stream_t* resync_streams;
+    size_t                      resync_stream_count;
+    size_t                      resync_stream_capacity;
+    int                         resync_pending;
+    int                         resync_dirty;
+    int                         initial_ready;
+    int                         failed;
+    char                        failure[256];
+};
+
 static void copy_error(char* out, size_t capacity, const char* message) {
     if (! out || capacity == 0) return;
     snprintf(out, capacity, "%s", message ? message : "");
@@ -91,20 +123,25 @@ static void set_failure(ww_pulse_capture_t* self, int code, const char* message)
     pthread_mutex_unlock(&self->state_mutex);
 }
 
-static int load_api(ww_pulse_capture_t* self, char* error, size_t error_capacity) {
+static int load_api(void** target_library, struct pulse_api* target_api, int observer, char* error,
+                    size_t error_capacity) {
     pthread_mutex_lock(&api_cache_mutex);
-    if (api_cache_library) {
-        self->library = api_cache_library;
-        self->api     = api_cache;
+    if ((! observer && api_cache_capture_ready) || (observer && api_cache_observer_ready)) {
+        *target_library = api_cache_library;
+        *target_api     = observer ? api_cache_observer : api_cache_capture;
         pthread_mutex_unlock(&api_cache_mutex);
         return WW_PULSE_OK;
     }
 
-    void* library = dlopen(WW_PULSE_SONAME, RTLD_NOW | RTLD_LOCAL);
+    void* library = api_cache_library;
     if (! library) {
-        copy_error(error, error_capacity, dlerror());
-        pthread_mutex_unlock(&api_cache_mutex);
-        return WW_PULSE_LIBRARY_UNAVAILABLE;
+        library = dlopen(WW_PULSE_SONAME, RTLD_NOW | RTLD_LOCAL);
+        if (! library) {
+            copy_error(error, error_capacity, dlerror());
+            pthread_mutex_unlock(&api_cache_mutex);
+            return WW_PULSE_LIBRARY_UNAVAILABLE;
+        }
+        api_cache_library = library;
     }
     struct pulse_api api = { 0 };
 
@@ -115,11 +152,16 @@ static int load_api(ww_pulse_capture_t* self, char* error, size_t error_capacity
             char message[256];                                                           \
             snprintf(message, sizeof(message), "missing PulseAudio symbol %s", #symbol); \
             copy_error(error, error_capacity, message);                                  \
-            dlclose(library);                                                            \
             pthread_mutex_unlock(&api_cache_mutex);                                      \
             return WW_PULSE_MISSING_SYMBOL;                                              \
         }                                                                                \
         memcpy(&api.field, &address, sizeof(address));                                   \
+    } while (0)
+
+#define LOAD_OPTIONAL(field, symbol)                                \
+    do {                                                            \
+        void* address = dlsym(library, #symbol);                    \
+        if (address) memcpy(&api.field, &address, sizeof(address)); \
     } while (0)
 
     LOAD(threaded_mainloop_new, pa_threaded_mainloop_new);
@@ -132,37 +174,71 @@ static int load_api(ww_pulse_capture_t* self, char* error, size_t error_capacity
     LOAD(threaded_mainloop_signal, pa_threaded_mainloop_signal);
     LOAD(threaded_mainloop_get_api, pa_threaded_mainloop_get_api);
     LOAD(context_new, pa_context_new);
+    LOAD_OPTIONAL(context_new_with_proplist, pa_context_new_with_proplist);
     LOAD(context_set_state_callback, pa_context_set_state_callback);
     LOAD(context_connect, pa_context_connect);
     LOAD(context_disconnect, pa_context_disconnect);
     LOAD(context_unref, pa_context_unref);
     LOAD(context_get_state, pa_context_get_state);
     LOAD(context_errno, pa_context_errno);
-    LOAD(context_get_server_info, pa_context_get_server_info);
-    LOAD(context_get_sink_info_by_name, pa_context_get_sink_info_by_name);
     LOAD(context_set_subscribe_callback, pa_context_set_subscribe_callback);
     LOAD(context_subscribe, pa_context_subscribe);
     LOAD(operation_unref, pa_operation_unref);
-    LOAD(stream_new, pa_stream_new);
-    LOAD(stream_set_state_callback, pa_stream_set_state_callback);
-    LOAD(stream_set_read_callback, pa_stream_set_read_callback);
-    LOAD(stream_connect_record, pa_stream_connect_record);
-    LOAD(stream_get_state, pa_stream_get_state);
-    LOAD(stream_get_sample_spec, pa_stream_get_sample_spec);
-    LOAD(stream_get_channel_map, pa_stream_get_channel_map);
-    LOAD(stream_readable_size, pa_stream_readable_size);
-    LOAD(stream_peek, pa_stream_peek);
-    LOAD(stream_drop, pa_stream_drop);
-    LOAD(stream_disconnect, pa_stream_disconnect);
-    LOAD(stream_unref, pa_stream_unref);
+    LOAD_OPTIONAL(proplist_new, pa_proplist_new);
+    LOAD_OPTIONAL(proplist_sets, pa_proplist_sets);
+    LOAD_OPTIONAL(proplist_free, pa_proplist_free);
     LOAD(strerror_fn, pa_strerror);
+    if (observer) {
+        LOAD(context_get_sink_input_info_list, pa_context_get_sink_input_info_list);
+        LOAD(proplist_gets, pa_proplist_gets);
+    } else {
+        LOAD(context_get_server_info, pa_context_get_server_info);
+        LOAD(context_get_sink_info_by_name, pa_context_get_sink_info_by_name);
+        LOAD(stream_new, pa_stream_new);
+        LOAD(stream_set_state_callback, pa_stream_set_state_callback);
+        LOAD(stream_set_read_callback, pa_stream_set_read_callback);
+        LOAD(stream_connect_record, pa_stream_connect_record);
+        LOAD(stream_get_state, pa_stream_get_state);
+        LOAD(stream_get_sample_spec, pa_stream_get_sample_spec);
+        LOAD(stream_get_channel_map, pa_stream_get_channel_map);
+        LOAD(stream_readable_size, pa_stream_readable_size);
+        LOAD(stream_peek, pa_stream_peek);
+        LOAD(stream_drop, pa_stream_drop);
+        LOAD(stream_disconnect, pa_stream_disconnect);
+        LOAD(stream_unref, pa_stream_unref);
+    }
 #undef LOAD
-    api_cache_library = library;
-    api_cache         = api;
-    self->library     = library;
-    self->api         = api;
+#undef LOAD_OPTIONAL
+    if (observer) {
+        api_cache_observer       = api;
+        api_cache_observer_ready = 1;
+    } else {
+        api_cache_capture       = api;
+        api_cache_capture_ready = 1;
+    }
+    *target_library = library;
+    *target_api     = api;
     pthread_mutex_unlock(&api_cache_mutex);
     return WW_PULSE_OK;
+}
+
+static pa_context* new_daemon_context(struct pulse_api* api, pa_threaded_mainloop* loop) {
+    if (! api->context_new_with_proplist || ! api->proplist_new || ! api->proplist_sets ||
+        ! api->proplist_free) {
+        return api->context_new(api->threaded_mainloop_get_api(loop), "Waywallen Daemon");
+    }
+    pa_proplist* properties = api->proplist_new();
+    if (! properties)
+        return api->context_new(api->threaded_mainloop_get_api(loop), "Waywallen Daemon");
+    if (api->proplist_sets(properties, PA_PROP_APPLICATION_NAME, "Waywallen Daemon") < 0 ||
+        api->proplist_sets(properties, PA_PROP_APPLICATION_ID, "org.waywallen.daemon") < 0) {
+        api->proplist_free(properties);
+        return api->context_new(api->threaded_mainloop_get_api(loop), "Waywallen Daemon");
+    }
+    pa_context* context = api->context_new_with_proplist(
+        api->threaded_mainloop_get_api(loop), "Waywallen Daemon", properties);
+    api->proplist_free(properties);
+    return context;
 }
 
 static void reset_ring(ww_pulse_capture_t* self) {
@@ -200,8 +276,8 @@ static int create_stream_locked(ww_pulse_capture_t* self, const char* monitor) {
         .channels = 2,
         .map      = { PA_CHANNEL_POSITION_FRONT_LEFT, PA_CHANNEL_POSITION_FRONT_RIGHT },
     };
-    self->stream =
-        self->api.stream_new(self->context, "waywallen audio response", &sample_spec, &channel_map);
+    self->stream = self->api.stream_new(
+        self->context, "waywallen.daemon.audio-response.capture", &sample_spec, &channel_map);
     if (! self->stream) return -1;
 
     self->api.stream_set_state_callback(self->stream, on_stream_state, self);
@@ -420,7 +496,7 @@ ww_pulse_capture_t* ww_pulse_capture_open(int* error_code, char* error, size_t e
         return NULL;
     }
 
-    int load = load_api(self, error, error_capacity);
+    int load = load_api(&self->library, &self->api, 0, error, error_capacity);
     if (load != WW_PULSE_OK) {
         if (error_code) *error_code = load;
         ww_pulse_capture_close(self);
@@ -437,8 +513,7 @@ ww_pulse_capture_t* ww_pulse_capture_open(int* error_code, char* error, size_t e
     self->loop_started = 1;
 
     self->api.threaded_mainloop_lock(self->loop);
-    self->context =
-        self->api.context_new(self->api.threaded_mainloop_get_api(self->loop), "waywallen daemon");
+    self->context = new_daemon_context(&self->api, self->loop);
     if (! self->context) {
         if (error_code) *error_code = WW_PULSE_SERVER_UNAVAILABLE;
         copy_error(error, error_capacity, "failed to create PulseAudio context");
@@ -574,6 +649,299 @@ uint64_t ww_pulse_capture_generation(ww_pulse_capture_t* self) {
 }
 
 int ww_pulse_capture_failed(ww_pulse_capture_t* self, char* error, size_t error_capacity) {
+    if (! self) return WW_PULSE_SERVER_UNAVAILABLE;
+    pthread_mutex_lock(&self->state_mutex);
+    const int failed = self->failed;
+    copy_error(error, error_capacity, self->failure);
+    pthread_mutex_unlock(&self->state_mutex);
+    return failed;
+}
+
+static void observer_set_failure(ww_pulse_playback_observer_t* self, int code,
+                                 const char* message) {
+    pthread_mutex_lock(&self->state_mutex);
+    self->failed = code;
+    snprintf(self->failure, sizeof(self->failure), "%s", message ? message : "PulseAudio error");
+    pthread_mutex_unlock(&self->state_mutex);
+}
+
+static int32_t playback_process_id(ww_pulse_playback_observer_t* self,
+                                   const pa_sink_input_info*     info) {
+    if (! info->proplist) return 0;
+    const char* value = self->api.proplist_gets(info->proplist, PA_PROP_APPLICATION_PROCESS_ID);
+    if (! value || ! *value) return 0;
+    errno                   = 0;
+    char*               end = NULL;
+    const unsigned long pid = strtoul(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || pid == 0 || pid > INT32_MAX) return 0;
+    return (int32_t)pid;
+}
+
+static int playback_has_nonzero_volume(const pa_sink_input_info* info) {
+    for (uint8_t channel = 0; channel < info->volume.channels; ++channel) {
+        if (info->volume.values[channel] > PA_VOLUME_MUTED) return 1;
+    }
+    return 0;
+}
+
+static int playback_resync_append(ww_pulse_playback_observer_t* self,
+                                  const pa_sink_input_info*     info) {
+    const ww_pulse_playback_stream_t next = {
+        .index              = info->index,
+        .process_id         = playback_process_id(self, info),
+        .corked             = info->corked != 0,
+        .muted              = info->mute != 0,
+        .has_nonzero_volume = playback_has_nonzero_volume(info),
+    };
+
+    for (size_t i = 0; i < self->resync_stream_count; ++i) {
+        if (self->resync_streams[i].index == info->index) {
+            self->resync_streams[i] = next;
+            return 0;
+        }
+    }
+    if (self->resync_stream_count == self->resync_stream_capacity) {
+        const size_t next_capacity =
+            self->resync_stream_capacity == 0 ? 16u : self->resync_stream_capacity * 2u;
+        void* resized =
+            realloc(self->resync_streams, next_capacity * sizeof(*self->resync_streams));
+        if (! resized) {
+            observer_set_failure(self, WW_PULSE_OUT_OF_MEMORY, "out of memory");
+            return -1;
+        }
+        self->resync_streams         = resized;
+        self->resync_stream_capacity = next_capacity;
+    }
+    self->resync_streams[self->resync_stream_count++] = next;
+    return 0;
+}
+
+static int playback_start_resync(ww_pulse_playback_observer_t* self);
+
+static void on_playback_info(pa_context* context, const pa_sink_input_info* info, int eol,
+                             void* userdata) {
+    (void)context;
+    ww_pulse_playback_observer_t* self = userdata;
+    if (info && playback_resync_append(self, info) < 0) {
+        self->api.threaded_mainloop_signal(self->loop, 0);
+        return;
+    }
+    if (eol == 0) return;
+
+    self->resync_pending = 0;
+    if (eol < 0) {
+        observer_set_failure(
+            self, WW_PULSE_SERVER_UNAVAILABLE, "failed to enumerate PulseAudio playback streams");
+        self->api.threaded_mainloop_signal(self->loop, 0);
+        return;
+    }
+    if (self->resync_dirty) {
+        playback_start_resync(self);
+        return;
+    }
+
+    pthread_mutex_lock(&self->state_mutex);
+    free(self->streams);
+    self->streams                = self->resync_streams;
+    self->stream_count           = self->resync_stream_count;
+    self->stream_capacity        = self->resync_stream_capacity;
+    self->resync_streams         = NULL;
+    self->resync_stream_count    = 0;
+    self->resync_stream_capacity = 0;
+    self->initial_ready          = 1;
+    pthread_mutex_unlock(&self->state_mutex);
+    self->api.threaded_mainloop_signal(self->loop, 0);
+}
+
+static int playback_start_resync(ww_pulse_playback_observer_t* self) {
+    if (self->resync_pending) {
+        self->resync_dirty = 1;
+        return 0;
+    }
+    free(self->resync_streams);
+    self->resync_streams         = NULL;
+    self->resync_stream_count    = 0;
+    self->resync_stream_capacity = 0;
+    self->resync_pending         = 1;
+    self->resync_dirty           = 0;
+
+    pa_operation* operation =
+        self->api.context_get_sink_input_info_list(self->context, on_playback_info, self);
+    if (! operation) {
+        self->resync_pending = 0;
+        observer_set_failure(
+            self, WW_PULSE_SERVER_UNAVAILABLE, "failed to enumerate PulseAudio playback streams");
+        self->api.threaded_mainloop_signal(self->loop, 0);
+        return -1;
+    }
+    self->api.operation_unref(operation);
+    return 0;
+}
+
+static void on_playback_context_state(pa_context* context, void* userdata) {
+    ww_pulse_playback_observer_t* self  = userdata;
+    const pa_context_state_t      state = self->api.context_get_state(context);
+    if (! PA_CONTEXT_IS_GOOD(state)) {
+        observer_set_failure(self, WW_PULSE_SERVER_UNAVAILABLE, "PulseAudio context failed");
+    }
+    self->api.threaded_mainloop_signal(self->loop, 0);
+}
+
+static void on_playback_subscription(pa_context* context, pa_subscription_event_type_t type,
+                                     uint32_t index, void* userdata) {
+    (void)context;
+    (void)index;
+    ww_pulse_playback_observer_t* self = userdata;
+    if ((type & PA_SUBSCRIPTION_EVENT_FACILITY_MASK) != PA_SUBSCRIPTION_EVENT_SINK_INPUT) return;
+    playback_start_resync(self);
+}
+
+static void playback_observer_destroy_locked(ww_pulse_playback_observer_t* self) {
+    if (! self->context) return;
+    self->api.context_set_subscribe_callback(self->context, NULL, NULL);
+    self->api.context_set_state_callback(self->context, NULL, NULL);
+    self->api.context_disconnect(self->context);
+    self->api.context_unref(self->context);
+    self->context = NULL;
+}
+
+ww_pulse_playback_observer_t* ww_pulse_playback_observer_open(int* error_code, char* error,
+                                                              size_t error_capacity) {
+    if (error_code) *error_code = WW_PULSE_OK;
+    copy_error(error, error_capacity, "");
+
+    ww_pulse_playback_observer_t* self = calloc(1, sizeof(*self));
+    if (! self) {
+        if (error_code) *error_code = WW_PULSE_OUT_OF_MEMORY;
+        copy_error(error, error_capacity, "out of memory");
+        return NULL;
+    }
+    pthread_mutex_init(&self->state_mutex, NULL);
+    const int load = load_api(&self->library, &self->api, 1, error, error_capacity);
+    if (load != WW_PULSE_OK) {
+        if (error_code) *error_code = load;
+        ww_pulse_playback_observer_close(self);
+        return NULL;
+    }
+
+    self->loop = self->api.threaded_mainloop_new();
+    if (! self->loop || self->api.threaded_mainloop_start(self->loop) < 0) {
+        if (error_code) *error_code = WW_PULSE_SERVER_UNAVAILABLE;
+        copy_error(error, error_capacity, "failed to start PulseAudio mainloop");
+        ww_pulse_playback_observer_close(self);
+        return NULL;
+    }
+    self->loop_started = 1;
+
+    self->api.threaded_mainloop_lock(self->loop);
+    self->context = new_daemon_context(&self->api, self->loop);
+    if (! self->context) {
+        if (error_code) *error_code = WW_PULSE_SERVER_UNAVAILABLE;
+        copy_error(error, error_capacity, "failed to create PulseAudio context");
+        self->api.threaded_mainloop_unlock(self->loop);
+        ww_pulse_playback_observer_close(self);
+        return NULL;
+    }
+    self->api.context_set_state_callback(self->context, on_playback_context_state, self);
+    if (self->api.context_connect(self->context, NULL, PA_CONTEXT_NOFLAGS, NULL) < 0) {
+        if (error_code) *error_code = WW_PULSE_SERVER_UNAVAILABLE;
+        copy_error(error, error_capacity, "failed to connect to PulseAudio server");
+        playback_observer_destroy_locked(self);
+        self->api.threaded_mainloop_unlock(self->loop);
+        ww_pulse_playback_observer_close(self);
+        return NULL;
+    }
+    for (;;) {
+        const pa_context_state_t state = self->api.context_get_state(self->context);
+        if (state == PA_CONTEXT_READY) break;
+        if (! PA_CONTEXT_IS_GOOD(state)) {
+            if (error_code) *error_code = WW_PULSE_SERVER_UNAVAILABLE;
+            copy_error(error, error_capacity, "PulseAudio context failed");
+            playback_observer_destroy_locked(self);
+            self->api.threaded_mainloop_unlock(self->loop);
+            ww_pulse_playback_observer_close(self);
+            return NULL;
+        }
+        self->api.threaded_mainloop_wait(self->loop);
+    }
+
+    self->api.context_set_subscribe_callback(self->context, on_playback_subscription, self);
+    pa_operation* subscribe =
+        self->api.context_subscribe(self->context, PA_SUBSCRIPTION_MASK_SINK_INPUT, NULL, NULL);
+    if (! subscribe) {
+        if (error_code) *error_code = WW_PULSE_SERVER_UNAVAILABLE;
+        copy_error(error, error_capacity, "failed to subscribe to PulseAudio playback streams");
+        playback_observer_destroy_locked(self);
+        self->api.threaded_mainloop_unlock(self->loop);
+        ww_pulse_playback_observer_close(self);
+        return NULL;
+    }
+    self->api.operation_unref(subscribe);
+
+    if (playback_start_resync(self) < 0) {
+        if (error_code) *error_code = WW_PULSE_SERVER_UNAVAILABLE;
+        copy_error(error, error_capacity, "failed to enumerate PulseAudio playback streams");
+        playback_observer_destroy_locked(self);
+        self->api.threaded_mainloop_unlock(self->loop);
+        ww_pulse_playback_observer_close(self);
+        return NULL;
+    }
+    for (;;) {
+        pthread_mutex_lock(&self->state_mutex);
+        const int ready  = self->initial_ready;
+        const int failed = self->failed;
+        pthread_mutex_unlock(&self->state_mutex);
+        if (ready || failed != WW_PULSE_OK) break;
+        self->api.threaded_mainloop_wait(self->loop);
+    }
+    self->api.threaded_mainloop_unlock(self->loop);
+
+    pthread_mutex_lock(&self->state_mutex);
+    const int failed = self->failed;
+    char      failure[sizeof(self->failure)];
+    snprintf(failure, sizeof(failure), "%s", self->failure);
+    pthread_mutex_unlock(&self->state_mutex);
+    if (failed != WW_PULSE_OK) {
+        if (error_code) *error_code = failed;
+        copy_error(error, error_capacity, failure);
+        ww_pulse_playback_observer_close(self);
+        return NULL;
+    }
+    return self;
+}
+
+void ww_pulse_playback_observer_close(ww_pulse_playback_observer_t* self) {
+    if (! self) return;
+    if (self->loop && self->library && self->loop_started) {
+        self->api.threaded_mainloop_lock(self->loop);
+        playback_observer_destroy_locked(self);
+        self->api.threaded_mainloop_unlock(self->loop);
+        self->api.threaded_mainloop_stop(self->loop);
+        self->api.threaded_mainloop_free(self->loop);
+    } else if (self->loop && self->library) {
+        self->api.threaded_mainloop_free(self->loop);
+    }
+    free(self->streams);
+    free(self->resync_streams);
+    pthread_mutex_destroy(&self->state_mutex);
+    free(self);
+}
+
+size_t ww_pulse_playback_observer_snapshot(ww_pulse_playback_observer_t* self,
+                                           ww_pulse_playback_stream_t* streams, size_t capacity) {
+    if (! self) return 0;
+    pthread_mutex_lock(&self->state_mutex);
+    const size_t count = self->stream_count;
+    if (streams && capacity > 0) {
+        const size_t copy_count = count < capacity ? count : capacity;
+        memcpy(streams, self->streams, copy_count * sizeof(*streams));
+    }
+    pthread_mutex_unlock(&self->state_mutex);
+    return count;
+}
+
+int ww_pulse_playback_observer_failed(ww_pulse_playback_observer_t* self, char* error,
+                                      size_t error_capacity) {
     if (! self) return WW_PULSE_SERVER_UNAVAILABLE;
     pthread_mutex_lock(&self->state_mutex);
     const int failed = self->failed;

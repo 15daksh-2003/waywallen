@@ -185,6 +185,8 @@ pub struct GlobalSettings {
     pub rotation_secs: u32,
     /// Fade duration shared by mute and unmute control messages.
     pub audio_fade_ms: u32,
+    /// Mute renderer audio while another PulseAudio playback stream is active.
+    pub mute_when_other_audio: bool,
     pub renderer: GlobalRendererSettings,
     /// Manual global mute requested through daemon controls.
     pub manual_muted: bool,
@@ -242,6 +244,7 @@ impl Default for GlobalSettings {
             queue_mode: "sequential".to_string(),
             rotation_secs: 0,
             audio_fade_ms: DEFAULT_AUDIO_FADE_MS,
+            mute_when_other_audio: false,
             renderer: GlobalRendererSettings::default(),
             manual_muted: false,
             layout: LayoutDefaults::default(),
@@ -1059,6 +1062,7 @@ mod tests {
         let s: Settings = toml::from_str("").unwrap();
         assert!(s.global.last_wallpaper.is_none());
         assert_eq!(s.global.audio_fade_ms, DEFAULT_AUDIO_FADE_MS);
+        assert!(!s.global.mute_when_other_audio);
         assert!(!s.global.manual_muted);
         assert!(s.global.plugin_update_notifications);
         assert!(!s.global.duplicate_renderers_for_same_wallpaper);

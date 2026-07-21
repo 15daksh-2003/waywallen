@@ -4,8 +4,12 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 use super::analyzer::{AudioSpectrumFrame, SpectrumAnalyzer};
-use super::pulse::{AudioCaptureBackend, CaptureErrorKind, PulseCapture};
+use super::playback::{has_external_playback, PlaybackObserverBackend};
+use super::pulse::{AudioCaptureBackend, CaptureErrorKind, PulseCapture, PulsePlaybackObserver};
+use crate::events::GlobalEvent;
 use crate::renderer_manager::{RendererEventKind, RendererManager};
+use crate::routing::Router;
+use crate::settings::SettingsStore;
 
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const DISPATCH_INTERVAL: Duration = Duration::from_millis(33);
@@ -23,7 +27,12 @@ pub enum AudioServiceState {
     Stopping,
 }
 
-enum WorkerCommand {
+enum CaptureWorkerCommand {
+    Demand(bool),
+    Shutdown,
+}
+
+enum PlaybackWorkerCommand {
     Demand(bool),
     Shutdown,
 }
@@ -33,7 +42,13 @@ pub struct AudioService {
 }
 
 impl AudioService {
-    pub fn start(manager: Arc<RendererManager>, mut shutdown: watch::Receiver<bool>) -> Self {
+    pub fn start(
+        manager: Arc<RendererManager>,
+        router: Arc<Router>,
+        settings: Arc<SettingsStore>,
+        mut events: tokio::sync::broadcast::Receiver<GlobalEvent>,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> Self {
         let (command_tx, command_rx) = std::sync::mpsc::channel();
         let (frame_tx, frame_rx) = watch::channel::<Option<AudioSpectrumFrame>>(None);
         let (state_tx, state_rx) = watch::channel(AudioServiceState::Closed);
@@ -44,14 +59,27 @@ impl AudioService {
             });
         });
 
+        let (playback_command_tx, playback_command_rx) = std::sync::mpsc::channel();
+        let (playback_tx, playback_rx) = watch::channel(false);
+        let process_ownership = manager.subscribe_process_ownership();
+        let playback_worker = std::thread::spawn(move || {
+            run_playback_worker(playback_command_rx, playback_tx, process_ownership, || {
+                PulsePlaybackObserver::open()
+                    .map(|observer| Box::new(observer) as Box<dyn PlaybackObserverBackend>)
+            });
+        });
+
         let mut subscriptions = manager.subscribe_subscriptions();
         tokio::spawn(async move {
             let initial_demand = !subscriptions
                 .borrow()
                 .subscribers(RendererEventKind::Audio)
                 .is_empty();
-            let _ = command_tx.send(WorkerCommand::Demand(initial_demand));
+            let _ = command_tx.send(CaptureWorkerCommand::Demand(initial_demand));
             let mut frame_rx = frame_rx;
+            let mut playback_rx = playback_rx;
+            let mut playback_demand = settings.global().mute_when_other_audio;
+            let _ = playback_command_tx.send(PlaybackWorkerCommand::Demand(playback_demand));
             let mut dispatch = tokio::time::interval(DISPATCH_INTERVAL);
             dispatch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut last_sent = None;
@@ -69,8 +97,34 @@ impl AudioService {
                         if !demanded {
                             last_sent = None;
                         }
-                        if command_tx.send(WorkerCommand::Demand(demanded)).is_err() {
+                        if command_tx.send(CaptureWorkerCommand::Demand(demanded)).is_err() {
                             break;
+                        }
+                    }
+                    changed = playback_rx.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        let active = *playback_rx.borrow();
+                        router.set_other_playback_active(active).await;
+                    }
+                    event = events.recv() => {
+                        match event {
+                            Ok(GlobalEvent::SettingsChanged)
+                            | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                let demanded = settings.global().mute_when_other_audio;
+                                if demanded != playback_demand {
+                                    playback_demand = demanded;
+                                    if playback_command_tx
+                                        .send(PlaybackWorkerCommand::Demand(demanded))
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
                     }
                     _ = dispatch.tick() => {
@@ -110,8 +164,10 @@ impl AudioService {
                 }
             }
 
-            let _ = command_tx.send(WorkerCommand::Shutdown);
+            let _ = command_tx.send(CaptureWorkerCommand::Shutdown);
+            let _ = playback_command_tx.send(PlaybackWorkerCommand::Shutdown);
             let _ = tokio::task::spawn_blocking(move || worker.join()).await;
+            let _ = tokio::task::spawn_blocking(move || playback_worker.join()).await;
         });
 
         Self { state: state_rx }
@@ -123,7 +179,7 @@ impl AudioService {
 }
 
 fn run_worker<F>(
-    commands: std::sync::mpsc::Receiver<WorkerCommand>,
+    commands: std::sync::mpsc::Receiver<CaptureWorkerCommand>,
     frames: watch::Sender<Option<AudioSpectrumFrame>>,
     states: watch::Sender<AudioServiceState>,
     idle_timeout: Duration,
@@ -150,7 +206,7 @@ fn run_worker<F>(
                 .min(INACTIVE_POLL_INTERVAL)
         };
         match commands.recv_timeout(timeout) {
-            Ok(WorkerCommand::Demand(next)) => {
+            Ok(CaptureWorkerCommand::Demand(next)) => {
                 if next == demand {
                     continue;
                 }
@@ -174,7 +230,8 @@ fn run_worker<F>(
                     states.send_replace(AudioServiceState::Closed);
                 }
             }
-            Ok(WorkerCommand::Shutdown) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Ok(CaptureWorkerCommand::Shutdown)
+            | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 states.send_replace(AudioServiceState::Stopping);
                 frames.send_replace(None);
                 drop(backend.take());
@@ -255,6 +312,99 @@ fn run_worker<F>(
     }
 }
 
+fn run_playback_worker<F>(
+    commands: std::sync::mpsc::Receiver<PlaybackWorkerCommand>,
+    states: watch::Sender<bool>,
+    ownership: watch::Receiver<crate::renderer_manager::RendererProcessOwnershipSnapshot>,
+    mut open_backend: F,
+) where
+    F: FnMut() -> Result<Box<dyn PlaybackObserverBackend>, super::pulse::CaptureError>,
+{
+    let mut backend: Option<Box<dyn PlaybackObserverBackend>> = None;
+    let mut demand = false;
+    let mut retry_deadline: Option<Instant> = None;
+    let mut backoff = Duration::from_secs(1);
+    let mut unavailable_latched = false;
+
+    loop {
+        match commands.recv_timeout(INACTIVE_POLL_INTERVAL) {
+            Ok(PlaybackWorkerCommand::Demand(next)) => {
+                if next == demand {
+                    continue;
+                }
+                demand = next;
+                retry_deadline = None;
+                backoff = Duration::from_secs(1);
+                unavailable_latched = false;
+                if !demand {
+                    drop(backend.take());
+                    set_playback_state(&states, false);
+                }
+            }
+            Ok(PlaybackWorkerCommand::Shutdown)
+            | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                set_playback_state(&states, false);
+                return;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+
+        if !demand {
+            continue;
+        }
+
+        if backend.is_none()
+            && !unavailable_latched
+            && retry_deadline.is_none_or(|deadline| Instant::now() >= deadline)
+        {
+            match open_backend() {
+                Ok(observer) => {
+                    backend = Some(observer);
+                    retry_deadline = None;
+                    backoff = Duration::from_secs(1);
+                    log::info!("other audio: PulseAudio playback observer active");
+                }
+                Err(error) => {
+                    let permanent = matches!(
+                        error.kind,
+                        CaptureErrorKind::LibraryUnavailable | CaptureErrorKind::MissingSymbol
+                    );
+                    log::warn!("other audio unavailable: {error}");
+                    unavailable_latched = permanent;
+                    if !permanent {
+                        retry_deadline = Some(Instant::now() + backoff);
+                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                    }
+                    set_playback_state(&states, false);
+                }
+            }
+        }
+
+        let Some(observer) = backend.as_mut() else {
+            continue;
+        };
+        match observer.snapshot() {
+            Ok(streams) => {
+                let active = has_external_playback(&streams, &ownership.borrow());
+                set_playback_state(&states, active);
+            }
+            Err(error) => {
+                log::warn!("other audio observer failed: {error}");
+                drop(backend.take());
+                retry_deadline = Some(Instant::now() + backoff);
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                set_playback_state(&states, false);
+            }
+        }
+    }
+}
+
+fn set_playback_state(states: &watch::Sender<bool>, active: bool) {
+    if *states.borrow() != active {
+        states.send_replace(active);
+    }
+}
+
 fn monotonic_now_ns() -> u64 {
     let mut time = libc::timespec {
         tv_sec: 0,
@@ -277,6 +427,10 @@ mod tests {
         stops: Arc<AtomicUsize>,
     }
 
+    struct FakePlayback {
+        stops: Arc<AtomicUsize>,
+    }
+
     impl AudioCaptureBackend for FakeCapture {
         fn generation(&self) -> u64 {
             self.generation
@@ -293,6 +447,100 @@ mod tests {
         fn drop(&mut self) {
             self.stops.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    impl PlaybackObserverBackend for FakePlayback {
+        fn snapshot(
+            &mut self,
+        ) -> Result<Vec<super::super::pulse::PulsePlaybackStream>, CaptureError> {
+            Ok(vec![super::super::pulse::PulsePlaybackStream {
+                index: 1,
+                process_id: 0,
+                corked: 0,
+                muted: 0,
+                has_nonzero_volume: 1,
+            }])
+        }
+    }
+
+    impl Drop for FakePlayback {
+        fn drop(&mut self) {
+            self.stops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn playback_demand_opens_observer_and_closes_it_when_disabled() {
+        let (commands_tx, commands_rx) = std::sync::mpsc::channel();
+        let (states_tx, states_rx) = watch::channel(false);
+        let (_ownership_tx, ownership_rx) = watch::channel(Default::default());
+        let opens = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let test_opens = Arc::clone(&opens);
+        let test_stops = Arc::clone(&stops);
+        let worker = std::thread::spawn(move || {
+            run_playback_worker(commands_rx, states_tx, ownership_rx, move || {
+                test_opens.fetch_add(1, Ordering::Relaxed);
+                Ok(Box::new(FakePlayback {
+                    stops: Arc::clone(&test_stops),
+                }) as Box<dyn PlaybackObserverBackend>)
+            });
+        });
+
+        commands_tx
+            .send(PlaybackWorkerCommand::Demand(true))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(opens.load(Ordering::Relaxed), 1);
+        assert!(*states_rx.borrow());
+
+        commands_tx
+            .send(PlaybackWorkerCommand::Demand(false))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(stops.load(Ordering::Relaxed), 1);
+        assert!(!*states_rx.borrow());
+
+        commands_tx.send(PlaybackWorkerCommand::Shutdown).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn playback_observer_missing_symbol_is_latched_until_demand_cycles() {
+        let (commands_tx, commands_rx) = std::sync::mpsc::channel();
+        let (states_tx, states_rx) = watch::channel(false);
+        let (_ownership_tx, ownership_rx) = watch::channel(Default::default());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let test_attempts = Arc::clone(&attempts);
+        let worker = std::thread::spawn(move || {
+            run_playback_worker(commands_rx, states_tx, ownership_rx, move || {
+                test_attempts.fetch_add(1, Ordering::Relaxed);
+                Err(CaptureError {
+                    kind: CaptureErrorKind::MissingSymbol,
+                    message: "missing symbol".into(),
+                })
+            });
+        });
+
+        commands_tx
+            .send(PlaybackWorkerCommand::Demand(true))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+        assert!(!*states_rx.borrow());
+
+        commands_tx
+            .send(PlaybackWorkerCommand::Demand(false))
+            .unwrap();
+        commands_tx
+            .send(PlaybackWorkerCommand::Demand(true))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        assert!(!*states_rx.borrow());
+
+        commands_tx.send(PlaybackWorkerCommand::Shutdown).unwrap();
+        worker.join().unwrap();
     }
 
     #[test]
@@ -320,20 +568,28 @@ mod tests {
             )
         });
 
-        commands_tx.send(WorkerCommand::Demand(true)).unwrap();
+        commands_tx
+            .send(CaptureWorkerCommand::Demand(true))
+            .unwrap();
         std::thread::sleep(Duration::from_millis(15));
         assert_eq!(*states_rx.borrow(), AudioServiceState::Active);
-        commands_tx.send(WorkerCommand::Demand(false)).unwrap();
+        commands_tx
+            .send(CaptureWorkerCommand::Demand(false))
+            .unwrap();
         std::thread::sleep(Duration::from_millis(10));
-        commands_tx.send(WorkerCommand::Demand(true)).unwrap();
+        commands_tx
+            .send(CaptureWorkerCommand::Demand(true))
+            .unwrap();
         std::thread::sleep(Duration::from_millis(10));
         assert_eq!(opens.load(Ordering::Relaxed), 1);
 
-        commands_tx.send(WorkerCommand::Demand(false)).unwrap();
+        commands_tx
+            .send(CaptureWorkerCommand::Demand(false))
+            .unwrap();
         std::thread::sleep(Duration::from_millis(60));
         assert_eq!(*states_rx.borrow(), AudioServiceState::Closed);
         assert_eq!(stops.load(Ordering::Relaxed), 1);
-        commands_tx.send(WorkerCommand::Shutdown).unwrap();
+        commands_tx.send(CaptureWorkerCommand::Shutdown).unwrap();
         worker.join().unwrap();
     }
 
@@ -359,14 +615,20 @@ mod tests {
                 },
             )
         });
-        commands_tx.send(WorkerCommand::Demand(true)).unwrap();
+        commands_tx
+            .send(CaptureWorkerCommand::Demand(true))
+            .unwrap();
         std::thread::sleep(Duration::from_millis(25));
         assert_eq!(attempts.load(Ordering::Relaxed), 1);
-        commands_tx.send(WorkerCommand::Demand(false)).unwrap();
-        commands_tx.send(WorkerCommand::Demand(true)).unwrap();
+        commands_tx
+            .send(CaptureWorkerCommand::Demand(false))
+            .unwrap();
+        commands_tx
+            .send(CaptureWorkerCommand::Demand(true))
+            .unwrap();
         std::thread::sleep(Duration::from_millis(15));
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
-        commands_tx.send(WorkerCommand::Shutdown).unwrap();
+        commands_tx.send(CaptureWorkerCommand::Shutdown).unwrap();
         worker.join().unwrap();
     }
 }

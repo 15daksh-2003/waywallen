@@ -228,6 +228,17 @@ const char* kv_get(const ww_kv_list_t& kv, const char* key) {
     return nullptr;
 }
 
+wavsen::audio::AudioClientIdentity audio_client_identity() {
+    return {
+        .application_name = WAYWALLEN_AUDIO_APPLICATION_NAME,
+        .application_id   = WAYWALLEN_AUDIO_APPLICATION_ID,
+        .stream_prefix    = WAYWALLEN_AUDIO_STREAM_PREFIX,
+        .component        = "video",
+        .media_name       = "Waywallen Video Renderer",
+        .media_role       = "music",
+    };
+}
+
 struct HostState {
     int               sock { -1 };
     ww_pool_t*        pool { nullptr };
@@ -962,8 +973,8 @@ int run(int argc, char** argv) {
         if (audio_file_res.is_err()) {
             rstd_warn("waywallen-video-renderer: audio file open failed");
         } else {
-            auto p_res =
-                wavsen::audio::AvPlayer::open(rstd::move(audio_file_res).unwrap_unchecked(), false);
+            auto p_res = wavsen::audio::AvPlayer::open(
+                rstd::move(audio_file_res).unwrap_unchecked(), false, audio_client_identity());
             if (p_res.is_err()) {
                 rstd_warn("waywallen-video-renderer: audio open failed: {}",
                           std::move(p_res).unwrap_err().message);
