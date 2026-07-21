@@ -174,4 +174,20 @@ private:
     quint64 m_refresh_generation { 0 };
 };
 
+export class RemoteSettingsPatchQuery
+    : public Query,
+      public QueryExtra<control::v1::Response, RemoteSettingsPatchQuery> {
+    Q_OBJECT
+    QML_ELEMENT
+
+public:
+    RemoteSettingsPatchQuery(QObject* parent = nullptr);
+
+    void             reload() override;
+    Q_INVOKABLE void patch(const QString& sourceId, const QVariantMap& values);
+
+    Q_SIGNAL void completed(const QString& sourceId, const QVariantMap& values, bool accepted,
+                            const QString& error);
+};
+
 } // namespace waywallen

@@ -122,8 +122,7 @@ MD.Page {
 
     function selectItem(index) {
         detailRow = searchQuery.model.get(index);
-        detailDownloadState = root.sourceCapability(detailRow.sourceId) === 1
-            ? Number(detailRow.acquisitionState ?? 0) : 0;
+        detailDownloadState = root.sourceCapability(detailRow.sourceId) === 1 ? Number(detailRow.acquisitionState ?? 0) : 0;
         detailsQuery.sourceId = detailRow.sourceId;
         detailsQuery.itemId = detailRow.itemId;
     }
@@ -225,6 +224,14 @@ MD.Page {
     }
 
     MD.Action {
+        id: manageAction
+        icon.name: MD.Token.icon.manage_accounts
+        text: qsTr("Manage")
+        enabled: root.currentSourceConfig() !== null
+        onTriggered: root.openRemoteManagement()
+    }
+
+    MD.Action {
         id: tweakAction
         text: "Tweak"
         icon.name: MD.Token.icon.tune
@@ -276,10 +283,6 @@ MD.Page {
         }
     }
 
-    W.SettingsGetQuery {
-        id: settingsCfgQuery
-    }
-
     function currentSourceConfig() {
         const id = root.sourceId;
         const list = availabilityQuery.sources || [];
@@ -290,30 +293,25 @@ MD.Page {
         return null;
     }
 
-    function currentSourceHasSettings() {
+    function currentSourceNeedsLogin() {
         const c = root.currentSourceConfig();
-        return !!(c && ((c.settings && c.settings.length > 0)
-            || (c.actions && c.actions.length > 0)
-            || (c.status && c.status.length > 0)));
+        const actions = c && c.actions ? c.actions : [];
+        for (let i = 0; i < actions.length; ++i) {
+            if (Number(actions[i].kind) === 2 && (actions[i].visible === undefined || actions[i].visible))
+                return true;
+        }
+        return false;
     }
 
-    function openSourceConfig() {
+    function openRemoteManagement() {
         const c = root.currentSourceConfig();
         if (!c)
             return;
-        const pid = c.id;
-        const p = settingsCfgQuery.plugins ? settingsCfgQuery.plugins[pid] : undefined;
         MD.Util.showPopup('waywallen.ui/PagePopup', {
-            source: 'waywallen.ui/PluginSettingsPage',
+            source: 'waywallen.ui/RemoteManagePage',
             props: {
-                pluginName: pid,
-                displayName: (c.displayName && c.displayName.length > 0) ? c.displayName : (c.name || pid),
-                schemaList: c.settings || [],
-                actionList: c.actions || [],
-                statusList: c.status || [],
-                allCurrentPlugins: settingsCfgQuery.plugins || ({}),
-                currentGlobal: settingsCfgQuery.global || ({}),
-                currentValues: p || ({})
+                sourceId: c.id,
+                displayName: (c.displayName && c.displayName.length > 0) ? c.displayName : (c.name || c.id)
             }
         }, root.Window.window);
     }
@@ -332,7 +330,7 @@ MD.Page {
         anchors.centerIn: parent
         availableTags: root.sourceTags(root.sourceId)
         selectedTags: searchQuery.tags
-        onApply: function(tags) {
+        onApply: function (tags) {
             searchQuery.tags = tags;
         }
     }
@@ -371,8 +369,7 @@ MD.Page {
                 if (key in root.subscriptionPreviousStates)
                     continue;
                 searchQuery.model.setAcquisitionState(sourceId, item.id, item.state);
-                if (root.detailRow && root.detailRow.sourceId === sourceId
-                        && root.detailRow.itemId === item.id) {
+                if (root.detailRow && root.detailRow.sourceId === sourceId && root.detailRow.itemId === item.id) {
                     root.detailRow.acquisitionState = item.state;
                 }
             }
@@ -387,15 +384,12 @@ MD.Page {
             delete pending[key];
             root.subscriptionPreviousStates = pending;
             searchQuery.model.setAcquisitionState(sourceId, id, state);
-            if (root.detailRow && root.detailRow.sourceId === sourceId
-                    && root.detailRow.itemId === id) {
+            if (root.detailRow && root.detailRow.sourceId === sourceId && root.detailRow.itemId === id) {
                 root.detailRow.acquisitionState = state;
             }
             if (accepted) {
                 subscriptionQuery.refresh(sourceId, [id]);
-                const message = subscribed
-                    ? qsTr("Subscription request accepted")
-                    : qsTr("Unsubscribe request accepted");
+                const message = subscribed ? qsTr("Subscription request accepted") : qsTr("Unsubscribe request accepted");
                 const hint = root.sourceRemoteHint(sourceId);
                 W.Action.toast(hint.length > 0 ? message + "\n" + hint : message);
             } else {
@@ -419,7 +413,6 @@ MD.Page {
 
     function reloadAll() {
         availabilityQuery.reload();
-        settingsCfgQuery.reload();
         if (root.sourceId.length > 0)
             searchQuery.reload();
     }
@@ -430,13 +423,11 @@ MD.Page {
             root.reloadAll();
         }
         function onSettingsChanged() {
-            settingsCfgQuery.reload();
             availabilityQuery.reload();
             if (root.sourceId.length > 0)
                 searchQuery.reload();
         }
         function onPluginStateChanged() {
-            settingsCfgQuery.reload();
             availabilityQuery.reload();
             if (root.sourceCapability(root.sourceId) === 2)
                 subscriptionQuery.refresh(root.sourceId, searchQuery.model.itemIds());
@@ -493,24 +484,6 @@ MD.Page {
                         }
                     }
 
-                    MD.IconButton {
-                        id: sourceConfigButton
-                        icon.name: MD.Token.icon.settings
-                        visible: {
-                            const list = availabilityQuery.sources || [];
-                            const id = root.sourceId;
-                            for (let i = 0; i < list.length; ++i) {
-                                const s = list[i];
-                                if (s.id === id)
-                                    return !!((s.settings && s.settings.length > 0)
-                                        || (s.actions && s.actions.length > 0)
-                                        || (s.status && s.status.length > 0));
-                            }
-                            return false;
-                        }
-                        onClicked: root.openSourceConfig()
-                    }
-
                     MD.EmbedChip {
                         id: sortChip
                         visible: root.sortOptions.length > 0
@@ -546,7 +519,7 @@ MD.Page {
 
                     MD.ActionToolBar {
                         Layout.fillWidth: true
-                        actions: [tweakAction, filterAction, refreshAction]
+                        actions: [tweakAction, filterAction, manageAction, refreshAction]
                     }
                 }
 
@@ -620,7 +593,7 @@ MD.Page {
                         spacing: 12
 
                         readonly property bool hasError: !searchQuery.querying && searchQuery.errorText.length > 0
-                        readonly property bool needsSetup: hasError && root.currentSourceHasSettings()
+                        readonly property bool needsLogin: hasError && root.currentSourceNeedsLogin()
 
                         MD.BusyIndicator {
                             Layout.alignment: Qt.AlignHCenter
@@ -628,11 +601,10 @@ MD.Page {
                             visible: running
                         }
 
-                        // Setup / error prompt (replaces the ephemeral toast).
                         MD.Icon {
                             Layout.alignment: Qt.AlignHCenter
-                            visible: parent.needsSetup
-                            name: MD.Token.icon.settings
+                            visible: parent.needsLogin
+                            name: MD.Token.icon.person
                             size: 40
                             color: MD.Token.color.on_surface_variant
                         }
@@ -640,9 +612,7 @@ MD.Page {
                             Layout.fillWidth: true
                             horizontalAlignment: Text.AlignHCenter
                             visible: parent.hasError
-                            text: parent.needsSetup
-                                ? qsTr("%1 needs to be set up").arg(root.sourceName(root.sourceId))
-                                : qsTr("Couldn't load this source")
+                            text: parent.needsLogin ? qsTr("Log in to %1").arg(root.sourceName(root.sourceId)) : qsTr("Couldn't load this source")
                             typescale: MD.Token.typescale.title_medium
                             color: MD.Token.color.on_surface
                             wrapMode: Text.WordWrap
@@ -651,9 +621,7 @@ MD.Page {
                             Layout.fillWidth: true
                             horizontalAlignment: Text.AlignHCenter
                             visible: parent.hasError
-                            text: parent.needsSetup
-                                ? qsTr("Add the required settings to start browsing.")
-                                : searchQuery.errorText
+                            text: parent.needsLogin ? qsTr("Log in to start browsing.") : searchQuery.errorText
                             typescale: MD.Token.typescale.body_medium
                             color: MD.Token.color.on_surface_variant
                             wrapMode: Text.WordWrap
@@ -662,10 +630,10 @@ MD.Page {
                         }
                         MD.Button {
                             Layout.alignment: Qt.AlignHCenter
-                            visible: parent.needsSetup
-                            text: qsTr("Set up %1").arg(root.sourceName(root.sourceId))
+                            visible: parent.needsLogin
+                            text: qsTr("Log in")
                             mdState.type: MD.Enum.BtFilledTonal
-                            onClicked: root.openSourceConfig()
+                            onClicked: root.openRemoteManagement()
                         }
 
                         MD.Label {
@@ -854,16 +822,23 @@ MD.Page {
                     enabled: root.detailDownloadState === 0 || root.detailDownloadState === 3
                     text: {
                         switch (root.detailDownloadState) {
-                        case 1: return qsTr("Pending");
-                        case 2: return qsTr("Downloading");
-                        case 3: return qsTr("Uninstall");
-                        case 4: return qsTr("Retry");
-                        case 5: return qsTr("Retry");
-                        default: return qsTr("Download");
+                        case 1:
+                            return qsTr("Pending");
+                        case 2:
+                            return qsTr("Downloading");
+                        case 3:
+                            return qsTr("Uninstall");
+                        case 4:
+                            return qsTr("Retry");
+                        case 5:
+                            return qsTr("Retry");
+                        default:
+                            return qsTr("Download");
                         }
                     }
                     onClicked: {
-                        if (!root.detailRow) return;
+                        if (!root.detailRow)
+                            return;
                         if (root.detailDownloadState === 3) {
                             dlQuery.uninstall(root.detailRow.sourceId, root.detailRow.itemId);
                         } else {
@@ -881,13 +856,16 @@ MD.Page {
                     horizontalAlignment: Text.AlignHCenter
                     color: MD.Token.color.on_surface_variant
                     text: {
-                        const state = root.detailRow
-                            ? Number(root.detailRow.acquisitionState ?? 0) : 0;
+                        const state = root.detailRow ? Number(root.detailRow.acquisitionState ?? 0) : 0;
                         switch (state) {
-                        case 1: return qsTr("Not subscribed");
-                        case 2: return qsTr("Subscribed");
-                        case 3: return qsTr("Updating subscription…");
-                        default: return qsTr("Subscription status unknown");
+                        case 1:
+                            return qsTr("Not subscribed");
+                        case 2:
+                            return qsTr("Subscribed");
+                        case 3:
+                            return qsTr("Updating subscription…");
+                        default:
+                            return qsTr("Subscription status unknown");
                         }
                     }
                 }
@@ -898,25 +876,25 @@ MD.Page {
                     Layout.leftMargin: 16
                     Layout.rightMargin: 16
                     Layout.bottomMargin: 16
-                    readonly property int subscriptionState: root.detailRow
-                        ? Number(root.detailRow.acquisitionState ?? 0) : 0
+                    readonly property int subscriptionState: root.detailRow ? Number(root.detailRow.acquisitionState ?? 0) : 0
                     mdState.type: subscriptionState === 2 ? MD.Enum.BtFilledTonal : MD.Enum.BtFilled
                     enabled: subscriptionState !== 3
                     text: {
                         switch (subscriptionState) {
-                        case 2: return qsTr("Unsubscribe");
-                        case 3: return qsTr("Updating…");
-                        default: return qsTr("Subscribe");
+                        case 2:
+                            return qsTr("Unsubscribe");
+                        case 3:
+                            return qsTr("Updating…");
+                        default:
+                            return qsTr("Subscribe");
                         }
                     }
                     onClicked: root.setDetailSubscription(subscriptionState !== 2)
                 }
 
                 MD.Button {
-                    readonly property int subscriptionState: root.detailRow
-                        ? Number(root.detailRow.acquisitionState ?? 0) : 0
-                    visible: root.sourceCapability(root.sourceId) === 2
-                        && subscriptionState === 0
+                    readonly property int subscriptionState: root.detailRow ? Number(root.detailRow.acquisitionState ?? 0) : 0
+                    visible: root.sourceCapability(root.sourceId) === 2 && subscriptionState === 0
                     Layout.fillWidth: true
                     Layout.leftMargin: 16
                     Layout.rightMargin: 16
@@ -927,8 +905,7 @@ MD.Page {
                 }
 
                 MD.Label {
-                    visible: root.sourceCapability(root.sourceId) === 2
-                        && root.sourceRemoteHint(root.sourceId).length > 0
+                    visible: root.sourceCapability(root.sourceId) === 2 && root.sourceRemoteHint(root.sourceId).length > 0
                     Layout.fillWidth: true
                     Layout.leftMargin: 16
                     Layout.rightMargin: 16

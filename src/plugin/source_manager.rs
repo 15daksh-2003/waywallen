@@ -78,8 +78,7 @@ pub struct SourcePluginInfo {
     /// May contain newlines or inline-code Markdown markers.
     pub library_hint: String,
     /// User-configurable settings the plugin declares via `info().settings`,
-    /// rendered by the UI's plugin-settings page and stored in the plugin's
-    /// `[plugin."<id>"]` config table.
+    /// stored under the Lua source name in the shared component settings map.
     pub settings: Vec<SourceSetting>,
 }
 
@@ -155,8 +154,8 @@ pub struct DiscoverSourceInfo {
     pub sorts: Vec<DiscoverSort>,
     pub tags: Vec<String>,
     /// Domain id of the owning installable plugin (e.g.
-    /// `org.waywallen.open-wallpaper-engine`): the key of its `[plugin."<id>"]`
-    /// config table, so the UI can address settings for this source.
+    /// `org.waywallen.open-wallpaper-engine`). Source settings remain keyed by
+    /// `plugin_id`, the Lua source name.
     pub owner_plugin_id: String,
     /// User-configurable settings the plugin declares via `info().settings`.
     pub settings: Vec<SourceSetting>,
@@ -171,6 +170,44 @@ pub struct DiscoverSourceInfo {
 pub enum RemoteCapability {
     Download,
     Subscription,
+}
+
+fn validate_source_setting(
+    setting: &SourceSetting,
+    raw: &str,
+) -> std::result::Result<String, String> {
+    let value = match setting.ty.as_str() {
+        "u32" => raw
+            .parse::<u32>()
+            .map(|value| value.to_string())
+            .map_err(|_| ()),
+        "i32" => raw
+            .parse::<i32>()
+            .map(|value| value.to_string())
+            .map_err(|_| ()),
+        "f32" => raw
+            .parse::<f32>()
+            .map(|value| value.to_string())
+            .map_err(|_| ()),
+        "bool" => match raw {
+            "true" | "false" => Ok(raw.to_string()),
+            _ => Err(()),
+        },
+        "string" => Ok(raw.to_string()),
+        other => {
+            return Err(format!("{}.type '{other}' is unsupported", setting.key));
+        }
+    }
+    .map_err(|_| format!("{} expects {}, got '{raw}'", setting.key, setting.ty))?;
+
+    if !setting.choices.is_empty() && !setting.choices.iter().any(|choice| choice == &value) {
+        return Err(format!(
+            "{} value '{value}' is not one of [{}]",
+            setting.key,
+            setting.choices.join(", ")
+        ));
+    }
+    Ok(value)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -523,7 +560,7 @@ impl LuaPluginRuntime {
     }
 
     /// Hand the settings store to the source manager so `ctx.plugin_config(key)`
-    /// can read the plugin's `[plugin."<id>"]` config table.
+    /// can read the Lua source component's config table.
     pub fn attach_settings(&mut self, settings: Arc<crate::settings::SettingsStore>) {
         self.settings = Some(settings);
     }
@@ -1229,6 +1266,7 @@ impl LuaPluginRuntime {
             }
         };
         let mut out = Vec::new();
+        let mut keys = HashSet::new();
         for entry in tbl.sequence_values::<LuaTable>() {
             let s = entry.map_err(|e| Error::Internal(anyhow!("info().settings entry: {e}")))?;
             let key: String = s
@@ -1239,8 +1277,18 @@ impl LuaPluginRuntime {
                     "info().settings entry requires a non-empty key"
                 )));
             }
+            if !keys.insert(key.clone()) {
+                return Err(Error::Internal(anyhow!(
+                    "info().settings contains duplicate key '{key}'"
+                )));
+            }
             let ty = Self::optional_string(&s, "type", "info().settings")?;
             let ty = if ty.is_empty() { "string".into() } else { ty };
+            if !matches!(ty.as_str(), "string" | "bool" | "u32" | "i32" | "f32") {
+                return Err(Error::Internal(anyhow!(
+                    "info().settings type '{ty}' is unsupported"
+                )));
+            }
             let default = match s
                 .get::<LuaValue>("default")
                 .map_err(|e| Error::Internal(anyhow!("info().settings.default: {e}")))?
@@ -1595,8 +1643,8 @@ impl LuaPluginRuntime {
             .create_function(|_, name: String| Ok(std::env::var(&name).ok()))?;
         ctx.set("env", env_fn)?;
 
-        // ctx.plugin_config(key) -> string|nil. Reads the plugin's
-        // `[plugin."<id>"]` table from config.toml. No-op without a settings store.
+        // ctx.plugin_config(key) -> string|nil. Reads the Lua source component's
+        // table from config.toml. No-op without a settings store.
         let cfg_settings = self.settings.clone();
         let cfg_plugin = plugin_name.map(str::to_owned);
         let plugin_config_fn = self.lua.create_function(move |_, key: String| {
@@ -3333,6 +3381,39 @@ impl LuaPluginRegistry {
         Ok(out)
     }
 
+    /// Validate and canonicalize a partial settings update for one discover
+    /// source. The Lua declaration is authoritative; callers cannot add
+    /// undeclared keys to the source's config table.
+    pub fn validate_remote_settings_patch(
+        &self,
+        source_id: &str,
+        values: HashMap<String, String>,
+    ) -> Result<HashMap<String, String>> {
+        let handle = self.handle(source_id)?;
+        let info = handle.info.read().expect("plugin info lock poisoned");
+        if info.capabilities.discover.is_none() {
+            return Err(Error::DiscoverUnsupported(source_id.to_string()));
+        }
+
+        let schemas: HashMap<_, _> = info
+            .settings
+            .iter()
+            .map(|setting| (setting.key.as_str(), setting))
+            .collect();
+        let mut validated = HashMap::with_capacity(values.len());
+        for (key, raw) in values {
+            let setting = schemas.get(key.as_str()).ok_or_else(|| {
+                Error::SettingsValidationFailed(format!(
+                    "{source_id}.{key} is not declared by the remote source"
+                ))
+            })?;
+            let value = validate_source_setting(setting, &raw)
+                .map_err(|error| Error::SettingsValidationFailed(format!("{source_id}.{error}")))?;
+            validated.insert(key, value);
+        }
+        Ok(validated)
+    }
+
     pub async fn discover_sources_with_status(&self) -> Result<Vec<DiscoverSourceInfo>> {
         let calls = self.handles().into_iter().filter_map(|(name, handle)| {
             let has_discover = handle
@@ -3727,6 +3808,99 @@ return M
         assert!(!error.contains("refresh-secret"));
         assert!(error.contains("[REDACTED]"));
     }
+
+    #[test]
+    fn remote_settings_patch_uses_source_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = dir.path().join("settings.lua");
+        std::fs::write(
+            &entry,
+            r#"
+local M = {}
+function M.info()
+    return {
+        name = "settings_remote",
+        settings = {
+            { key = "count", type = "u32", default = 1 },
+            { key = "enabled", type = "bool", default = false },
+            { key = "mode", type = "string", default = "one", choices = { "one", "two" } },
+        },
+        capabilities = { discover = { search = true } },
+    }
+end
+M.discover = {}
+function M.discover.search(ctx, params)
+    return { items = {}, has_more = false }
+end
+return M
+"#,
+        )
+        .unwrap();
+        let manager = SourceManager::new().unwrap();
+        manager
+            .load_plugin(&entry, "org.settings", "1", ENTRY_VERSION_V3)
+            .unwrap();
+
+        let values = HashMap::from([
+            ("count".to_string(), "007".to_string()),
+            ("enabled".to_string(), "true".to_string()),
+            ("mode".to_string(), "two".to_string()),
+        ]);
+        let validated = manager
+            .validate_remote_settings_patch("settings_remote", values)
+            .unwrap();
+        assert_eq!(validated.get("count").map(String::as_str), Some("7"));
+        assert_eq!(validated.get("enabled").map(String::as_str), Some("true"));
+        assert_eq!(validated.get("mode").map(String::as_str), Some("two"));
+
+        for values in [
+            HashMap::from([("missing".to_string(), "value".to_string())]),
+            HashMap::from([("enabled".to_string(), "yes".to_string())]),
+            HashMap::from([("mode".to_string(), "three".to_string())]),
+        ] {
+            assert!(manager
+                .validate_remote_settings_patch("settings_remote", values)
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn source_settings_reject_invalid_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = dir.path().join("settings.lua");
+        let script = |settings: &str| {
+            format!(
+                r#"
+local M = {{}}
+function M.info()
+    return {{
+        name = "invalid_settings",
+        settings = {{ {settings} }},
+        capabilities = {{ discover = {{ search = true }} }},
+    }}
+end
+M.discover = {{}}
+function M.discover.search(ctx, params)
+    return {{ items = {{}}, has_more = false }}
+end
+return M
+"#,
+            )
+        };
+
+        std::fs::write(&entry, script(r#"{ key = "same" }, { key = "same" }"#)).unwrap();
+        assert!(SourceManager::new()
+            .unwrap()
+            .load_plugin(&entry, "org.invalid", "1", ENTRY_VERSION_V3)
+            .is_err());
+
+        std::fs::write(&entry, script(r#"{ key = "value", type = "object" }"#)).unwrap();
+        assert!(SourceManager::new()
+            .unwrap()
+            .load_plugin(&entry, "org.invalid", "1", ENTRY_VERSION_V3)
+            .is_err());
+    }
+
     impl MediaProbe for FakeProbe {
         fn probe_media(&self, _path: &str) -> MediaMeta {
             self.meta.clone()

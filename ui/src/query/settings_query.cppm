@@ -13,7 +13,7 @@ namespace waywallen
 
 /// Fetch the daemon's persisted settings. `global` is a flat
 /// QVariantMap (`layoutDefaults`, `wallpaperFilters`, …).
-/// `plugins` is keyed by plugin name with each value a
+/// `plugins` is keyed by runtime component name with each value a
 /// `{key: stringValue}` QVariantMap. Plugin values are wire-string
 /// typed — the QML form coerces per the matching `SettingSchema.type`.
 export class SettingsGetQuery : public Query,

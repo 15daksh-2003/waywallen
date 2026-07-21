@@ -87,6 +87,7 @@ message Request {
     SubscriptionStatusRequest subscription_status = 70;
     SubscriptionSetRequest    subscription_set = 71;
     QrLoginCancelRequest      qr_login_cancel = 72;
+    RemoteSettingsPatchRequest remote_settings_patch = 73;
   }
 }
 
@@ -161,6 +162,7 @@ message Response {
     SubscriptionStatusResponse subscription_status = 70;
     SubscriptionSetResponse    subscription_set = 71;
     QrLoginCancelResponse      qr_login_cancel = 72;
+    Empty                      remote_settings_patch = 73;
   }
 }
 
@@ -484,8 +486,8 @@ message SourcePluginInfo {
   // Longer helper text describing what kind of path to choose. May
   // contain newlines. Empty = no hint shown.
   string library_hint = 5;
-  // Domain id of the owning plugin (e.g. org.waywallen.open-wallpaper-engine), so the
-  // UI can address its `[plugin."<id>"]` config table for SettingsSet.
+  // Domain id of the owning installable plugin (e.g.
+  // org.waywallen.open-wallpaper-engine). Settings use the source `name`.
   string plugin_id = 6;
   // User-configurable settings the plugin declares via `info().settings`,
   // rendered by the generic plugin-settings page.
@@ -847,6 +849,13 @@ message QrLoginCancelRequest {
 }
 message QrLoginCancelResponse {
   bool cancelled = 1;
+}
+
+// Merge declared settings into one remote source's config table. Unlike
+// SettingsSet, this request never replaces unrelated settings.
+message RemoteSettingsPatchRequest {
+  string source_id = 1;
+  map<string, string> values = 2;
 }
 
 enum QrLoginState {
@@ -1211,7 +1220,7 @@ message PluginSettings {
 message SettingsGetRequest {}
 message SettingsGetResponse {
   GlobalSettings global = 1;
-  // Keyed by plugin name (RendererDef.name).
+  // Keyed by runtime component name (renderer name or Lua source name).
   map<string, PluginSettings> plugins = 2;
 }
 
@@ -1224,9 +1233,9 @@ message SettingsSetRequest {
 
 // Server-initiated push: the persisted settings just changed. Carries
 // the full post-write state so a UI can rebind without a follow-up
-// `SettingsGetRequest`. Sent after every successful `SettingsSet` and
-// after schema-driven startup reconciliation that filled in defaults
-// or dropped unknown keys.
+// `SettingsGetRequest`. Sent after every successful settings mutation and
+// after schema-driven startup reconciliation that filled in defaults or
+// dropped unknown keys.
 message SettingsChanged {
   GlobalSettings global = 1;
   map<string, PluginSettings> plugins = 2;

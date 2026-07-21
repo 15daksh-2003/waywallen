@@ -468,6 +468,44 @@ void RemoteSubscriptionQuery::setSubscribed(const QString& sourceId, const QStri
     });
 }
 
+RemoteSettingsPatchQuery::RemoteSettingsPatchQuery(QObject* parent): Query(parent) {}
+
+void RemoteSettingsPatchQuery::reload() {}
+
+void RemoteSettingsPatchQuery::patch(const QString& sourceId, const QVariantMap& values) {
+    if (sourceId.isEmpty() || values.isEmpty()) return;
+    setStatus(Status::Querying);
+    auto backend = App::instance()->backend();
+
+    QHash<QString, QString> wire_values;
+    for (auto it = values.cbegin(); it != values.cend(); ++it) {
+        wire_values.insert(it.key(), it.value().toString());
+    }
+    auto req   = proto::Request {};
+    auto inner = proto::RemoteSettingsPatchRequest {};
+    inner.setSourceId(sourceId);
+    inner.setValues(wire_values);
+    req.setRemoteSettingsPatch(std::move(inner));
+
+    auto self = QWatcher { this };
+    spawn([self, backend, req = std::move(req), sourceId, values]() mutable -> task<void> {
+        auto result = co_await backend->send(std::move(req));
+        if (! co_await QAsyncResult::qexecutor()) co_return;
+        if (! self) co_return;
+        if (! result) {
+            self->inspect_set(result, [](const proto::Response&) {
+            });
+            Q_EMIT self->completed(sourceId, values, false, self->error());
+            co_return;
+        }
+
+        self->inspect_set(result, [](const proto::Response&) {
+        });
+        Q_EMIT self->completed(sourceId, values, true, QString {});
+        co_return;
+    });
+}
+
 } // namespace waywallen
 
 #include "waywallen/query/remote_query.moc.cpp"

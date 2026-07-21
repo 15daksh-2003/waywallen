@@ -96,6 +96,15 @@ MD.Popup {
         m_pool.add(source, props);
     }
 
+    function preparePageClose(page) {
+        if (page && typeof page.prepareClose === "function")
+            page.prepareClose();
+    }
+
+    onAboutToHide: {
+        root.preparePageClose(m_stack.currentItem);
+    }
+
     contentItem: MD.StackView {
         id: m_stack
         property real lastImplicitHeight: 0

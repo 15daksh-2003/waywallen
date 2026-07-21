@@ -92,6 +92,7 @@ using proto::RemoteDownloadResponse;
 using proto::RemoteItem;
 using proto::RemoteSearchRequest;
 using proto::RemoteSearchResponse;
+using proto::RemoteSettingsPatchRequest;
 using proto::RemoteSortOption;
 using proto::RemoteSourceInfo;
 using proto::RemoteUninstallRequest;

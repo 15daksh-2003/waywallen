@@ -545,7 +545,7 @@ where
 pub struct Settings {
     #[serde(default)]
     pub global: GlobalSettings,
-    /// Per-plugin string-to-string bag keyed by `RendererDef.name`.
+    /// Per-component string-to-string bag keyed by renderer or Lua source name.
     /// String values map cleanly to TOML and protobuf.
     #[serde(default, rename = "plugin")]
     pub plugins: HashMap<String, HashMap<String, String>>,
@@ -1031,14 +1031,13 @@ impl SettingsStore {
             }
         }
 
-        // Warn about persisted plugin settings whose manifest is absent.
-        // Keep them in memory so missing plugins do not lose settings.
+        // Keep tables without a renderer manifest. They may belong to a Lua
+        // source, or to a temporarily unavailable renderer.
         for plugin_name in g.plugins.keys() {
             if !manifests.contains_key(plugin_name) {
                 log::warn!(
-                    "settings: plugin '{plugin_name}' has persisted values \
-                     but no matching renderer manifest is loaded; \
-                     leaving as-is"
+                    "settings: component '{plugin_name}' has persisted values \
+                     but no matching renderer manifest is loaded; leaving as-is"
                 );
             }
         }

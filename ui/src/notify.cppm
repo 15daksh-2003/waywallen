@@ -105,7 +105,7 @@ Q_SIGNALS:
     /// is already ready.
     void daemonReady();
     /// Daemon broadcast a `SettingsChanged` event after a successful
-    /// `SettingsSet` (or schema-driven startup reconciliation). UI
+    /// settings mutation (or schema-driven startup reconciliation). UI
     /// settings forms should re-fetch via `SettingsGetQuery` to pick
     /// up writes from peer clients. The payload itself is intentionally
     /// not relayed here — receivers re-query so they go through the

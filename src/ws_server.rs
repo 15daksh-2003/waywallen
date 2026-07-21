@@ -2416,6 +2416,24 @@ async fn dispatch_inner(
             Res::QrLoginCancel(pb::QrLoginCancelResponse { cancelled })
         }
 
+        Req::RemoteSettingsPatch(r) => {
+            let source_id = resolve_remote_source_id(state, &r.source_id).await?;
+            let values = state
+                .source_manager
+                .validate_remote_settings_patch(&source_id, r.values)?;
+            if !values.is_empty() {
+                state.settings.update(|settings| {
+                    settings
+                        .plugins
+                        .entry(source_id)
+                        .or_default()
+                        .extend(values);
+                });
+                state.events.publish(GlobalEvent::SettingsChanged);
+            }
+            Res::RemoteSettingsPatch(pb::Empty {})
+        }
+
         Req::SubscriptionStatus(r) => {
             let source_id = match resolve_remote_source_id(state, &r.source_id).await {
                 Ok(source_id) => source_id,
