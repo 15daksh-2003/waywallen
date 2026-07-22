@@ -33,28 +33,15 @@ impl PluginStateStore {
         ))
     }
 
+    fn http_session_path(&self, plugin_id: &str) -> PathBuf {
+        self.root.join(format!(
+            "{}.cookies",
+            crate::settings::sanitize_path_segment(plugin_id)
+        ))
+    }
+
     pub fn load(&self, plugin_id: &str) -> Result<Option<String>> {
-        let path = self.state_path(plugin_id);
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(Error::Internal(anyhow!(
-                    "read plugin state {}: {error}",
-                    path.display()
-                )))
-            }
-        };
-        if bytes.len() > MAX_PLUGIN_STATE_BYTES {
-            return Err(Error::Internal(anyhow!(
-                "plugin state {} exceeds {} bytes",
-                path.display(),
-                MAX_PLUGIN_STATE_BYTES
-            )));
-        }
-        String::from_utf8(bytes)
-            .map(Some)
-            .map_err(|error| Error::Internal(anyhow!("plugin state is not UTF-8: {error}")))
+        self.load_utf8(&self.state_path(plugin_id), "plugin state")
     }
 
     pub fn save_if_changed(
@@ -72,11 +59,76 @@ impl PluginStateStore {
             )));
         }
 
+        let path = self.state_path(plugin_id);
+        self.save_atomic(plugin_id, &path, state.as_bytes(), "plugin state")?;
+        Ok(true)
+    }
+
+    pub fn load_http_session(&self, plugin_id: &str) -> Result<Option<String>> {
+        self.load_utf8(&self.http_session_path(plugin_id), "plugin HTTP session")
+    }
+
+    pub fn save_http_session(&self, plugin_id: &str, snapshot: &str) -> Result<()> {
+        if snapshot.len() > MAX_PLUGIN_STATE_BYTES {
+            return Err(Error::Internal(anyhow!(
+                "HTTP session for {plugin_id} exceeds {MAX_PLUGIN_STATE_BYTES} bytes"
+            )));
+        }
+        self.save_atomic(
+            plugin_id,
+            &self.http_session_path(plugin_id),
+            snapshot.as_bytes(),
+            "plugin HTTP session",
+        )
+    }
+
+    pub fn remove(&self, plugin_id: &str) -> Result<()> {
+        for path in [
+            self.state_path(plugin_id),
+            self.http_session_path(plugin_id),
+        ] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(Error::Internal(anyhow!(
+                        "remove plugin state {}: {error}",
+                        path.display()
+                    )))
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn load_utf8(&self, path: &Path, kind: &str) -> Result<Option<String>> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(Error::Internal(anyhow!(
+                    "read {kind} {}: {error}",
+                    path.display()
+                )))
+            }
+        };
+        if bytes.len() > MAX_PLUGIN_STATE_BYTES {
+            return Err(Error::Internal(anyhow!(
+                "{kind} {} exceeds {} bytes",
+                path.display(),
+                MAX_PLUGIN_STATE_BYTES
+            )));
+        }
+        String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|error| Error::Internal(anyhow!("{kind} is not UTF-8: {error}")))
+    }
+
+    fn save_atomic(&self, plugin_id: &str, path: &Path, bytes: &[u8], kind: &str) -> Result<()> {
         std::fs::create_dir_all(&self.root)
             .with_context(|| format!("create plugin state dir {}", self.root.display()))?;
         set_user_only_dir(&self.root)?;
 
-        let path = self.state_path(plugin_id);
         let temp = self.root.join(format!(
             ".{}.{}.tmp",
             crate::settings::sanitize_path_segment(plugin_id),
@@ -91,20 +143,20 @@ impl PluginStateStore {
         }
         let mut file = options
             .open(&temp)
-            .with_context(|| format!("create plugin state temp {}", temp.display()))?;
+            .with_context(|| format!("create {kind} temp {}", temp.display()))?;
         let write_result = (|| -> anyhow::Result<()> {
-            file.write_all(state.as_bytes())?;
+            file.write_all(bytes)?;
             file.sync_all()?;
-            std::fs::rename(&temp, &path)?;
+            std::fs::rename(&temp, path)?;
             Ok(())
         })();
         if let Err(error) = write_result {
             let _ = std::fs::remove_file(&temp);
             return Err(Error::Internal(
-                error.context(format!("replace plugin state {}", path.display())),
+                error.context(format!("replace {kind} {}", path.display())),
             ));
         }
-        Ok(true)
+        Ok(())
     }
 
     pub fn load_legacy(&self, file_name: &str) -> Result<Option<String>> {
@@ -280,5 +332,33 @@ mod tests {
                 assert_eq!(mode, 0o600);
             }
         }
+    }
+
+    #[test]
+    fn http_session_is_separate_atomic_and_removed_with_domain_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("state");
+        let store = PluginStateStore::new(root.clone(), dir.path().to_path_buf());
+        store
+            .save_if_changed("org.example", None, "domain-state")
+            .unwrap();
+        store
+            .save_http_session("org.example", "{\"cookies\":[]}")
+            .unwrap();
+
+        assert_eq!(
+            store.load("org.example").unwrap().as_deref(),
+            Some("domain-state")
+        );
+        assert_eq!(
+            store.load_http_session("org.example").unwrap().as_deref(),
+            Some("{\"cookies\":[]}")
+        );
+        assert!(root.join("org.example.state").is_file());
+        assert!(root.join("org.example.cookies").is_file());
+
+        store.remove("org.example").unwrap();
+        assert_eq!(store.load("org.example").unwrap(), None);
+        assert_eq!(store.load_http_session("org.example").unwrap(), None);
     }
 }

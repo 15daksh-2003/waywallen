@@ -75,18 +75,54 @@ fn registry_from_scan(scan: &PluginScan) -> RendererRegistry {
     registry
 }
 
+struct SourcePluginSuspendGuard {
+    manager: Arc<crate::plugin::source_manager::SourceManager>,
+    committed: bool,
+}
+
+impl SourcePluginSuspendGuard {
+    fn new(manager: Arc<crate::plugin::source_manager::SourceManager>) -> Self {
+        Self {
+            manager,
+            committed: false,
+        }
+    }
+
+    async fn suspend(&self) {
+        self.manager.suspend_plugins().await;
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for SourcePluginSuspendGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.manager.resume_plugins();
+        }
+    }
+}
+
 async fn reload_source_entries(
     app: &Arc<AppState>,
     entries: Vec<crate::plugin::renderer_registry::EntryRef>,
     installed_plugin_id: &str,
 ) -> Result<()> {
     app.qr_login.cancel_all_and_wait().await?;
+    let mut suspended = SourcePluginSuspendGuard::new(app.source_manager.clone());
+    suspended.suspend().await;
     let installed_plugin_id = installed_plugin_id.to_string();
-    let source_manager = app.source_manager.clone();
+    let probe = app.probe.clone();
+    let db = app.db.clone();
+    let settings = app.settings.clone();
     let load_result = tokio::task::spawn_blocking(move || {
-        source_manager.clear_plugins();
+        let source_manager = crate::plugin::source_manager::SourceManager::with_probe(probe)?;
+        source_manager.attach_db(db);
+        source_manager.attach_settings(settings);
 
-        let mut installed_failures = Vec::new();
+        let mut failures = Vec::new();
         for r in &entries {
             if let Err(e) = source_manager.load_plugin(
                 &r.entry,
@@ -96,22 +132,41 @@ async fn reload_source_entries(
             ) {
                 let msg = format!("load entry {}: {e:#}", r.entry.display());
                 log::warn!("{msg}");
-                if r.plugin_id == installed_plugin_id {
-                    installed_failures.push(msg);
-                }
+                failures.push((r.plugin_id.clone(), msg));
             }
         }
 
-        if installed_failures.is_empty() {
-            Ok(())
-        } else {
-            Err(installed_failures.join("; "))
-        }
+        Ok((source_manager, failures))
     })
-    .await
-    .map_err(|e| Error::Internal(anyhow!("source reload join: {e}")))?;
+    .await;
 
-    load_result.map_err(Error::PluginInstallFailed)?;
+    let (replacement, failures) = match load_result {
+        Ok(Ok(replacement)) => replacement,
+        Ok(Err(error)) => return Err(error),
+        Err(error) => {
+            return Err(Error::Internal(anyhow!("source reload join: {error}")));
+        }
+    };
+    if failures
+        .iter()
+        .any(|(plugin_id, _)| plugin_id == &installed_plugin_id)
+    {
+        let messages = failures
+            .into_iter()
+            .map(|(_, message)| message)
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(Error::PluginInstallFailed(format!(
+            "installed source plugin reload failed: {messages}"
+        )));
+    }
+    let failed_plugin_ids = failures
+        .into_iter()
+        .map(|(plugin_id, _)| plugin_id)
+        .collect::<std::collections::HashSet<_>>();
+    replacement.retain_plugins_from(&app.source_manager, &failed_plugin_ids)?;
+    app.source_manager.replace_plugins(replacement)?;
+    suspended.commit();
 
     let infos = app.source_manager.plugins()?;
     for info in &infos {

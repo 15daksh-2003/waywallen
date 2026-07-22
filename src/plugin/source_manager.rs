@@ -5,6 +5,7 @@ use mlua::prelude::*;
 use sea_orm::DatabaseConnection;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
@@ -16,6 +17,9 @@ use crate::wallpaper::types::{WallpaperEntry, WallpaperType};
 const WAYWALLEN_HTTP_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) waywallen";
 const LUA_CALLBACK_TIMEOUT: Duration = Duration::from_secs(25);
 const LUA_HOOK_INSTRUCTION_INTERVAL: u32 = 10_000;
+const RUNTIME_ACTIVE: u8 = 0;
+const RUNTIME_DRAINING: u8 = 1;
+const RUNTIME_INACTIVE: u8 = 2;
 
 pub const ENTRY_VERSION_V2: u32 = 2;
 pub const ENTRY_VERSION_V3: u32 = 3;
@@ -449,6 +453,9 @@ pub struct LuaPluginRuntime {
     settings: Option<Arc<crate::settings::SettingsStore>>,
     state_store: crate::plugin::state_store::PluginStateStore,
     saved_states: HashMap<String, Option<String>>,
+    http_client: reqwest::Client,
+    http_cookie_store: Arc<mlua_extra::http::SessionCookieStore>,
+    generation_state: Arc<AtomicU8>,
     qr_operations: HashMap<u64, LuaRegistryKey>,
     next_qr_operation_id: u64,
 }
@@ -468,6 +475,12 @@ impl LuaPluginRuntime {
 
     pub fn with_probe(probe: Arc<dyn MediaProbe>) -> Result<Self> {
         let lua = Lua::new();
+        let http_cookie_store = Arc::new(mlua_extra::http::SessionCookieStore::default());
+        let http_client = reqwest::Client::builder()
+            .user_agent(WAYWALLEN_HTTP_USER_AGENT)
+            .cookie_provider(http_cookie_store.clone())
+            .build()
+            .map_err(|error| Error::Internal(anyhow!("build plugin HTTP client: {error}")))?;
         let callback_deadline = Arc::new(StdMutex::new(None));
         let hook_deadline = callback_deadline.clone();
         lua.set_hook(
@@ -498,6 +511,9 @@ impl LuaPluginRuntime {
             settings: None,
             state_store: crate::plugin::state_store::PluginStateStore::standard(),
             saved_states: HashMap::new(),
+            http_client,
+            http_cookie_store,
+            generation_state: Arc::new(AtomicU8::new(RUNTIME_ACTIVE)),
             qr_operations: HashMap::new(),
             next_qr_operation_id: 1,
         })
@@ -553,6 +569,71 @@ impl LuaPluginRuntime {
             .map_err(|_| LuaError::RuntimeError("Lua callback timed out".into()))?
     }
 
+    async fn call_plugin_callback_async<R>(
+        &self,
+        plugin_name: &str,
+        function: &LuaFunction,
+        args: impl IntoLuaMulti,
+    ) -> LuaResult<R>
+    where
+        R: FromLuaMulti,
+    {
+        if self.generation_state.load(Ordering::Acquire) != RUNTIME_ACTIVE {
+            return Err(LuaError::runtime("source plugin runtime is reloading"));
+        }
+        let result = self.call_callback_async(function, args).await;
+        let persisted = self.persist_http_session(plugin_name);
+        match (result, persisted) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Ok(_), Err(error)) => Err(LuaError::external(error)),
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(persist_error)) => {
+                log::warn!(
+                    "persist HTTP session after failed callback for {plugin_name}: {persist_error:#}"
+                );
+                Err(error)
+            }
+        }
+    }
+
+    fn http_view(&self) -> mlua_extra::http::LuaHttpClient {
+        mlua_extra::http::LuaHttpClient::with_session(
+            self.http_client.clone(),
+            self.http_cookie_store.clone(),
+        )
+    }
+
+    fn restore_http_session(&self, plugin_id: &str) -> Result<()> {
+        let Some(snapshot) = self.state_store.load_http_session(plugin_id)? else {
+            return Ok(());
+        };
+        self.http_cookie_store.restore(&snapshot).map_err(|error| {
+            Error::Internal(anyhow!("restore HTTP session for {plugin_id}: {error}"))
+        })
+    }
+
+    fn persist_http_session(&self, plugin_name: &str) -> Result<()> {
+        let plugin_id = &self
+            .plugin_infos
+            .get(plugin_name)
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?
+            .plugin_id;
+        self.persist_http_session_by_id(plugin_id)
+    }
+
+    fn persist_http_session_by_id(&self, plugin_id: &str) -> Result<()> {
+        if !self.http_cookie_store.is_dirty() {
+            return Ok(());
+        }
+        let snapshot = self.http_cookie_store.snapshot().map_err(|error| {
+            Error::Internal(anyhow!("snapshot HTTP session for {plugin_id}: {error}"))
+        })?;
+        self.state_store
+            .save_http_session(plugin_id, &snapshot.value)?;
+        self.http_cookie_store.mark_clean(snapshot.revision);
+        Ok(())
+    }
+
     /// Hand the DB to the source manager so `ctx.library_meta_get/set`
     /// can read and write per-library metadata.
     pub fn attach_db(&mut self, db: DatabaseConnection) {
@@ -566,6 +647,10 @@ impl LuaPluginRuntime {
     }
 
     pub fn clear_plugins(&mut self) {
+        self.persist_all_http_sessions();
+        self.generation_state
+            .store(RUNTIME_INACTIVE, Ordering::Release);
+        self.http_cookie_store.clear();
         self.plugins.clear();
         self.callbacks.clear();
         self.plugin_infos.clear();
@@ -1364,7 +1449,10 @@ impl LuaPluginRuntime {
         self.plugins.insert(name.clone(), key);
         self.callbacks.insert(name.clone(), callbacks);
         self.plugin_infos.insert(name.clone(), info);
-        if let Err(error) = self.initialize_state(&name) {
+        if let Err(error) = self
+            .restore_http_session(plugin_id)
+            .and_then(|()| self.initialize_state(&name))
+        {
             self.plugins.remove(&name);
             self.callbacks.remove(&name);
             self.plugin_infos.remove(&name);
@@ -1430,36 +1518,58 @@ impl LuaPluginRuntime {
     }
 
     fn persist_state(&mut self, plugin_name: &str) -> Result<()> {
-        let info = self
+        let (plugin_id, has_lifecycle) = self
             .plugin_infos
             .get(plugin_name)
+            .map(|info| (info.plugin_id.clone(), info.capabilities.lifecycle))
             .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
-        if !info.capabilities.lifecycle {
-            return Ok(());
+        let lifecycle_result = (|| -> Result<()> {
+            if !has_lifecycle {
+                return Ok(());
+            }
+            let callbacks = self
+                .callbacks
+                .get(plugin_name)
+                .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+            let save_fn: LuaFunction = self.lua.registry_value(
+                callbacks
+                    .lifecycle_save
+                    .as_ref()
+                    .ok_or_else(|| Error::Internal(anyhow!("module.lifecycle.save required")))?,
+            )?;
+            let state: String = self.call_callback(&save_fn, ())?;
+            let previous = self
+                .saved_states
+                .get(&plugin_id)
+                .and_then(|state| state.as_deref());
+            if self
+                .state_store
+                .save_if_changed(&plugin_id, previous, &state)?
+            {
+                self.saved_states.insert(plugin_id.clone(), Some(state));
+            }
+            Ok(())
+        })();
+        let http_result = self.persist_http_session_by_id(&plugin_id);
+        lifecycle_result?;
+        http_result
+    }
+
+    fn persist_all_http_sessions(&self) {
+        if self.generation_state.load(Ordering::Acquire) == RUNTIME_INACTIVE {
+            return;
         }
-        let plugin_id = info.plugin_id.clone();
-        let callbacks = self
-            .callbacks
-            .get(plugin_name)
-            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
-        let save_fn: LuaFunction = self.lua.registry_value(
-            callbacks
-                .lifecycle_save
-                .as_ref()
-                .ok_or_else(|| Error::Internal(anyhow!("module.lifecycle.save required")))?,
-        )?;
-        let state: String = self.call_callback(&save_fn, ())?;
-        let previous = self
-            .saved_states
-            .get(&plugin_id)
-            .and_then(|state| state.as_deref());
-        if self
-            .state_store
-            .save_if_changed(&plugin_id, previous, &state)?
-        {
-            self.saved_states.insert(plugin_id, Some(state));
+        let mut plugin_ids = HashSet::new();
+        for info in self.plugin_infos.values() {
+            if plugin_ids.insert(info.plugin_id.as_str()) {
+                if let Err(error) = self.persist_http_session_by_id(&info.plugin_id) {
+                    log::warn!(
+                        "persist HTTP session while releasing {}: {error:#}",
+                        info.plugin_id
+                    );
+                }
+            }
         }
-        Ok(())
     }
 
     /// Run `scan(ctx)` on all loaded plugins and merge results.
@@ -1509,7 +1619,7 @@ impl LuaPluginRuntime {
 
         let ctx = self.build_ctx(Some(name), libraries)?;
         let results: LuaTable = self
-            .call_callback_async(&scan_fn, ctx)
+            .call_plugin_callback_async(name, &scan_fn, ctx)
             .await
             .map_err(|error| {
                 Error::Internal(anyhow!(
@@ -1575,7 +1685,8 @@ impl LuaPluginRuntime {
 
         let time = mlua_extra::time::create_module(&self.lua)?;
         ctx.set("time_unix", time.get::<LuaFunction>("unix")?)?;
-        ctx.set("time", time)
+        ctx.set("time", time)?;
+        ctx.set("random", mlua_extra::random::create_module(&self.lua)?)
     }
 
     /// Build the `ctx` table passed to Lua callbacks.
@@ -1871,7 +1982,7 @@ impl LuaPluginRuntime {
 
         // ctx.http is a fluent client:
         // ctx.http:get(url):headers({...}):send()
-        ctx.set("http", mlua_extra::http::default(WAYWALLEN_HTTP_USER_AGENT))?;
+        ctx.set("http", self.http_view())?;
         ctx.set("html", mlua_extra::html::create_module(&self.lua)?)?;
         ctx.set("url", mlua_extra::url::create_module(&self.lua)?)?;
 
@@ -1903,7 +2014,7 @@ impl LuaPluginRuntime {
                 Ok(())
             })?,
         )?;
-        ctx.set("http", mlua_extra::http::default(WAYWALLEN_HTTP_USER_AGENT))?;
+        ctx.set("http", self.http_view())?;
         ctx.set("html", mlua_extra::html::create_module(&self.lua)?)?;
         ctx.set("url", mlua_extra::url::create_module(&self.lua)?)?;
         Ok(ctx)
@@ -2010,7 +2121,7 @@ impl LuaPluginRuntime {
                 .build_ctx(Some(plugin_name), &[])
                 .map_err(mlua::Error::external)?;
             let result: LuaTable = self
-                .call_callback_async(&extras_fn, (entry_tbl, ctx))
+                .call_plugin_callback_async(plugin_name, &extras_fn, (entry_tbl, ctx))
                 .await?;
             let mut out = HashMap::new();
             for pair in result.pairs::<String, String>() {
@@ -2054,7 +2165,7 @@ impl LuaPluginRuntime {
         let entry_tbl = self.wallpaper_entry_table(entry)?;
         let ctx = self.build_ctx(Some(plugin_name), &[])?;
         let result: mlua::Value = self
-            .call_callback_async(&props_fn, (entry_tbl, ctx))
+            .call_plugin_callback_async(plugin_name, &props_fn, (entry_tbl, ctx))
             .await
             .map_err(|e| {
                 Error::Internal(anyhow!(
@@ -2098,16 +2209,17 @@ impl LuaPluginRuntime {
                         Error::Internal(anyhow!("module.source.auto_detect required"))
                     })?)?;
             let ctx = self.build_ctx(None, &empty)?;
-            let results: LuaTable = match self.call_callback_async(&auto_fn, ctx).await {
-                Ok(t) => t,
-                Err(e) => {
-                    log::warn!(
-                        "auto_detect plugin {name}: {}",
-                        redact_secrets(&e.to_string())
-                    );
-                    continue;
-                }
-            };
+            let results: LuaTable =
+                match self.call_plugin_callback_async(&name, &auto_fn, ctx).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        log::warn!(
+                            "auto_detect plugin {name}: {}",
+                            redact_secrets(&e.to_string())
+                        );
+                        continue;
+                    }
+                };
             let paths: Vec<String> = results
                 .sequence_values::<String>()
                 .filter_map(|v| v.ok())
@@ -2196,7 +2308,7 @@ impl LuaPluginRuntime {
 
         let ctx = self.build_remote_ctx(plugin_name)?;
         let result: LuaTable = self
-            .call_callback_async(&discover_fn, (ctx, params))
+            .call_plugin_callback_async(plugin_name, &discover_fn, (ctx, params))
             .await
             .map_err(|e| Error::DiscoverFailed {
                 plugin: plugin_name.to_string(),
@@ -2257,13 +2369,13 @@ impl LuaPluginRuntime {
                 .ok_or_else(|| Error::DiscoverUnsupported(plugin_name.to_string()))?,
         )?;
         let ctx = self.build_remote_ctx(plugin_name)?;
-        let tags =
-            self.call_callback_async(&tags_fn, ctx)
-                .await
-                .map_err(|e| Error::DiscoverFailed {
-                    plugin: plugin_name.to_string(),
-                    message: redact_secrets(&e.to_string()),
-                })?;
+        let tags = self
+            .call_plugin_callback_async(plugin_name, &tags_fn, ctx)
+            .await
+            .map_err(|e| Error::DiscoverFailed {
+                plugin: plugin_name.to_string(),
+                message: redact_secrets(&e.to_string()),
+            })?;
         self.persist_state(plugin_name)?;
         Ok(tags)
     }
@@ -2323,7 +2435,7 @@ impl LuaPluginRuntime {
 
         let ctx = self.build_remote_ctx(plugin_name)?;
         let result: LuaTable = self
-            .call_callback_async(&details_fn, (ctx, id.to_string()))
+            .call_plugin_callback_async(plugin_name, &details_fn, (ctx, id.to_string()))
             .await
             .map_err(|e| Error::DiscoverFailed {
                 plugin: plugin_name.to_string(),
@@ -2371,7 +2483,7 @@ impl LuaPluginRuntime {
 
         let ctx = self.build_remote_ctx(plugin_name)?;
         let result: LuaTable = self
-            .call_callback_async(&download_fn, (ctx, id.to_string()))
+            .call_plugin_callback_async(plugin_name, &download_fn, (ctx, id.to_string()))
             .await
             .map_err(|e| Error::DiscoverFailed {
                 plugin: plugin_name.to_string(),
@@ -2449,7 +2561,7 @@ impl LuaPluginRuntime {
         params.set("id", id.to_string())?;
         params.set("dir", dir.to_string())?;
         let result: LuaTable = self
-            .call_callback_async(&resolve_fn, (ctx, params))
+            .call_plugin_callback_async(plugin_name, &resolve_fn, (ctx, params))
             .await
             .map_err(|e| Error::ResolveFailed {
                 plugin: plugin_name.to_string(),
@@ -2509,7 +2621,7 @@ impl LuaPluginRuntime {
         )?;
         let ctx = self.build_remote_ctx(plugin_name)?;
         let result: LuaTable = self
-            .call_callback_async(&check_fn, ctx)
+            .call_plugin_callback_async(plugin_name, &check_fn, ctx)
             .await
             .map_err(|error| Error::DiscoverFailed {
                 plugin: plugin_name.to_string(),
@@ -2565,13 +2677,13 @@ impl LuaPluginRuntime {
         };
         let status_fn: LuaFunction = self.lua.registry_value(status_key)?;
         let ctx = self.build_remote_ctx(plugin_name)?;
-        let result: LuaTable =
-            self.call_callback_async(&status_fn, ctx)
-                .await
-                .map_err(|error| Error::DiscoverFailed {
-                    plugin: plugin_name.to_string(),
-                    message: redact_secrets(&error.to_string()),
-                })?;
+        let result: LuaTable = self
+            .call_plugin_callback_async(plugin_name, &status_fn, ctx)
+            .await
+            .map_err(|error| Error::DiscoverFailed {
+                plugin: plugin_name.to_string(),
+                message: redact_secrets(&error.to_string()),
+            })?;
 
         if let Some(values) =
             Self::optional_table(&result, "status", "module.actions.status result")?
@@ -2629,12 +2741,16 @@ impl LuaPluginRuntime {
                 .ok_or_else(|| Error::InvalidArgument("plugin action is unsupported".into()))?,
         )?;
         let ctx = self.build_remote_ctx(plugin_name)?;
-        self.call_callback_async::<()>(&invoke_fn, (ctx, action_id.to_string()))
-            .await
-            .map_err(|error| Error::DiscoverFailed {
-                plugin: plugin_name.to_string(),
-                message: redact_secrets(&error.to_string()),
-            })?;
+        self.call_plugin_callback_async::<()>(
+            plugin_name,
+            &invoke_fn,
+            (ctx, action_id.to_string()),
+        )
+        .await
+        .map_err(|error| Error::DiscoverFailed {
+            plugin: plugin_name.to_string(),
+            message: redact_secrets(&error.to_string()),
+        })?;
         self.persist_state(plugin_name)
     }
 
@@ -2668,7 +2784,7 @@ impl LuaPluginRuntime {
         )?;
         let ctx = self.build_remote_ctx(plugin_name)?;
         let result: LuaTable = self
-            .call_callback_async(&begin_fn, (ctx, action_id.to_string()))
+            .call_plugin_callback_async(plugin_name, &begin_fn, (ctx, action_id.to_string()))
             .await
             .map_err(|error| Error::DiscoverFailed {
                 plugin: plugin_name.to_string(),
@@ -2723,7 +2839,7 @@ impl LuaPluginRuntime {
         let opaque: LuaValue = self.lua.registry_value(key)?;
         let ctx = self.build_remote_ctx(plugin_name)?;
         let result: LuaTable = self
-            .call_callback_async(&poll_fn, (ctx, opaque))
+            .call_plugin_callback_async(plugin_name, &poll_fn, (ctx, opaque))
             .await
             .map_err(|error| Error::DiscoverFailed {
                 plugin: plugin_name.to_string(),
@@ -2779,7 +2895,7 @@ impl LuaPluginRuntime {
         {
             let cancel_fn: LuaFunction = self.lua.registry_value(cancel_key)?;
             let ctx = self.build_remote_ctx(plugin_name)?;
-            self.call_callback_async::<()>(&cancel_fn, (ctx, opaque))
+            self.call_plugin_callback_async::<()>(plugin_name, &cancel_fn, (ctx, opaque))
                 .await
                 .map_err(|error| Error::DiscoverFailed {
                     plugin: plugin_name.to_string(),
@@ -2816,7 +2932,7 @@ impl LuaPluginRuntime {
         }
         let ctx = self.build_remote_ctx(plugin_name)?;
         let result: LuaTable = self
-            .call_callback_async(&status_fn, (ctx, id_table))
+            .call_plugin_callback_async(plugin_name, &status_fn, (ctx, id_table))
             .await
             .map_err(|error| Error::DiscoverFailed {
                 plugin: plugin_name.to_string(),
@@ -2859,7 +2975,7 @@ impl LuaPluginRuntime {
         let function: LuaFunction = self.lua.registry_value(callback)?;
         let ctx = self.build_remote_ctx(plugin_name)?;
         let result: LuaTable = self
-            .call_callback_async(&function, (ctx, id.to_string()))
+            .call_plugin_callback_async(plugin_name, &function, (ctx, id.to_string()))
             .await
             .map_err(|error| Error::DiscoverFailed {
                 plugin: plugin_name.to_string(),
@@ -2956,7 +3072,7 @@ impl LuaPluginRuntime {
         )?;
         let ctx = self.build_ctx(Some(plugin_name), libraries)?;
         let entry_tbl = self.wallpaper_entry_table(entry)?;
-        self.call_callback_async::<()>(&remove_fn, (ctx, entry_tbl))
+        self.call_plugin_callback_async::<()>(plugin_name, &remove_fn, (ctx, entry_tbl))
             .await
             .map_err(|e| Error::SourceItemRemoveFailed {
                 plugin: plugin_name.to_string(),
@@ -2970,6 +3086,12 @@ impl LuaPluginRuntime {
         self.plugin_infos
             .get(plugin_name)
             .map(|info| info.version.clone())
+    }
+}
+
+impl Drop for LuaPluginRuntime {
+    fn drop(&mut self) {
+        self.persist_all_http_sessions();
     }
 }
 
@@ -3000,6 +3122,7 @@ impl SourceCatalog {
 struct PluginHandle {
     runtime: Arc<tokio::sync::Mutex<LuaPluginRuntime>>,
     info: StdRwLock<LoadedPluginInfo>,
+    generation_state: Arc<AtomicU8>,
 }
 
 /// Registry and source catalog for Lua plugins.
@@ -3056,14 +3179,92 @@ impl LuaPluginRegistry {
     }
 
     pub fn clear_plugins(&self) {
-        self.plugins
-            .write()
-            .expect("plugin registry lock poisoned")
-            .clear();
+        let mut plugins = self.plugins.write().expect("plugin registry lock poisoned");
+        for handle in plugins.values() {
+            handle
+                .generation_state
+                .store(RUNTIME_INACTIVE, Ordering::Release);
+        }
+        plugins.clear();
+        drop(plugins);
         self.catalog
             .write()
             .expect("source catalog lock poisoned")
             .clear();
+    }
+
+    pub async fn suspend_plugins(&self) {
+        let handles = self.handles();
+        for (_, handle) in &handles {
+            handle
+                .generation_state
+                .store(RUNTIME_DRAINING, Ordering::Release);
+        }
+        for (_, handle) in handles {
+            let _runtime = handle.runtime.lock().await;
+        }
+    }
+
+    pub fn resume_plugins(&self) {
+        for (_, handle) in self.handles() {
+            let _ = handle.generation_state.compare_exchange(
+                RUNTIME_DRAINING,
+                RUNTIME_ACTIVE,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+    }
+
+    pub fn retain_plugins_from(&self, current: &Self, plugin_ids: &HashSet<String>) -> Result<()> {
+        let current = current
+            .plugins
+            .read()
+            .expect("plugin registry lock poisoned");
+        let mut replacement = self.plugins.write().expect("plugin registry lock poisoned");
+        for (name, handle) in current.iter() {
+            let plugin_id = &handle
+                .info
+                .read()
+                .expect("plugin info lock poisoned")
+                .plugin_id;
+            if !plugin_ids.contains(plugin_id) {
+                continue;
+            }
+            if replacement.contains_key(name) {
+                return Err(Error::Internal(anyhow!(
+                    "duplicate retained Lua plugin name '{name}'"
+                )));
+            }
+            replacement.insert(name.clone(), handle.clone());
+        }
+        Ok(())
+    }
+
+    pub fn replace_plugins(&self, replacement: Self) -> Result<()> {
+        let plugins = replacement
+            .plugins
+            .into_inner()
+            .map_err(|_| Error::Internal(anyhow!("replacement plugin registry lock poisoned")))?;
+        let catalog = replacement
+            .catalog
+            .into_inner()
+            .map_err(|_| Error::Internal(anyhow!("replacement source catalog lock poisoned")))?;
+        let mut current = self.plugins.write().expect("plugin registry lock poisoned");
+        for handle in current.values() {
+            handle
+                .generation_state
+                .store(RUNTIME_INACTIVE, Ordering::Release);
+        }
+        *current = plugins;
+        for handle in current.values() {
+            handle
+                .generation_state
+                .store(RUNTIME_ACTIVE, Ordering::Release);
+        }
+        drop(current);
+        *self.catalog.write().expect("source catalog lock poisoned") = catalog;
+        Ok(())
     }
 
     pub fn load_plugin(
@@ -3092,9 +3293,11 @@ impl LuaPluginRegistry {
             .get(&name)
             .cloned()
             .ok_or_else(|| Error::SourcePluginNotFound(name.clone()))?;
+        let generation_state = runtime.generation_state.clone();
         let handle = Arc::new(PluginHandle {
             runtime: Arc::new(tokio::sync::Mutex::new(runtime)),
             info: StdRwLock::new(info),
+            generation_state,
         });
         let mut plugins = self.plugins.write().expect("plugin registry lock poisoned");
         if plugins.contains_key(&name) {
@@ -4350,12 +4553,17 @@ end
 M.discover = {}
 function M.discover.search(ctx, params)
     local parsed = ctx.json.parse('{"ok":true}')
+    ctx.http:set_cookie(
+        "https://example.com/",
+        "fixture=cookie; Domain=example.com; Path=/; Secure"
+    )
+    local slept = pcall(function() ctx.time.sleep(0) end)
     return {
         items = { {
             id = tostring(
                 ctx.remove_dir == nil and ctx.libraries == nil and ctx.fs == nil
                 and ctx.config ~= nil and ctx.json ~= nil
-                and ctx.base64 ~= nil and ctx.time ~= nil
+                and ctx.base64 ~= nil and ctx.time ~= nil and ctx.random ~= nil
                 and parsed.ok and ctx.json_parse('{"ok":true}').ok
                 and ctx.json.encode({1, 2}) == "[1,2]"
                 and ctx.json_encode({1, 2}) == "[1,2]"
@@ -4363,6 +4571,10 @@ function M.discover.search(ctx, params)
                 and ctx.base64_decode("d2FsbA==") == "wall"
                 and ctx.time.unix() > 1000000000
                 and ctx.time_unix() > 1000000000
+                and #ctx.random.hex(12) == 24
+                and slept
+                and ctx.url.decode_component("wall%7Cpaper") == "wall|paper"
+                and ctx.http:cookie("https://example.com/", "fixture") == "cookie"
             ),
             title = "",
             preview_url = "",
@@ -4873,6 +5085,114 @@ return M
         );
     }
 
+    #[test]
+    fn plugin_http_sessions_are_isolated_persisted_and_cleared_by_the_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_root = dir.path().join("state");
+        let state_store = crate::plugin::state_store::PluginStateStore::new(
+            state_root.clone(),
+            dir.path().to_path_buf(),
+        );
+        let script = |name: &str, cookie: &str| {
+            format!(
+                r#"
+local M = {{}}
+function M.info()
+    return {{
+        name = "{name}",
+        capabilities = {{ discover = {{ search = true }} }},
+        actions = {{ {{ id = "sign_out", kind = "invoke" }} }},
+    }}
+end
+M.discover = {{}}
+function M.discover.search(ctx, params)
+    if params.query == "set" then
+        ctx.http:set_cookie(
+            "https://example.com/",
+            "session={cookie}; Domain=example.com; Path=/; Secure"
+        )
+    elseif params.query == "fail" then
+        ctx.http:set_cookie(
+            "https://example.com/",
+            "session=failed; Domain=example.com; Path=/; Secure"
+        )
+        error("callback failed")
+    end
+    return {{
+        items = {{ {{
+            id = ctx.http:cookie("https://example.com/", "session") or "none",
+            title = "",
+            preview_url = "",
+            author = "",
+        }} }},
+        has_more = false,
+    }}
+end
+M.actions = {{}}
+function M.actions.status(ctx)
+    return {{ actions = {{ sign_out = {{ visible = true, enabled = true }} }} }}
+end
+function M.actions.invoke(ctx, action_id)
+    if action_id ~= "sign_out" then error("unexpected action") end
+    ctx.http:clear_cookies()
+end
+return M
+"#
+            )
+        };
+        let first_path = dir.path().join("first.lua");
+        let second_path = dir.path().join("second.lua");
+        std::fs::write(&first_path, script("first", "first")).unwrap();
+        std::fs::write(&second_path, script("second", "second")).unwrap();
+
+        let manager = SourceManager::with_probe_and_state_store(
+            Arc::new(AvFormatProbe::new()),
+            state_store.clone(),
+        )
+        .unwrap();
+        manager
+            .load_plugin(&first_path, "org.first", "1", ENTRY_VERSION_V3)
+            .unwrap();
+        manager
+            .load_plugin(&second_path, "org.second", "1", ENTRY_VERSION_V3)
+            .unwrap();
+        let first =
+            block_value(async { manager.call_discover("first", "set", "", 1, &[]).await }).unwrap();
+        assert_eq!(first.items[0].id, "first");
+        let second =
+            block_value(async { manager.call_discover("second", "", "", 1, &[]).await }).unwrap();
+        assert_eq!(second.items[0].id, "none");
+        assert!(state_root.join("org.first.cookies").is_file());
+        assert!(!state_root.join("org.first.state").exists());
+
+        let failed =
+            block_value(async { manager.call_discover("first", "fail", "", 1, &[]).await });
+        assert!(failed.is_err());
+
+        let restored = SourceManager::with_probe_and_state_store(
+            Arc::new(AvFormatProbe::new()),
+            state_store.clone(),
+        )
+        .unwrap();
+        restored
+            .load_plugin(&first_path, "org.first", "1", ENTRY_VERSION_V3)
+            .unwrap();
+        let after_restart =
+            block_value(async { restored.call_discover("first", "", "", 1, &[]).await }).unwrap();
+        assert_eq!(after_restart.items[0].id, "failed");
+
+        block_value(async { restored.invoke_action("first", "sign_out").await }).unwrap();
+        let signed_out =
+            SourceManager::with_probe_and_state_store(Arc::new(AvFormatProbe::new()), state_store)
+                .unwrap();
+        signed_out
+            .load_plugin(&first_path, "org.first", "1", ENTRY_VERSION_V3)
+            .unwrap();
+        let after_sign_out =
+            block_value(async { signed_out.call_discover("first", "", "", 1, &[]).await }).unwrap();
+        assert_eq!(after_sign_out.items[0].id, "none");
+    }
+
     #[tokio::test]
     async fn plugins_have_independent_runtime_locks() {
         let dir = tempfile::tempdir().unwrap();
@@ -4921,6 +5241,63 @@ return M
         .await
         .is_err());
         drop(first_guard);
+    }
+
+    #[test]
+    fn plugin_registry_replacement_keeps_current_runtime_until_candidate_is_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = |name: &str| {
+            format!(
+                r#"
+local M = {{}}
+function M.info()
+    return {{ name = "{name}", capabilities = {{ discover = {{ search = true }} }} }}
+end
+M.discover = {{}}
+function M.discover.search(ctx, params) return {{ items = {{}}, has_more = false }} end
+return M
+"#
+            )
+        };
+        let old_path = dir.path().join("old.lua");
+        let new_path = dir.path().join("new.lua");
+        let invalid_path = dir.path().join("invalid.lua");
+        std::fs::write(&old_path, script("old")).unwrap();
+        std::fs::write(&new_path, script("new")).unwrap();
+        std::fs::write(&invalid_path, "error('invalid replacement')").unwrap();
+
+        let current = SourceManager::new().unwrap();
+        current
+            .load_plugin(&old_path, "org.old", "1", ENTRY_VERSION_V3)
+            .unwrap();
+        block_value(current.suspend_plugins());
+        let invalid = SourceManager::new().unwrap();
+        assert!(invalid
+            .load_plugin(&invalid_path, "org.new", "1", ENTRY_VERSION_V3)
+            .is_err());
+        assert_eq!(current.discover_sources().unwrap()[0].name, "old");
+        assert!(block_value(async { current.call_discover("old", "", "", 1, &[]).await }).is_err());
+        current.resume_plugins();
+        assert!(block_value(async { current.call_discover("old", "", "", 1, &[]).await }).is_ok());
+
+        let replacement = SourceManager::new().unwrap();
+        replacement
+            .load_plugin(&new_path, "org.new", "1", ENTRY_VERSION_V3)
+            .unwrap();
+        replacement
+            .retain_plugins_from(&current, &HashSet::from(["org.old".to_string()]))
+            .unwrap();
+        block_value(current.suspend_plugins());
+        current.replace_plugins(replacement).unwrap();
+        assert_eq!(
+            current
+                .discover_sources()
+                .unwrap()
+                .into_iter()
+                .map(|source| source.name)
+                .collect::<Vec<_>>(),
+            vec!["new", "old"]
+        );
     }
 
     #[tokio::test]

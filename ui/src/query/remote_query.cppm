@@ -160,17 +160,15 @@ public:
     RemoteSubscriptionQuery(QObject* parent = nullptr);
 
     void             reload() override;
-    Q_INVOKABLE void refresh(const QString& sourceId, const QStringList& itemIds);
+    Q_INVOKABLE void refresh(const QString& sourceId, const QString& id);
     Q_INVOKABLE void setSubscribed(const QString& sourceId, const QString& id, bool subscribed);
 
-    Q_SIGNAL void statesLoaded(const QString& sourceId, const QVariantList& items,
-                               const QString& error);
+    Q_SIGNAL void stateLoaded(const QString& sourceId, const QString& id, int state,
+                              const QString& error);
     Q_SIGNAL void setFinished(const QString& sourceId, const QString& id, bool subscribed,
                               bool accepted, const QString& error);
 
 private:
-    void refreshBatch(const QString& sourceId, const QStringList& itemIds, quint64 generation);
-
     quint64 m_refresh_generation { 0 };
 };
 

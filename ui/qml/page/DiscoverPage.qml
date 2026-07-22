@@ -12,12 +12,12 @@ MD.Page {
 
     property var detailRow: null
     property int detailDownloadState: 0
+    property int detailSubscriptionState: 0
 
     property string sourceId: ""
     property var sortOptions: []
     property int sortIndex: 0
     property var discoverTweakSheet: null
-    property var subscriptionPreviousStates: ({})
 
     W.TweakState {
         id: discoverTweakState
@@ -109,6 +109,7 @@ MD.Page {
         if (sourceChanged) {
             detailRow = null;
             detailDownloadState = 0;
+            detailSubscriptionState = 0;
             detailsQuery.itemId = "";
         }
     }
@@ -123,13 +124,17 @@ MD.Page {
     function selectItem(index) {
         detailRow = searchQuery.model.get(index);
         detailDownloadState = root.sourceCapability(detailRow.sourceId) === 1 ? Number(detailRow.acquisitionState ?? 0) : 0;
+        detailSubscriptionState = 0;
         detailsQuery.sourceId = detailRow.sourceId;
         detailsQuery.itemId = detailRow.itemId;
+        if (root.sourceCapability(detailRow.sourceId) === 2)
+            refreshDetailSubscription();
     }
 
     function closeDetail() {
         detailRow = null;
         detailDownloadState = 0;
+        detailSubscriptionState = 0;
         detailsQuery.itemId = "";
         m_grid.currentIndex = -1;
     }
@@ -154,13 +159,17 @@ MD.Page {
             return;
         const sourceId = root.detailRow.sourceId;
         const itemId = root.detailRow.itemId;
-        const key = sourceId + "\n" + itemId;
-        const pending = Object.assign({}, root.subscriptionPreviousStates);
-        pending[key] = Number(root.detailRow.acquisitionState ?? 0);
-        root.subscriptionPreviousStates = pending;
+        root.detailSubscriptionState = 3;
         root.detailRow.acquisitionState = 3;
         searchQuery.model.setAcquisitionState(sourceId, itemId, 3);
         subscriptionQuery.setSubscribed(sourceId, itemId, subscribed);
+    }
+
+    function refreshDetailSubscription() {
+        if (!root.detailRow || root.sourceCapability(root.detailRow.sourceId) !== 2)
+            return;
+        root.detailSubscriptionState = 3;
+        subscriptionQuery.refresh(root.detailRow.sourceId, root.detailRow.itemId);
     }
 
     function formatBytes(bytes) {
@@ -318,10 +327,6 @@ MD.Page {
 
     W.RemoteSearchQuery {
         id: searchQuery
-        onStateChanged: {
-            if (root.sourceCapability(root.sourceId) === 2)
-                subscriptionQuery.refresh(root.sourceId, model.itemIds());
-        }
     }
 
     W.RemoteFilterDialog {
@@ -361,34 +366,31 @@ MD.Page {
 
     W.RemoteSubscriptionQuery {
         id: subscriptionQuery
-        function onStatesLoaded(sourceId, items, error) {
-            if (sourceId !== root.sourceId)
+    }
+
+    Connections {
+        target: subscriptionQuery
+        function onStateLoaded(sourceId, id, state, error) {
+            const matches = Boolean(root.detailRow)
+                    && String(root.detailRow.sourceId) === String(sourceId)
+                    && String(root.detailRow.itemId) === String(id);
+            if (!matches)
                 return;
-            for (const item of items) {
-                const key = sourceId + "\n" + item.id;
-                if (key in root.subscriptionPreviousStates)
-                    continue;
-                searchQuery.model.setAcquisitionState(sourceId, item.id, item.state);
-                if (root.detailRow && root.detailRow.sourceId === sourceId && root.detailRow.itemId === item.id) {
-                    root.detailRow.acquisitionState = item.state;
-                }
-            }
+            const normalizedState = Number(state);
+            searchQuery.model.setAcquisitionState(sourceId, id, normalizedState);
+            root.detailRow.acquisitionState = normalizedState;
+            root.detailSubscriptionState = normalizedState;
             if (error.length > 0)
                 W.Action.toast(qsTr("Couldn't load subscription status: ") + error);
         }
         function onSetFinished(sourceId, id, subscribed, accepted, error) {
-            const key = sourceId + "\n" + id;
-            const previous = Number(root.subscriptionPreviousStates[key] ?? 0);
-            const state = accepted ? 3 : previous;
-            const pending = Object.assign({}, root.subscriptionPreviousStates);
-            delete pending[key];
-            root.subscriptionPreviousStates = pending;
+            const state = accepted ? (subscribed ? 2 : 1) : (subscribed ? 1 : 2);
             searchQuery.model.setAcquisitionState(sourceId, id, state);
             if (root.detailRow && root.detailRow.sourceId === sourceId && root.detailRow.itemId === id) {
                 root.detailRow.acquisitionState = state;
+                root.detailSubscriptionState = state;
             }
             if (accepted) {
-                subscriptionQuery.refresh(sourceId, [id]);
                 const message = subscribed ? qsTr("Subscription request accepted") : qsTr("Unsubscribe request accepted");
                 const hint = root.sourceRemoteHint(sourceId);
                 W.Action.toast(hint.length > 0 ? message + "\n" + hint : message);
@@ -429,8 +431,9 @@ MD.Page {
         }
         function onPluginStateChanged() {
             availabilityQuery.reload();
-            if (root.sourceCapability(root.sourceId) === 2)
-                subscriptionQuery.refresh(root.sourceId, searchQuery.model.itemIds());
+            if (root.sourceId.length > 0)
+                searchQuery.reload();
+            root.refreshDetailSubscription();
         }
     }
 
@@ -519,7 +522,7 @@ MD.Page {
 
                     MD.ActionToolBar {
                         Layout.fillWidth: true
-                        actions: [tweakAction, filterAction, manageAction, refreshAction]
+                        actions: [manageAction, tweakAction, filterAction, refreshAction]
                     }
                 }
 
@@ -848,39 +851,20 @@ MD.Page {
                     }
                 }
 
-                MD.Label {
-                    visible: root.sourceCapability(root.sourceId) === 2
-                    Layout.fillWidth: true
-                    Layout.leftMargin: 16
-                    Layout.rightMargin: 16
-                    horizontalAlignment: Text.AlignHCenter
-                    color: MD.Token.color.on_surface_variant
-                    text: {
-                        const state = root.detailRow ? Number(root.detailRow.acquisitionState ?? 0) : 0;
-                        switch (state) {
-                        case 1:
-                            return qsTr("Not subscribed");
-                        case 2:
-                            return qsTr("Subscribed");
-                        case 3:
-                            return qsTr("Updating subscription…");
-                        default:
-                            return qsTr("Subscription status unknown");
-                        }
-                    }
-                }
-
                 MD.Button {
                     visible: root.sourceCapability(root.sourceId) === 2
                     Layout.fillWidth: true
                     Layout.leftMargin: 16
                     Layout.rightMargin: 16
                     Layout.bottomMargin: 16
-                    readonly property int subscriptionState: root.detailRow ? Number(root.detailRow.acquisitionState ?? 0) : 0
-                    mdState.type: subscriptionState === 2 ? MD.Enum.BtFilledTonal : MD.Enum.BtFilled
-                    enabled: subscriptionState !== 3
+                    mdState.type: root.detailSubscriptionState === 2 ? MD.Enum.BtFilledTonal : MD.Enum.BtFilled
+                    enabled: root.detailSubscriptionState !== 3
                     text: {
-                        switch (subscriptionState) {
+                        switch (root.detailSubscriptionState) {
+                        case 0:
+                            return qsTr("Retry");
+                        case 1:
+                            return qsTr("Subscribe");
                         case 2:
                             return qsTr("Unsubscribe");
                         case 3:
@@ -889,19 +873,12 @@ MD.Page {
                             return qsTr("Subscribe");
                         }
                     }
-                    onClicked: root.setDetailSubscription(subscriptionState !== 2)
-                }
-
-                MD.Button {
-                    readonly property int subscriptionState: root.detailRow ? Number(root.detailRow.acquisitionState ?? 0) : 0
-                    visible: root.sourceCapability(root.sourceId) === 2 && subscriptionState === 0
-                    Layout.fillWidth: true
-                    Layout.leftMargin: 16
-                    Layout.rightMargin: 16
-                    Layout.bottomMargin: 16
-                    mdState.type: MD.Enum.BtFilledTonal
-                    text: qsTr("Unsubscribe")
-                    onClicked: root.setDetailSubscription(false)
+                    onClicked: {
+                        if (root.detailSubscriptionState === 0)
+                            root.refreshDetailSubscription();
+                        else
+                            root.setDetailSubscription(root.detailSubscriptionState === 1);
+                    }
                 }
 
                 MD.Label {
