@@ -24,6 +24,8 @@ import waywallen.bridge;
 namespace
 {
 
+using namespace rstd::literals;
+
 struct Options {
     std::string ipc_path;
     std::string image_path;
@@ -63,6 +65,10 @@ std::string to_std_string(const rstd::string::String& value) {
     return rstd::cppstd::to_string(value);
 }
 
+auto as_rstd_str(std::string_view value) -> rstd::ref<rstd::str> {
+    return rstd::move(rstd::cppstd::as_str(value)).unwrap();
+}
+
 void write_cli_output(rstd::ref<rstd::str> text, rstd::argparse::OutputTarget::Tag target) {
     FILE* stream = target == rstd::argparse::OutputTarget::Tag::Stderr ? stderr : stdout;
     std::fwrite(text.data(), 1, text.size().to_primitive(), stream);
@@ -72,7 +78,10 @@ rstd::prelude::Vec<rstd::ffi::OsString> cli_argv(int argc, char** argv) {
     auto values =
         rstd::prelude::Vec<rstd::ffi::OsString>::with_capacity(static_cast<rstd::usize>(argc));
     for (int i = 0; i < argc; ++i) {
-        values.push(rstd::ffi::OsString::from(rstd::ref<rstd::ffi::OsStr>(argv[i])));
+        auto bytes = rstd::slice<rstd::u8>::from_raw_parts(
+            reinterpret_cast<const rstd::byte*>(argv[i]), rstd::usize(std::strlen(argv[i])));
+        values.push(rstd::ffi::OsString::from(
+            rstd::ref<rstd::ffi::OsStr>::from_encoded_bytes_unchecked(bytes)));
     }
     return values;
 }
@@ -133,30 +142,30 @@ bool parse_color_wire(const char* raw, ClearColor& out) {
 ParseArgsResult parse_args(int argc, char** argv) {
     using namespace rstd::argparse;
 
-    auto command = Command::make("waywallen-image-renderer");
-    command.about("Render image wallpapers for waywallen");
-    auto ipc  = command.add_arg(Arg<rstd::string::String>::value("ipc", string_parser())
-                                    .long_name("ipc")
-                                    .value_name("SOCKET")
-                                    .help("Connect to the renderer IPC socket"));
-    auto path = command.add_arg(Arg<rstd::string::String>::value("path", string_parser())
-                                    .long_name("path")
-                                    .value_name("IMAGE")
-                                    .help("Image wallpaper path"));
-    command.add_arg(Arg<bool>::flag("decode-only")
-                        .long_name("decode-only")
-                        .help("Decode the image without starting the renderer"));
-    command.add_arg(Arg<bool>::flag("vulkan-probe")
-                        .long_name("vulkan-probe")
-                        .help("Probe Vulkan renderer initialization"));
-    command.add_arg(Arg<bool>::flag("print-caps")
-                        .long_name("print-caps")
-                        .help("Print renderer capabilities as JSON"));
+    auto command = Command::make("waywallen-image-renderer"_str);
+    command.about("Render image wallpapers for waywallen"_str);
+    auto ipc  = command.add_arg(Arg<rstd::string::String>::value("ipc"_str, string_parser())
+                                    .long_name("ipc"_str)
+                                    .value_name("SOCKET"_str)
+                                    .help("Connect to the renderer IPC socket"_str));
+    auto path = command.add_arg(Arg<rstd::string::String>::value("path"_str, string_parser())
+                                    .long_name("path"_str)
+                                    .value_name("IMAGE"_str)
+                                    .help("Image wallpaper path"_str));
+    command.add_arg(Arg<bool>::flag("decode-only"_str)
+                        .long_name("decode-only"_str)
+                        .help("Decode the image without starting the renderer"_str));
+    command.add_arg(Arg<bool>::flag("vulkan-probe"_str)
+                        .long_name("vulkan-probe"_str)
+                        .help("Probe Vulkan renderer initialization"_str));
+    command.add_arg(Arg<bool>::flag("print-caps"_str)
+                        .long_name("print-caps"_str)
+                        .help("Print renderer capabilities as JSON"_str));
     auto render_node =
-        command.add_arg(Arg<rstd::string::String>::value("render-node", string_parser())
-                            .long_name("render-node")
-                            .value_name("DEVICE")
-                            .help("Use a specific DRM render node"));
+        command.add_arg(Arg<rstd::string::String>::value("render-node"_str, string_parser())
+                            .long_name("render-node"_str)
+                            .value_name("DEVICE"_str)
+                            .help("Use a specific DRM render node"_str));
 
     auto built = std::move(command).build();
     if (built.is_err()) {
@@ -192,9 +201,9 @@ ParseArgsResult parse_args(int argc, char** argv) {
     if (auto value = get_arg(*matches, render_node); value.is_some()) {
         options.render_node = to_std_string(**value);
     }
-    options.decode_only  = matches->contains("decode-only");
-    options.vulkan_probe = matches->contains("vulkan-probe");
-    options.print_caps   = matches->contains("print-caps");
+    options.decode_only  = matches->contains("decode-only"_str);
+    options.vulkan_probe = matches->contains("vulkan-probe"_str);
+    options.print_caps   = matches->contains("print-caps"_str);
     return { .options = std::move(options), .should_run = true };
 }
 
@@ -398,15 +407,17 @@ void set_scheme_color(HostState& host, const char* value, bool publish) {
 
 void apply_user_properties(HostState& host, const char* json) {
     if (! json || ! *json) return;
+    auto bytes = rstd::slice<rstd::u8>::from_raw_parts(reinterpret_cast<const rstd::byte*>(json),
+                                                       rstd::usize(std::strlen(json)));
     auto parsed_result =
-        rstd::json::from_str(json, rstd::json::ParseOptions { .allow_comments = true });
+        rstd::json::from_slice(bytes, rstd::json::ParseOptions { .allow_comments = true });
     if (parsed_result.is_err()) return;
     auto parsed = parsed_result.unwrap();
     if (! parsed.is_object()) {
         rstd_warn("waywallen-image-renderer: init.user_properties is not an object; ignored");
         return;
     }
-    auto value = parsed.get(kSchemeColorKey);
+    auto value = parsed.get("waywallen.scheme_color"_str);
     if (value.is_none()) return;
     if ((**value).is_string()) {
         const auto text = rstd::cppstd::to_string(*(**value).as_str());
@@ -827,7 +838,7 @@ int run(int argc, char** argv) {
     auto producer_res = opt.render_node.empty()
                             ? wavsen::video::Producer::create(opt.width, opt.height)
                             : wavsen::video::Producer::create_with_render_node(
-                                  opt.width, opt.height, opt.render_node.c_str());
+                                  opt.width, opt.height, as_rstd_str(opt.render_node));
     if (producer_res.is_err()) {
         die("vk_producer: " + to_std_string(std::move(producer_res).unwrap_err().message));
     }

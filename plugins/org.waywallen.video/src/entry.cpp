@@ -23,6 +23,8 @@ import waywallen.bridge;
 namespace
 {
 
+using namespace rstd::literals;
+
 struct Options {
     std::string ipc_path;
     std::string video_path;
@@ -59,6 +61,10 @@ std::string to_std_string(const rstd::string::String& value) {
     return rstd::cppstd::to_string(value);
 }
 
+auto as_rstd_str(std::string_view value) -> rstd::ref<rstd::str> {
+    return rstd::move(rstd::cppstd::as_str(value)).unwrap();
+}
+
 void write_cli_output(rstd::ref<rstd::str> text, rstd::argparse::OutputTarget::Tag target) {
     FILE* stream = target == rstd::argparse::OutputTarget::Tag::Stderr ? stderr : stdout;
     std::fwrite(text.data(), 1, text.size().to_primitive(), stream);
@@ -68,7 +74,10 @@ rstd::prelude::Vec<rstd::ffi::OsString> cli_argv(int argc, char** argv) {
     auto values =
         rstd::prelude::Vec<rstd::ffi::OsString>::with_capacity(static_cast<rstd::usize>(argc));
     for (int i = 0; i < argc; ++i) {
-        values.push(rstd::ffi::OsString::from(rstd::ref<rstd::ffi::OsStr>(argv[i])));
+        auto bytes = rstd::slice<rstd::u8>::from_raw_parts(
+            reinterpret_cast<const rstd::byte*>(argv[i]), rstd::usize(std::strlen(argv[i])));
+        values.push(rstd::ffi::OsString::from(
+            rstd::ref<rstd::ffi::OsStr>::from_encoded_bytes_unchecked(bytes)));
     }
     return values;
 }
@@ -150,31 +159,33 @@ bool parse_bool_wire(const char* raw, bool& out) {
 ParseArgsResult parse_args(int argc, char** argv) {
     using namespace rstd::argparse;
 
-    auto command = Command::make("waywallen-video-renderer");
-    command.about("Render video wallpapers for waywallen");
-    auto ipc  = command.add_arg(Arg<rstd::string::String>::value("ipc", string_parser())
-                                    .long_name("ipc")
-                                    .value_name("SOCKET")
-                                    .help("Connect to the renderer IPC socket"));
-    auto path = command.add_arg(Arg<rstd::string::String>::value("path", string_parser())
-                                    .long_name("path")
-                                    .value_name("VIDEO")
-                                    .help("Video wallpaper path"));
-    command.add_arg(
-        Arg<bool>::flag("no-loop").long_name("no-loop").help("Disable playback looping"));
+    auto command = Command::make("waywallen-video-renderer"_str);
+    command.about("Render video wallpapers for waywallen"_str);
+    auto ipc  = command.add_arg(Arg<rstd::string::String>::value("ipc"_str, string_parser())
+                                    .long_name("ipc"_str)
+                                    .value_name("SOCKET"_str)
+                                    .help("Connect to the renderer IPC socket"_str));
+    auto path = command.add_arg(Arg<rstd::string::String>::value("path"_str, string_parser())
+                                    .long_name("path"_str)
+                                    .value_name("VIDEO"_str)
+                                    .help("Video wallpaper path"_str));
+    command.add_arg(Arg<bool>::flag("no-loop"_str)
+                        .long_name("no-loop"_str)
+                        .help("Disable playback looping"_str));
     auto render_node =
-        command.add_arg(Arg<rstd::string::String>::value("render-node", string_parser())
-                            .long_name("render-node")
-                            .value_name("DEVICE")
-                            .help("Use a specific DRM render node"));
-    auto hwdec    = command.add_arg(Arg<rstd::string::String>::value("hwdec", string_parser())
-                                        .long_name("hwdec")
-                                        .value_name("MODE")
-                                        .help("Select the hardware decoding mode"));
-    auto selftest = command.add_arg(Arg<rstd::string::String>::value("selftest", string_parser())
-                                        .long_name("selftest")
-                                        .value_name("VIDEO")
-                                        .help("Run the standalone decoder self-test"));
+        command.add_arg(Arg<rstd::string::String>::value("render-node"_str, string_parser())
+                            .long_name("render-node"_str)
+                            .value_name("DEVICE"_str)
+                            .help("Use a specific DRM render node"_str));
+    auto hwdec = command.add_arg(Arg<rstd::string::String>::value("hwdec"_str, string_parser())
+                                     .long_name("hwdec"_str)
+                                     .value_name("MODE"_str)
+                                     .help("Select the hardware decoding mode"_str));
+    auto selftest =
+        command.add_arg(Arg<rstd::string::String>::value("selftest"_str, string_parser())
+                            .long_name("selftest"_str)
+                            .value_name("VIDEO"_str)
+                            .help("Run the standalone decoder self-test"_str));
 
     auto built = std::move(command).build();
     if (built.is_err()) {
@@ -217,7 +228,7 @@ ParseArgsResult parse_args(int argc, char** argv) {
         options.selftest   = true;
         options.video_path = to_std_string(**value);
     }
-    options.loop_file = ! matches->contains("no-loop");
+    options.loop_file = ! matches->contains("no-loop"_str);
     return { .options = std::move(options), .should_run = true };
 }
 
@@ -345,15 +356,17 @@ void set_scheme_color(HostState& host, const char* value, bool publish) {
 
 void apply_user_properties(HostState& host, const char* json) {
     if (! json || ! *json) return;
+    auto bytes = rstd::slice<rstd::u8>::from_raw_parts(reinterpret_cast<const rstd::byte*>(json),
+                                                       rstd::usize(std::strlen(json)));
     auto parsed_result =
-        rstd::json::from_str(json, rstd::json::ParseOptions { .allow_comments = true });
+        rstd::json::from_slice(bytes, rstd::json::ParseOptions { .allow_comments = true });
     if (parsed_result.is_err()) return;
     auto parsed = parsed_result.unwrap();
     if (! parsed.is_object()) {
         rstd_warn("waywallen-video-renderer: init.user_properties is not an object; ignored");
         return;
     }
-    auto scheme = parsed.get(kSchemeColorKey);
+    auto scheme = parsed.get("waywallen.scheme_color"_str);
     if (scheme.is_some()) {
         if (! (**scheme).is_string()) {
             rstd_warn("waywallen-video-renderer: {} is not a string; ignored",
@@ -364,7 +377,7 @@ void apply_user_properties(HostState& host, const char* json) {
         }
     }
 
-    auto audio = parsed.get(kEnableAudioKey);
+    auto audio = parsed.get("waywallen.enable_audio"_str);
     if (audio.is_none()) return;
     const auto& audio_value = **audio;
     bool        enabled     = true;
@@ -616,8 +629,8 @@ int run_selftest(const Options& opt) {
     uint32_t even_w = opt.width + (opt.width & 1u);
     uint32_t even_h = opt.height + (opt.height & 1u);
 
-    auto producer_res =
-        wavsen::video::Producer::create_with_render_node(even_w, even_h, opt.render_node.c_str());
+    auto producer_res = wavsen::video::Producer::create_with_render_node(
+        even_w, even_h, as_rstd_str(opt.render_node));
     if (producer_res.is_err()) {
         rstd_error("selftest vk: {}", std::move(producer_res).unwrap_err().message.as_str());
         return 1;
@@ -639,15 +652,14 @@ int run_selftest(const Options& opt) {
 
     wavsen::video::OpenOpts dec_opts {
         parse_hwdec(opt.hwdec.empty() ? nullptr : opt.hwdec.c_str()),
-        rstd::string::String::make(opt.render_node.c_str()),
+        rstd::string::String::make(as_rstd_str(opt.render_node)),
     };
-    auto decoder_res =
-        wavsen::video::VideoDecoder::open_with_vk(rstd::cppstd::as_str(opt.video_path),
-                                                  even_w,
-                                                  even_h,
-                                                  /*loop=*/false,
-                                                  *producer,
-                                                  dec_opts);
+    auto decoder_res = wavsen::video::VideoDecoder::open_with_vk(as_rstd_str(opt.video_path),
+                                                                 even_w,
+                                                                 even_h,
+                                                                 /*loop=*/false,
+                                                                 *producer,
+                                                                 dec_opts);
     if (decoder_res.is_err()) {
         rstd_error("selftest decode: {}", std::move(decoder_res).unwrap_err().message.as_str());
         return 1;
@@ -916,8 +928,7 @@ int run(int argc, char** argv) {
      * main, not inside VideoDecoder. */
     uint32_t native_w = 0, native_h = 0;
     {
-        auto probe_res =
-            wavsen::video::VideoDecoder::probe_native(rstd::cppstd::as_str(opt.video_path));
+        auto probe_res = wavsen::video::VideoDecoder::probe_native(as_rstd_str(opt.video_path));
         if (probe_res.is_err()) {
             die("probe_native " + opt.video_path + ": " +
                 to_std_string(std::move(probe_res).unwrap_err().message));
@@ -936,8 +947,8 @@ int run(int argc, char** argv) {
     uint32_t even_h = opt.height + (opt.height & 1u);
 
     /* --- Vulkan device first, so the decoder can share it --- */
-    auto producer_res =
-        wavsen::video::Producer::create_with_render_node(even_w, even_h, opt.render_node.c_str());
+    auto producer_res = wavsen::video::Producer::create_with_render_node(
+        even_w, even_h, as_rstd_str(opt.render_node));
     if (producer_res.is_err()) {
         die("vk producer: " + to_std_string(std::move(producer_res).unwrap_err().message));
     }
@@ -948,10 +959,10 @@ int run(int argc, char** argv) {
      *   per-frame mapping failure we fall through to sw via the helper. */
     wavsen::video::OpenOpts dec_opts {
         hwaccel,
-        rstd::string::String::make(opt.render_node.c_str()),
+        rstd::string::String::make(as_rstd_str(opt.render_node)),
     };
     auto decoder_res = wavsen::video::VideoDecoder::open_with_vk(
-        rstd::cppstd::as_str(opt.video_path), even_w, even_h, opt.loop_file, *producer, dec_opts);
+        as_rstd_str(opt.video_path), even_w, even_h, opt.loop_file, *producer, dec_opts);
     if (decoder_res.is_err()) {
         die("decode " + opt.video_path + ": " +
             to_std_string(std::move(decoder_res).unwrap_err().message));
@@ -968,8 +979,8 @@ int run(int argc, char** argv) {
      *   back to wall-clock pacing). */
     std::unique_ptr<wavsen::audio::AvPlayer> av_player;
     {
-        auto audio_file_res = wavsen::audio::open_file(
-            rstd::ref<rstd::path::Path>(rstd::cppstd::as_str(opt.video_path)));
+        auto audio_file_res =
+            wavsen::audio::open_file(rstd::ref<rstd::path::Path>(as_rstd_str(opt.video_path)));
         if (audio_file_res.is_err()) {
             rstd_warn("waywallen-video-renderer: audio file open failed");
         } else {
@@ -1182,10 +1193,10 @@ int run(int argc, char** argv) {
                               hwdec_label(new_h));
                     (void)decoder.take();
                     wavsen::video::OpenOpts new_opts {
-                        new_h, rstd::string::String::make(opt.render_node.c_str())
+                        new_h, rstd::string::String::make(as_rstd_str(opt.render_node))
                     };
                     auto re_res = wavsen::video::VideoDecoder::open_with_vk(
-                        rstd::cppstd::as_str(opt.video_path),
+                        as_rstd_str(opt.video_path),
                         even_w,
                         even_h,
                         host.loop_value.load(std::memory_order_acquire),

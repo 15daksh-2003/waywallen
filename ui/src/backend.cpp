@@ -23,7 +23,7 @@ namespace detail
 
 using ResponseHandle = rstd::async::CompletionHandle<proto::Response, QString>;
 
-auto as_byte_array_view(slice<rstd::byte> bytes) -> QByteArrayView {
+auto as_byte_array_view(slice<rstd::u8> bytes) -> QByteArrayView {
     return { reinterpret_cast<const char*>(bytes.as_raw_ptr()),
              static_cast<qsizetype>(bytes.len().to_primitive()) };
 }
@@ -51,7 +51,7 @@ public:
             Q_EMIT m_backend->transportDisconnected();
         });
         m_client->set_on_message_callback(
-            [this, cache = QByteArray {}](slice<rstd::byte> bytes, bool last) mutable {
+            [this, cache = QByteArray {}](slice<rstd::u8> bytes, bool last) mutable {
                 auto chunk = as_byte_array_view(bytes);
                 if (! last) {
                     cache.append(chunk);
@@ -104,7 +104,7 @@ public:
     void send_untracked(proto::Request request) {
         if (! m_client || ! m_client->is_connected()) return;
         auto bytes = request.serialize(m_serializer.get());
-        m_client->send(slice<rstd::byte>::from_raw_parts(
+        m_client->send(slice<rstd::u8>::from_raw_parts(
             reinterpret_cast<const rstd::byte*>(bytes.constData()),
             static_cast<usize>(bytes.size())));
     }
