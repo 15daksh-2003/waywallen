@@ -369,6 +369,45 @@ void WallpaperRemoveQuery::remove(const QStringList& wallpaperIds) {
 }
 
 // ---------------------------------------------------------------------------
+// WallpaperUnsubscribeQuery
+// ---------------------------------------------------------------------------
+
+WallpaperUnsubscribeQuery::WallpaperUnsubscribeQuery(QObject* parent): Query(parent) {}
+
+auto WallpaperUnsubscribeQuery::wallpaperId() const -> const QString& { return m_wallpaper_id; }
+void WallpaperUnsubscribeQuery::setWallpaperId(const QString& v) {
+    if (m_wallpaper_id != v) {
+        m_wallpaper_id = v;
+        Q_EMIT wallpaperIdChanged();
+    }
+}
+
+void WallpaperUnsubscribeQuery::reload() {
+    const auto wallpaper_id = m_wallpaper_id;
+    if (wallpaper_id.isEmpty()) return;
+
+    setStatus(Status::Querying);
+    auto backend = App::instance()->backend();
+
+    auto req   = proto::Request {};
+    auto inner = proto::WallpaperUnsubscribeRequest {};
+    inner.setWallpaperId(wallpaper_id);
+    req.setWallpaperUnsubscribe(std::move(inner));
+
+    auto self = QWatcher { this };
+    spawn([self, backend, req = std::move(req), wallpaper_id]() mutable -> task<void> {
+        auto result = co_await backend->send(std::move(req));
+        if (! co_await QAsyncResult::qexecutor()) co_return;
+        if (! self) co_return;
+        if (self->m_wallpaper_id != wallpaper_id) co_return;
+        self->inspect_set(result, [self, wallpaper_id](const proto::Response&) {
+            Q_EMIT self->unsubscribed(wallpaper_id);
+        });
+        co_return;
+    });
+}
+
+// ---------------------------------------------------------------------------
 // WallpaperPropertySetQuery
 // ---------------------------------------------------------------------------
 

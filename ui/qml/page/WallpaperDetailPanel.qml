@@ -11,6 +11,9 @@ Item {
     property string wallpaperId: ""
     property var fallbackWallpaper: null
     property bool showApply: true
+    property bool unsubscribeAccepted: false
+
+    onWallpaperIdChanged: unsubscribeAccepted = false
 
     signal back
 
@@ -124,6 +127,11 @@ Item {
         forwardError: false
         wallpaperId: root.wallpaperId
     }
+    W.WallpaperUnsubscribeQuery {
+        id: unsubscribeQuery
+        forwardError: false
+        wallpaperId: root.wallpaperId
+    }
 
     Connections {
         target: applyQuery
@@ -160,6 +168,22 @@ Item {
                 const message = removeQuery.error && removeQuery.error.length > 0
                     ? removeQuery.error
                     : qsTr("Remove failed");
+                W.Action.toast(message, 6000, 1, null);
+            }
+        }
+    }
+
+    Connections {
+        target: unsubscribeQuery
+        function onUnsubscribed() {
+            root.unsubscribeAccepted = true;
+            W.Action.toast(qsTr("Unsubscribed"));
+        }
+        function onStatusChanged() {
+            if (unsubscribeQuery.status === 3) {
+                const message = unsubscribeQuery.error && unsubscribeQuery.error.length > 0
+                    ? unsubscribeQuery.error
+                    : qsTr("Unsubscribe failed");
                 W.Action.toast(message, 6000, 1, null);
             }
         }
@@ -319,13 +343,30 @@ Item {
         }
     }
 
+    MD.Action {
+        id: unsubscribeAction
+        text: root.unsubscribeAccepted ? qsTr("Unsubscribed") : qsTr("Unsubscribe")
+        icon.name: "unsubscribe"
+        busy: unsubscribeQuery.querying
+        enabled: (root.wp?.supportsItemUnsubscribe ?? false)
+                 && !root.unsubscribeAccepted
+                 && (root.wp?.id_proto ?? "") !== ""
+        onTriggered: {
+            if (busy)
+                return;
+            unsubscribeQuery.reload();
+        }
+    }
+
     readonly property MD.Action activeApplyAction:
         ((root.wp?.wpType ?? "") === "image"
             && (W.App.displayManager.displays || []).length === 0)
         ? applyViaPortalAction : applyAction
 
     readonly property list<MD.Action> detailActions:
-        (root.wp?.supportsItemRemove ?? false)
+        (root.wp?.supportsItemUnsubscribe ?? false)
+        ? [unsubscribeAction, openContainerFolderAction, infoAction, closeAction]
+        : (root.wp?.supportsItemRemove ?? false)
         ? [removeAction, openContainerFolderAction, infoAction, closeAction]
         : [openContainerFolderAction, infoAction, closeAction]
 

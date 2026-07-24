@@ -109,6 +109,10 @@ pub enum Error {
     #[error("source_plugin '{plugin}'.remove() failed: {message}")]
     SourceItemRemoveFailed { plugin: String, message: String },
 
+    /// Scanned item does not map to a subscription owned by its source.
+    #[error("source plugin '{0}' does not support item unsubscribe")]
+    SourceItemUnsubscribeUnsupported(String),
+
     /// Installing a plugin `.zip` failed (bad path, unreadable archive,
     /// unsafe entry, or no `plugin.toml`).
     #[error("plugin install failed: {0}")]
@@ -216,6 +220,7 @@ impl Error {
             Self::SourceExtrasFailed { .. } => E::SourceExtrasFailed,
             Self::SourceItemRemoveUnsupported(_) => E::SourceItemRemoveUnsupported,
             Self::SourceItemRemoveFailed { .. } => E::SourceItemRemoveFailed,
+            Self::SourceItemUnsubscribeUnsupported(_) => E::SourceItemUnsubscribeUnsupported,
             Self::PluginInstallFailed(_) => E::PluginInstallFailed,
             Self::PluginDeleteFailed(_) => E::PluginDeleteFailed,
             // Discover types map onto generic codes; the discover request
@@ -248,9 +253,10 @@ impl Error {
             | E::SettingsValidationFailed
             | E::WallpaperTypeNotSupported
             | E::PlaylistInvalid => S::InvalidArgument,
-            E::FailedPrecondition | E::NoDisplayRegistered | E::SourceItemRemoveUnsupported => {
-                S::FailedPrecondition
-            }
+            E::FailedPrecondition
+            | E::NoDisplayRegistered
+            | E::SourceItemRemoveUnsupported
+            | E::SourceItemUnsubscribeUnsupported => S::FailedPrecondition,
             E::WallpaperNotFound
             | E::RendererNotFound
             | E::SourcePluginNotFound

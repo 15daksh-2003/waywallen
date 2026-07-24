@@ -4056,6 +4056,23 @@ impl LuaPluginRegistry {
         })
     }
 
+    pub fn supports_item_unsubscribe(&self, entry: &WallpaperEntry) -> bool {
+        if entry.external_id.as_deref().is_none_or(str::is_empty) {
+            return false;
+        }
+        self.handle(&entry.plugin_name).ok().is_some_and(|handle| {
+            handle
+                .info
+                .read()
+                .expect("plugin info lock poisoned")
+                .capabilities
+                .discover
+                .as_ref()
+                .and_then(|discover| discover.remote)
+                == Some(RemoteCapability::Subscription)
+        })
+    }
+
     pub async fn remove_item(
         &self,
         plugin_name: &str,
@@ -5524,6 +5541,30 @@ return M
         manager
             .load_plugin(&entry, "org.test", "1", ENTRY_VERSION_V3)
             .unwrap();
+
+        let subscription_entry = WallpaperEntry {
+            item_id: 1,
+            name: "Workshop item".to_string(),
+            wp_type: "image".to_string(),
+            resource: "item.jpg".to_string(),
+            preview: None,
+            description: None,
+            tags: Vec::new(),
+            external_id: Some("item".to_string()),
+            size: None,
+            width: None,
+            height: None,
+            content_rating: None,
+            modified_at: None,
+            create_at: 0,
+            plugin_name: "separate_flows".to_string(),
+            library_root: String::new(),
+        };
+        assert!(manager.supports_item_unsubscribe(&subscription_entry));
+        assert!(!manager.supports_item_unsubscribe(&WallpaperEntry {
+            external_id: None,
+            ..subscription_entry
+        }));
 
         block_value(async {
             manager

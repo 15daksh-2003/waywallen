@@ -88,6 +88,7 @@ message Request {
     SubscriptionSetRequest    subscription_set = 71;
     QrLoginCancelRequest      qr_login_cancel = 72;
     RemoteSettingsPatchRequest remote_settings_patch = 73;
+    WallpaperUnsubscribeRequest wallpaper_unsubscribe = 74;
   }
 }
 
@@ -163,6 +164,7 @@ message Response {
     SubscriptionSetResponse    subscription_set = 71;
     QrLoginCancelResponse      qr_login_cancel = 72;
     Empty                      remote_settings_patch = 73;
+    WallpaperUnsubscribeResponse wallpaper_unsubscribe = 74;
   }
 }
 
@@ -210,6 +212,7 @@ enum ErrorCode {
   ERROR_CODE_PLUGIN_DELETE_FAILED = 207;
   ERROR_CODE_SOURCE_ITEM_REMOVE_UNSUPPORTED = 208;
   ERROR_CODE_SOURCE_ITEM_REMOVE_FAILED = 209;
+  ERROR_CODE_SOURCE_ITEM_UNSUBSCRIBE_UNSUPPORTED = 210;
 
   // Settings
   ERROR_CODE_SETTINGS_VALIDATION_FAILED = 300;
@@ -385,6 +388,9 @@ message WallpaperEntry {
   // True when the source plugin can remove this item from its backing
   // storage. The daemon still owns the DB row deletion after plugin success.
   bool supports_item_remove = 18;
+  // True when this scanned item maps to a subscription owned by its source.
+  // Subscription state is not queried; clients initially treat it as subscribed.
+  bool supports_item_unsubscribe = 19;
 }
 
 message WallpaperListRequest {
@@ -461,6 +467,11 @@ message WallpaperRemoveRequest {
 message WallpaperRemoveResponse {
   uint32 removed_count = 1;
 }
+
+message WallpaperUnsubscribeRequest {
+  string wallpaper_id = 1;
+}
+message WallpaperUnsubscribeResponse {}
 
 message WallpaperScanRequest {}
 // Ack-only — the rescan now runs asynchronously on the daemon. `count`

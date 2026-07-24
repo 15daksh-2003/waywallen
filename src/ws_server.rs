@@ -1656,12 +1656,15 @@ async fn dispatch_inner(
             // an N+1 round-trip when paginating large libraries).
             let page_item_ids: Vec<i64> = page_entries.iter().map(|e| e.item_id).collect();
             let tag_map = repo::list_tags_for_items(&state.db, &page_item_ids).await?;
-            let remove_support_by_item = page_entries
+            let capabilities_by_item = page_entries
                 .iter()
                 .map(|e| {
                     (
                         e.item_id,
-                        state.source_manager.supports_item_remove(&e.plugin_name),
+                        (
+                            state.source_manager.supports_item_remove(&e.plugin_name),
+                            state.source_manager.supports_item_unsubscribe(e),
+                        ),
                     )
                 })
                 .collect::<std::collections::HashMap<_, _>>();
@@ -1678,9 +1681,13 @@ async fn dispatch_inner(
                         String::new(),
                         String::new(),
                         None,
-                        remove_support_by_item
+                        capabilities_by_item
                             .get(&e.item_id)
-                            .copied()
+                            .map(|capabilities| capabilities.0)
+                            .unwrap_or(false),
+                        capabilities_by_item
+                            .get(&e.item_id)
+                            .map(|capabilities| capabilities.1)
                             .unwrap_or(false),
                     )
                 })
@@ -1712,6 +1719,7 @@ async fn dispatch_inner(
             let supports_item_remove = state
                 .source_manager
                 .supports_item_remove(&entry.plugin_name);
+            let supports_item_unsubscribe = state.source_manager.supports_item_unsubscribe(&entry);
             let overrides = repo::get_user_property_overrides_raw(&state.db, entry.item_id)
                 .await?
                 .unwrap_or_default();
@@ -1726,6 +1734,7 @@ async fn dispatch_inner(
                     overrides,
                     layout_override,
                     supports_item_remove,
+                    supports_item_unsubscribe,
                 )),
             })
         }
@@ -1758,6 +1767,29 @@ async fn dispatch_inner(
             }
             control::notify_wallpaper_db_changed(state, 0).await;
             Res::WallpaperRemove(pb::WallpaperRemoveResponse { removed_count })
+        }
+
+        Req::WallpaperUnsubscribe(r) => {
+            let entry = match r.wallpaper_id.parse::<i64>() {
+                Ok(iid) => repo::get_entry(&state.db, iid).await?,
+                Err(_) => None,
+            };
+            let entry = entry.ok_or_else(|| Error::WallpaperNotFound(r.wallpaper_id.clone()))?;
+            if !state.source_manager.supports_item_unsubscribe(&entry) {
+                return Err(Error::SourceItemUnsubscribeUnsupported(entry.plugin_name));
+            }
+            let external_id = entry
+                .external_id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    Error::SourceItemUnsubscribeUnsupported(entry.plugin_name.clone())
+                })?;
+            state
+                .source_manager
+                .set_subscription(&entry.plugin_name, external_id, false)
+                .await?;
+            Res::WallpaperUnsubscribe(pb::WallpaperUnsubscribeResponse {})
         }
 
         Req::WallpaperPropertySet(r) => {
@@ -1882,6 +1914,7 @@ async fn dispatch_inner(
             let supports_item_remove = state
                 .source_manager
                 .supports_item_remove(&entry.plugin_name);
+            let supports_item_unsubscribe = state.source_manager.supports_item_unsubscribe(&entry);
             Res::WallpaperLayoutSet(pb::WallpaperLayoutSetResponse {
                 entry: Some(entry_to_pb(
                     &entry,
@@ -1890,6 +1923,7 @@ async fn dispatch_inner(
                     String::new(),
                     layout_override,
                     supports_item_remove,
+                    supports_item_unsubscribe,
                 )),
             })
         }
@@ -3020,6 +3054,7 @@ fn entry_to_pb(
     user_property_overrides: String,
     wallpaper_layout_override: Option<WallpaperLayoutOverride>,
     supports_item_remove: bool,
+    supports_item_unsubscribe: bool,
 ) -> pb::WallpaperEntry {
     // `e` is reconstructed from the DB (the source of truth), so its
     // fields are already the freshest values — no overlay needed.
@@ -3046,6 +3081,7 @@ fn entry_to_pb(
             .map(|layout| layout_prefs_to_pb_resolved(&layout.materialize())),
         wallpaper_layout_override_set,
         supports_item_remove,
+        supports_item_unsubscribe,
     }
 }
 

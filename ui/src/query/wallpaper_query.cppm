@@ -171,6 +171,30 @@ private:
     QString m_wallpaper_id;
 };
 
+export class WallpaperUnsubscribeQuery
+    : public Query,
+      public QueryExtra<control::v1::Response, WallpaperUnsubscribeQuery> {
+    Q_OBJECT
+    QML_ELEMENT
+
+    Q_PROPERTY(
+        QString wallpaperId READ wallpaperId WRITE setWallpaperId NOTIFY wallpaperIdChanged FINAL)
+
+public:
+    WallpaperUnsubscribeQuery(QObject* parent = nullptr);
+
+    auto wallpaperId() const -> const QString&;
+    void setWallpaperId(const QString&);
+
+    void reload() override;
+
+    Q_SIGNAL void wallpaperIdChanged();
+    Q_SIGNAL void unsubscribed(const QString& wallpaperId);
+
+private:
+    QString m_wallpaper_id;
+};
+
 export class WallpaperPropertySetQuery
     : public Query,
       public QueryExtra<control::v1::Response, WallpaperPropertySetQuery> {

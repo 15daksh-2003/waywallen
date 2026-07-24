@@ -55,6 +55,8 @@ using proto::WallpaperRemoveResponse;
 using proto::WallpaperScanRequest;
 using proto::WallpaperScanResponse;
 using proto::WallpaperSyncFinished;
+using proto::WallpaperUnsubscribeRequest;
+using proto::WallpaperUnsubscribeResponse;
 
 using proto::DisplayBackendStatus;
 using proto::StatusSync;
