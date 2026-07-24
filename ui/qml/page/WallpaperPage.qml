@@ -33,6 +33,7 @@ MD.Page {
 
     W.WallpaperRemoveQuery {
         id: selectionRemoveQuery
+        forwardError: false
         onRemovedMany: function (wallpaperIds, removedCount) {
             wallpaperQuery.reload();
             root.clearWallpaperSelection();
@@ -70,6 +71,7 @@ MD.Page {
 
     W.PlaylistMutationQuery {
         id: playlistMutation
+        forwardError: false
         onDone: {
             if (playlistMutation.status === 3) {
                 root.playlistMutationSuccessMessage = "";
@@ -93,6 +95,7 @@ MD.Page {
 
     W.PlaylistMutationQuery {
         id: playlistPlaybackMutation
+        forwardError: false
         onDone: {
             if (playlistPlaybackMutation.status === 3)
                 W.Action.toast(qsTr("Playlist playback failed"));

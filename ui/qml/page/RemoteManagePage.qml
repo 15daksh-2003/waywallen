@@ -134,6 +134,7 @@ MD.Page {
 
     W.RemoteSettingsPatchQuery {
         id: patchQuery
+        forwardError: false
         onCompleted: function (sourceId, values, accepted, error) {
             if (sourceId !== root.sourceId)
                 return;
@@ -151,6 +152,7 @@ MD.Page {
 
     W.PluginActionQuery {
         id: actionQuery
+        forwardError: false
         onCompleted: function (accepted, error, sessionId) {
             if (!accepted) {
                 W.Global.toastError(error.length > 0 ? error : qsTr("Login action failed"));

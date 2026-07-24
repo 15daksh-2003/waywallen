@@ -50,6 +50,8 @@ public:
     Q_SLOT void load_settings();
     Q_SLOT void save_settings();
 
+    Q_SIGNAL void errorOccurred(const QString& error);
+
 private:
     QScopedPointer<AppPrivate> d_ptr;
     Q_DECLARE_PRIVATE(App);

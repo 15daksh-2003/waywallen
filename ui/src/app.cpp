@@ -76,7 +76,7 @@ void App::init() {
     d->m_qml_network_cache.install(*engine);
 
     QAsyncResult::initEx(this, rstd::usize(4), [](QStringView error) {
-        qWarning("async error: %s", qPrintable(error.toString()));
+        Q_EMIT App::instance()->errorOccurred(error.toString());
     });
 
     connect(

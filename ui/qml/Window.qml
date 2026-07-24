@@ -88,6 +88,13 @@ MD.ApplicationWindow {
         }
     }
 
+    Connections {
+        target: W.App
+        function onErrorOccurred(error) {
+            W.Global.toastError(error);
+        }
+    }
+
     // Global daemon-event toasts. Notify mirrors `GlobalEvent` from the
     // daemon; library additions surface here so the toast fires no
     // matter which page triggered the add (manual vs auto-detect).

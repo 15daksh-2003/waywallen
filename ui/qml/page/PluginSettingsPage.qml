@@ -23,9 +23,10 @@ MD.Page {
 
     W.PluginActionQuery {
         id: actionQuery
+        forwardError: false
         onCompleted: function(accepted, error, sessionId) {
             if (!accepted)
-                W.Action.toast(error.length > 0 ? error : qsTr("Action failed"));
+                W.Global.toastError(error.length > 0 ? error : qsTr("Action failed"));
         }
     }
     function runAction(actionId) {

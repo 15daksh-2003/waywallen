@@ -71,6 +71,11 @@ MD.Popup {
                     ? qsTr("Signed in as %1").arg(displayValue)
                     : qsTr("Signed in"));
                 root.close();
+            } else if (state === 6 || state === 7) {
+                W.Global.toastError(error.length > 0
+                    ? error
+                    : (state === 6 ? qsTr("Sign-in expired") : qsTr("Sign-in failed")));
+                root.close();
             } else if (state === 8) {
                 root.close();
             }

@@ -111,10 +111,12 @@ MD.Page {
 
     W.PluginInstallQuery {
         id: installQuery
+        forwardError: false
     }
 
     W.PluginInspectQuery {
         id: inspectQuery
+        forwardError: false
     }
 
     W.PluginDeleteQuery {
@@ -127,6 +129,7 @@ MD.Page {
 
     W.PluginUpdateInstallQuery {
         id: updateInstallQuery
+        forwardError: false
     }
 
     Connections {

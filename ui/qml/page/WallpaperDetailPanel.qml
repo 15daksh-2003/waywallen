@@ -111,10 +111,17 @@ Item {
 
     W.WallpaperListQuery { id: m_list }
     W.RendererPluginListQuery { id: pluginQuery }
-    W.WallpaperApplyQuery { id: applyQuery }
-    W.WallpaperApplyViaPortalQuery { id: portalApplyQuery }
+    W.WallpaperApplyQuery {
+        id: applyQuery
+        forwardError: false
+    }
+    W.WallpaperApplyViaPortalQuery {
+        id: portalApplyQuery
+        forwardError: false
+    }
     W.WallpaperRemoveQuery {
         id: removeQuery
+        forwardError: false
         wallpaperId: root.wallpaperId
     }
 
@@ -164,6 +171,7 @@ Item {
 
     W.WallpaperLayoutSetQuery {
         id: layoutSetQuery
+        forwardError: false
         wallpaperId: root.wallpaperId
     }
 

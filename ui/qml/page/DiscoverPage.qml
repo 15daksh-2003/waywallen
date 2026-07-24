@@ -366,6 +366,7 @@ MD.Page {
 
     W.RemoteSubscriptionQuery {
         id: subscriptionQuery
+        forwardError: false
     }
 
     Connections {

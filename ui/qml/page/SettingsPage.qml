@@ -84,6 +84,7 @@ MD.Page {
 
     W.AutostartSetQuery {
         id: autostartSetQ
+        forwardError: false
         onStatusChanged: {
             if (status === 2) {
                 autostartGetQ.reload();

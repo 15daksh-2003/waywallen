@@ -130,7 +130,10 @@ fn decode_client_frame(msg: Message) -> ClientFrame {
 
     match pb::Request::decode(&bytes[..]) {
         Ok(req) => ClientFrame::Request(req),
-        Err(e) => ClientFrame::DecodeError(Error::Decode(e).to_response(0)),
+        Err(error) => {
+            log::error!("request decode failed: {error}");
+            ClientFrame::DecodeError(Error::Decode(error).to_response(0))
+        }
     }
 }
 
@@ -1035,6 +1038,12 @@ async fn resolve_remote_source_id(state: &Arc<AppState>, source_id: &str) -> Res
         return Ok(source_id.to_string());
     }
     default_remote_source_id(state).await
+}
+
+fn query_error(query: &str, error: impl std::fmt::Display) -> String {
+    let error = error.to_string();
+    log::error!("{query} failed: {error}");
+    error
 }
 
 fn remote_capability(
@@ -2129,7 +2138,7 @@ async fn dispatch_inner(
                     return Ok(Res::RemoteSearch(pb::RemoteSearchResponse {
                         items: Vec::new(),
                         has_more: false,
-                        error: e.to_string(),
+                        error: query_error("remote search", e),
                     }));
                 }
             };
@@ -2185,7 +2194,7 @@ async fn dispatch_inner(
                 Err(e) => Res::RemoteSearch(pb::RemoteSearchResponse {
                     items: Vec::new(),
                     has_more: false,
-                    error: e.to_string(),
+                    error: query_error("remote search", e),
                 }),
             }
         }
@@ -2196,14 +2205,14 @@ async fn dispatch_inner(
                 Err(e) => {
                     return Ok(Res::RemoteDownload(pb::RemoteDownloadResponse {
                         accepted: false,
-                        error: e.to_string(),
+                        error: query_error("remote download", e),
                     }));
                 }
             };
             if r.id.trim().is_empty() {
                 return Ok(Res::RemoteDownload(pb::RemoteDownloadResponse {
                     accepted: false,
-                    error: "remote id is empty".into(),
+                    error: query_error("remote download", "remote id is empty"),
                 }));
             }
             if remote_capability(state, &source_id)?
@@ -2211,7 +2220,10 @@ async fn dispatch_inner(
             {
                 return Ok(Res::RemoteDownload(pb::RemoteDownloadResponse {
                     accepted: false,
-                    error: "remote source does not support downloads".into(),
+                    error: query_error(
+                        "remote download",
+                        "remote source does not support downloads",
+                    ),
                 }));
             }
             let task_state = state.clone();
@@ -2252,7 +2264,7 @@ async fn dispatch_inner(
                 Err(e) => {
                     return Ok(Res::RemoteUninstall(pb::RemoteUninstallResponse {
                         removed: false,
-                        error: e.to_string(),
+                        error: query_error("remote uninstall", e),
                     }));
                 }
             };
@@ -2261,14 +2273,17 @@ async fn dispatch_inner(
             {
                 return Ok(Res::RemoteUninstall(pb::RemoteUninstallResponse {
                     removed: false,
-                    error: "remote source does not own downloaded content".into(),
+                    error: query_error(
+                        "remote uninstall",
+                        "remote source does not own downloaded content",
+                    ),
                 }));
             }
             let rows = repo::list_items_by_plugin_external_id(&state.db, &source_id, &r.id).await?;
             if rows.is_empty() {
                 Res::RemoteUninstall(pb::RemoteUninstallResponse {
                     removed: false,
-                    error: "remote item is not downloaded".into(),
+                    error: query_error("remote uninstall", "remote item is not downloaded"),
                 })
             } else {
                 for (item, lib) in rows {
@@ -2296,7 +2311,7 @@ async fn dispatch_inner(
                         description: String::new(),
                         size: String::new(),
                         tags: Vec::new(),
-                        error: e.to_string(),
+                        error: query_error("remote details", e),
                         width: 0,
                         height: 0,
                     }));
@@ -2316,7 +2331,7 @@ async fn dispatch_inner(
                     description: String::new(),
                     size: String::new(),
                     tags: Vec::new(),
-                    error: e.to_string(),
+                    error: query_error("remote details", e),
                     width: 0,
                     height: 0,
                 }),
@@ -2386,7 +2401,7 @@ async fn dispatch_inner(
                         }
                         Err(error) => Res::PluginAction(pb::PluginActionResponse {
                             accepted: false,
-                            error: error.to_string(),
+                            error: query_error("plugin action", error),
                             session_id: String::new(),
                         }),
                     }
@@ -2400,14 +2415,17 @@ async fn dispatch_inner(
                         }),
                         Err(error) => Res::PluginAction(pb::PluginActionResponse {
                             accepted: false,
-                            error: error.to_string(),
+                            error: query_error("plugin action", error),
                             session_id: String::new(),
                         }),
                     }
                 }
                 None => Res::PluginAction(pb::PluginActionResponse {
                     accepted: false,
-                    error: format!("unknown action {}.{}", r.plugin_id, r.action_id),
+                    error: query_error(
+                        "plugin action",
+                        format!("unknown action {}.{}", r.plugin_id, r.action_id),
+                    ),
                     session_id: String::new(),
                 }),
             }
@@ -2442,14 +2460,17 @@ async fn dispatch_inner(
                 Err(error) => {
                     return Ok(Res::SubscriptionStatus(pb::SubscriptionStatusResponse {
                         items: Vec::new(),
-                        error: error.to_string(),
+                        error: query_error("subscription status", error),
                     }));
                 }
             };
             if r.item_ids.len() > 200 {
                 return Ok(Res::SubscriptionStatus(pb::SubscriptionStatusResponse {
                     items: Vec::new(),
-                    error: "subscription status accepts at most 200 item ids".into(),
+                    error: query_error(
+                        "subscription status",
+                        "subscription status accepts at most 200 item ids",
+                    ),
                 }));
             }
             match state
@@ -2479,7 +2500,7 @@ async fn dispatch_inner(
                 }),
                 Err(error) => Res::SubscriptionStatus(pb::SubscriptionStatusResponse {
                     items: Vec::new(),
-                    error: error.to_string(),
+                    error: query_error("subscription status", error),
                 }),
             }
         }
@@ -2490,14 +2511,14 @@ async fn dispatch_inner(
                 Err(error) => {
                     return Ok(Res::SubscriptionSet(pb::SubscriptionSetResponse {
                         accepted: false,
-                        error: error.to_string(),
+                        error: query_error("subscription update", error),
                     }));
                 }
             };
             if r.item_id.trim().is_empty() {
                 return Ok(Res::SubscriptionSet(pb::SubscriptionSetResponse {
                     accepted: false,
-                    error: "subscription item id is empty".into(),
+                    error: query_error("subscription update", "subscription item id is empty"),
                 }));
             }
             match state
@@ -2514,7 +2535,7 @@ async fn dispatch_inner(
                 }
                 Err(error) => Res::SubscriptionSet(pb::SubscriptionSetResponse {
                     accepted: false,
-                    error: error.to_string(),
+                    error: query_error("subscription update", error),
                 }),
             }
         }
@@ -2944,7 +2965,10 @@ fn mode_str_to_pb(s: &str) -> pb::PlaylistMode {
 fn build_response(request_id: u64, result: Result<pb::response::Payload, Error>) -> pb::Response {
     match result {
         Ok(payload) => ok_response(request_id, payload),
-        Err(e) => e.to_response(request_id),
+        Err(error) => {
+            log::error!("request {request_id} failed: {error}");
+            error.to_response(request_id)
+        }
     }
 }
 
