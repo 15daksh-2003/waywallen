@@ -18,10 +18,22 @@ MD.Page {
     property var sortOptions: []
     property int sortIndex: 0
     property var discoverTweakSheet: null
+    readonly property var discoverTweakState: discoverTweakStateLoader.item
 
-    W.TweakState {
-        id: discoverTweakState
-        settingsCategory: "DiscoverView"
+    Loader {
+        id: discoverTweakStateLoader
+        active: true
+        property string settingsCategory: "DiscoverView"
+
+        sourceComponent: Component {
+            W.TweakState {
+                settingsCategory: discoverTweakStateLoader.settingsCategory
+            }
+        }
+    }
+
+    W.DiscoverState {
+        id: discoverState
     }
 
     function sourceInfo(id) {
@@ -85,6 +97,25 @@ MD.Page {
         return sortOptions[Math.max(0, Math.min(sortIndex, sortOptions.length - 1))].label;
     }
 
+    function tweakSettingsCategory(id) {
+        const source = String(id ?? "");
+        return source.length > 0
+            ? "DiscoverView/" + encodeURIComponent(source) + "/Tweak"
+            : "DiscoverView";
+    }
+
+    function loadDiscoverTweakState(id) {
+        const category = tweakSettingsCategory(id);
+        if (discoverTweakStateLoader.item
+                && discoverTweakStateLoader.settingsCategory === category)
+            return;
+        if (isSheetActive(discoverTweakSheet))
+            discoverTweakSheet.close();
+        discoverTweakStateLoader.active = false;
+        discoverTweakStateLoader.settingsCategory = category;
+        discoverTweakStateLoader.active = true;
+    }
+
     function setSource(id) {
         const s = sourceInfo(id);
         if (!s)
@@ -92,6 +123,9 @@ MD.Page {
         const sourceChanged = sourceId !== id;
         const currentSortKey = searchQuery.sortKey;
         sourceId = id;
+        discoverState.setSelectedSourceId(id);
+        if (sourceChanged)
+            loadDiscoverTweakState(id);
         sortOptions = s.sorts ?? [];
         sortIndex = 0;
         if (!sourceChanged && currentSortKey.length > 0) {
@@ -104,9 +138,13 @@ MD.Page {
         }
         const canBrowse = currentSourceLoginAction() === null;
         searchQuery.browsingEnabled = canBrowse;
-        const nextTags = sourceChanged ? [] : pruneTags(searchQuery.tags, s.filters ?? []);
+        const candidateTags = sourceChanged
+            ? discoverState.filterValuesFor(id)
+            : searchQuery.tags;
+        const nextTags = pruneTags(candidateTags, s.filters ?? []);
         if (!sameList(searchQuery.tags, nextTags))
             searchQuery.tags = nextTags;
+        discoverState.setFilterValuesFor(id, nextTags);
         searchQuery.sourceId = id;
         detailsQuery.sourceId = id;
         searchQuery.sortKey = sortOptions.length > 0 ? sortOptions[sortIndex].key : "";
@@ -184,6 +222,8 @@ MD.Page {
     }
 
     function ensureDiscoverTweakSheet() {
+        if (!root.discoverTweakState)
+            return null;
         if (root.discoverTweakSheet)
             return root.discoverTweakSheet;
 
@@ -248,10 +288,17 @@ MD.Page {
                 searchQuery.browsingEnabled = false;
                 return;
             }
-            if (root.sourceId.length === 0)
-                root.setSource(defaultSourceId.length > 0 ? defaultSourceId : sources[0].id);
-            else
-                root.setSource(root.sourceId);
+            let nextSourceId = root.sourceId;
+            if (!root.sourceInfo(nextSourceId)) {
+                const savedSourceId = discoverState.selectedSourceId();
+                if (root.sourceInfo(savedSourceId))
+                    nextSourceId = savedSourceId;
+                else if (root.sourceInfo(defaultSourceId))
+                    nextSourceId = defaultSourceId;
+                else
+                    nextSourceId = sources[0].id;
+            }
+            root.setSource(nextSourceId);
             if (searchQuery.browsingEnabled)
                 searchQuery.delayReload();
             root.refreshDetailSubscription();
@@ -305,6 +352,7 @@ MD.Page {
         selectedValues: searchQuery.tags
         onApply: function (values) {
             searchQuery.tags = values;
+            discoverState.setFilterValuesFor(root.sourceId, values);
         }
     }
 
@@ -514,13 +562,13 @@ MD.Page {
                         rightMargin: 8
 
                         readonly property real _availableWidth: Math.max(0, width - leftMargin - rightMargin)
-                        readonly property int _cols: Math.max(1, Math.floor(_availableWidth / discoverTweakState.itemSize))
+                        readonly property int _cols: Math.max(1, Math.floor(_availableWidth / root.discoverTweakState.itemSize))
                         readonly property real _stretchedItemWidth: _availableWidth / _cols
-                        readonly property bool _fillCell: discoverTweakState.layoutMode === discoverTweakState.layoutFillCell
-                        readonly property real _displayItemWidth: _fillCell ? _stretchedItemWidth : Math.min(discoverTweakState.itemSize, _stretchedItemWidth)
-                        readonly property real _displayItemHeight: _displayItemWidth / Math.max(discoverTweakState.itemAspectRatio, 0.1)
+                        readonly property bool _fillCell: root.discoverTweakState.layoutMode === root.discoverTweakState.layoutFillCell
+                        readonly property real _displayItemWidth: _fillCell ? _stretchedItemWidth : Math.min(root.discoverTweakState.itemSize, _stretchedItemWidth)
+                        readonly property real _displayItemHeight: _displayItemWidth / Math.max(root.discoverTweakState.itemAspectRatio, 0.1)
                         cellWidth: _stretchedItemWidth
-                        cellHeight: _fillCell ? _displayItemHeight : discoverTweakState.itemHeight
+                        cellHeight: _fillCell ? _displayItemHeight : root.discoverTweakState.itemHeight
 
                         model: searchQuery.model
 
@@ -677,7 +725,7 @@ MD.Page {
 
         W.TweakSheet {
             popupParent: root
-            tweak: discoverTweakState
+            tweak: root.discoverTweakState
             onReleased: function (sheet) {
                 root.releaseDiscoverTweakSheet(sheet);
             }
