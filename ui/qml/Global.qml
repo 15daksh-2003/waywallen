@@ -10,12 +10,31 @@ QtObject {
 
     property bool sidebarAutoExpand: true
     property int networkCacheMaximumMiB: 1024
+    property string themeMode: "system"
 
     onNetworkCacheMaximumMiBChanged:
         W.App.setNetworkCacheMaximumSize(networkCacheMaximumMiB * 1024 * 1024)
+    onThemeModeChanged: _applyThemeMode()
 
-    Component.onCompleted:
+    Component.onCompleted: {
         W.App.setNetworkCacheMaximumSize(networkCacheMaximumMiB * 1024 * 1024)
+        setThemeMode(themeMode)
+    }
+
+    function setThemeMode(mode) {
+        const normalized = mode === "light" || mode === "dark" ? mode : "system";
+        if (themeMode !== normalized)
+            themeMode = normalized;
+        else
+            _applyThemeMode();
+    }
+
+    function _applyThemeMode() {
+        const system = themeMode === "system";
+        MD.Token.color.useSysColorSM = system;
+        if (!system)
+            MD.Token.themeMode = themeMode === "dark" ? MD.Enum.Dark : MD.Enum.Light;
+    }
 
     readonly property Component errorToastAction: Component {
         MD.Action {
@@ -38,6 +57,7 @@ QtObject {
     readonly property Settings _generalSettings: Settings {
         property alias sidebarAutoExpand: root.sidebarAutoExpand
         property alias networkCacheMaximumMiB: root.networkCacheMaximumMiB
+        property alias themeMode: root.themeMode
     }
 
     // Per-vendor Material color schemes, seeded from each GPU vendor's brand
@@ -48,14 +68,17 @@ QtObject {
         readonly property MD.MdColorMgr amd: MD.MdColorMgr {
             accentColor: Qt.rgba(0.86, 0.20, 0.20, 1.0)
             mode: MD.Token.color.mode
+            useSysColorSM: MD.Token.color.useSysColorSM
         }
         readonly property MD.MdColorMgr nvidia: MD.MdColorMgr {
             accentColor: Qt.rgba(0.27, 0.66, 0.20, 1.0)
             mode: MD.Token.color.mode
+            useSysColorSM: MD.Token.color.useSysColorSM
         }
         readonly property MD.MdColorMgr intel: MD.MdColorMgr {
             accentColor: Qt.rgba(0.20, 0.45, 0.85, 1.0)
             mode: MD.Token.color.mode
+            useSysColorSM: MD.Token.color.useSysColorSM
         }
 
         function forVendor(vendorId) {

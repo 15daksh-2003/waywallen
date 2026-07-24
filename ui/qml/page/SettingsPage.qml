@@ -236,6 +236,7 @@ MD.Page {
         m_pending.submittedGlobal = nextGlobal;
         W.Global.sidebarAutoExpand = true;
         W.Global.networkCacheMaximumMiB = 1024;
+        W.Global.setThemeMode("system");
         root.autoReplayRevision += 1;
         setQ.global = nextGlobal;
         setQ.plugins = getQ.plugins;
@@ -327,6 +328,43 @@ MD.Page {
 
             SettingItem {
                 first: true
+                last: false
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Theme")
+                    }
+
+                    MD.SegmentedButtonGroup {
+                        size: MD.Enum.XS
+
+                        MD.SegmentedButton {
+                            text: qsTr("Light")
+                            checked: W.Global.themeMode === "light"
+                            onClicked: W.Global.setThemeMode("light")
+                        }
+
+                        MD.SegmentedButton {
+                            text: qsTr("Dark")
+                            checked: W.Global.themeMode === "dark"
+                            onClicked: W.Global.setThemeMode("dark")
+                        }
+
+                        MD.SegmentedButton {
+                            text: qsTr("System")
+                            checked: W.Global.themeMode === "system"
+                            onClicked: W.Global.setThemeMode("system")
+                        }
+                    }
+                }
+            }
+
+            SettingItem {
+                first: false
                 last: false
 
                 RowLayout {
