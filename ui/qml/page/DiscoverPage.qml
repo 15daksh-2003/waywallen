@@ -179,37 +179,6 @@ MD.Page {
         subscriptionQuery.refresh(root.detailRow.sourceId, root.detailRow.itemId);
     }
 
-    function formatBytes(bytes) {
-        let v = Number(bytes ?? 0);
-        if (!(v > 0))
-            return "";
-        const u = ["B", "KB", "MB", "GB", "TB"];
-        let i = 0;
-        while (v >= 1024 && i < u.length - 1) {
-            v /= 1024;
-            ++i;
-        }
-        return v.toFixed(i === 0 ? 0 : 1) + " " + u[i];
-    }
-
-    function formatSize(s) {
-        const text = String(s ?? "").trim();
-        if (text.length === 0)
-            return "";
-        if (/^\d+$/.test(text))
-            return formatBytes(Number(text));
-        const m = text.match(/^([\d.,]+)\s*([KMGT]?B)$/i);
-        if (!m)
-            return text;
-        const num = parseFloat(m[1].replace(/,/g, ""));
-        if (isNaN(num))
-            return text;
-        const unit = m[2].toUpperCase();
-        if (unit === "B")
-            return formatBytes(num);
-        return num.toFixed(unit === "B" ? 0 : 1) + " " + unit;
-    }
-
     function isSheetActive(sheet) {
         return !!sheet && (sheet.opened || sheet.entering);
     }
@@ -270,29 +239,6 @@ MD.Page {
         text: "Refresh"
         enabled: searchQuery.browsingEnabled && !searchQuery.querying
         onTriggered: searchQuery.reload()
-    }
-
-    MD.Action {
-        id: closeDetailAction
-        text: "Close"
-        icon.name: MD.Token.icon.close
-        onTriggered: root.closeDetail()
-    }
-
-    MD.Action {
-        id: linkAction
-        text: "Open web page"
-        icon.name: MD.Token.icon.web
-        visible: detailsQuery.webUrl.length > 0
-        onTriggered: MD.Util.openUrlExternally(detailsQuery.webUrl)
-    }
-
-    MD.Action {
-        id: infoAction
-        text: "Info"
-        icon.name: MD.Token.icon.info
-        enabled: root.detailRow !== null
-        onTriggered: root.openInfo()
     }
 
     W.RemoteAvailabilityQuery {
@@ -690,245 +636,38 @@ MD.Page {
         }
 
         MD.Pane {
-            Layout.preferredWidth: 300
-            Layout.maximumWidth: 300
+            Layout.preferredWidth: root.detailRow !== null ? 280 : 0
+            Layout.maximumWidth: 280
             Layout.fillHeight: true
             visible: root.detailRow !== null
             radius: root.MD.MProp.page.backgroundRadius
             padding: 0
             showBackground: true
 
-            contentItem: ColumnLayout {
-                spacing: 12
+            contentItem: RemoteDetailPanel {
+                item: root.detailRow
+                details: detailsQuery
+                remoteCapability: root.detailRow
+                    ? root.sourceCapability(root.detailRow.sourceId) : 0
+                remoteHint: root.detailRow
+                    ? root.sourceRemoteHint(root.detailRow.sourceId) : ""
+                downloadState: root.detailDownloadState
+                subscriptionState: root.detailSubscriptionState
 
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.topMargin: 16
-                    Layout.leftMargin: 16
-                    Layout.rightMargin: 16
-                    Layout.preferredHeight: width * 0.56
-                    radius: MD.Token.shape.corner.medium
-                    clip: true
-                    color: MD.Token.color.surface_container
-
-                    AnimatedImage {
-                        anchors.fill: parent
-                        source: root.detailRow ? root.detailRow.previewUrl : ""
-                        fillMode: Image.PreserveAspectCrop
-                        horizontalAlignment: Image.AlignHCenter
-                        verticalAlignment: Image.AlignVCenter
-                        smooth: true
-                        cache: true
-                        playing: true
-                    }
+                onBack: root.closeDetail()
+                onShowInfo: root.openInfo()
+                onDownloadRequested: {
+                    if (!root.detailRow)
+                        return;
+                    root.detailDownloadState = 1;
+                    dlQuery.start(root.detailRow.sourceId, root.detailRow.itemId);
                 }
-
-                Flickable {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    Layout.leftMargin: 16
-                    Layout.rightMargin: 16
-                    clip: true
-                    contentWidth: width
-                    contentHeight: m_info.implicitHeight
-                    boundsBehavior: Flickable.StopAtBounds
-
-                    ColumnLayout {
-                        id: m_info
-                        width: parent.width
-                        spacing: 8
-
-                        MD.Label {
-                            Layout.fillWidth: true
-                            text: root.detailRow ? root.detailRow.title : ""
-                            typescale: MD.Token.typescale.title_medium
-                            wrapMode: Text.WordWrap
-                        }
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 8
-
-                            MD.Label {
-                                Layout.fillWidth: true
-                                text: root.detailRow ? root.detailRow.wpType : ""
-                                typescale: MD.Token.typescale.label_large
-                                color: MD.Token.color.on_surface_variant
-                                maximumLineCount: 1
-                                elide: Text.ElideRight
-                            }
-
-                            MD.ActionToolBar {
-                                actions: [linkAction, infoAction, closeDetailAction]
-                                iconDelegate: MD.SmallIconButton {
-                                    action: MD.ToolBarLayout.action
-                                }
-                            }
-                        }
-
-                        MD.Label {
-                            Layout.fillWidth: true
-                            text: root.detailRow ? qsTr("by ") + root.detailRow.author : ""
-                            visible: root.detailRow && root.detailRow.author.length > 0
-                            typescale: MD.Token.typescale.body_medium
-                            color: MD.Token.color.on_surface_variant
-                            wrapMode: Text.WordWrap
-                        }
-
-                        GridLayout {
-                            id: m_meta
-                            Layout.fillWidth: true
-                            Layout.topMargin: 4
-                            columns: 2
-                            columnSpacing: 12
-                            rowSpacing: 4
-                            visible: hasResolution || hasSize
-
-                            readonly property bool hasResolution: detailsQuery.width > 0 && detailsQuery.height > 0
-                            readonly property string formattedSize: root.formatSize(detailsQuery.size)
-                            readonly property bool hasSize: formattedSize.length > 0
-
-                            MD.Text {
-                                visible: m_meta.hasResolution
-                                text: "Resolution"
-                                typescale: MD.Token.typescale.label_medium
-                                color: MD.Token.color.on_surface_variant
-                            }
-                            MD.Text {
-                                visible: m_meta.hasResolution
-                                text: detailsQuery.width + "×" + detailsQuery.height
-                                typescale: MD.Token.typescale.body_medium
-                                color: MD.Token.color.on_surface
-                            }
-
-                            MD.Text {
-                                visible: m_meta.hasSize
-                                text: "Size"
-                                typescale: MD.Token.typescale.label_medium
-                                color: MD.Token.color.on_surface_variant
-                            }
-                            MD.Text {
-                                visible: m_meta.hasSize
-                                text: m_meta.formattedSize
-                                typescale: MD.Token.typescale.body_medium
-                                color: MD.Token.color.on_surface
-                            }
-                        }
-
-                        Flow {
-                            Layout.fillWidth: true
-                            Layout.topMargin: 4
-                            spacing: 4
-                            visible: detailsQuery.tags.length > 0
-
-                            Repeater {
-                                model: detailsQuery.tags
-                                delegate: W.Tag {
-                                    required property string modelData
-                                    text: modelData
-                                }
-                            }
-                        }
-
-                        MD.Divider {
-                            Layout.fillWidth: true
-                            Layout.topMargin: 4
-                            visible: detailsQuery.description.length > 0 || detailsQuery.querying
-                        }
-
-                        MD.Text {
-                            visible: detailsQuery.description.length > 0 || detailsQuery.querying
-                            text: "Description"
-                            typescale: MD.Token.typescale.label_large
-                            color: MD.Token.color.on_surface_variant
-                        }
-                        MD.Label {
-                            Layout.fillWidth: true
-                            text: detailsQuery.querying ? qsTr("Loading…") : detailsQuery.description
-                            visible: text.length > 0
-                            typescale: MD.Token.typescale.body_medium
-                            color: MD.Token.color.on_surface
-                            wrapMode: Text.WordWrap
-                        }
-                    }
+                onUninstallRequested: {
+                    if (root.detailRow)
+                        dlQuery.uninstall(root.detailRow.sourceId, root.detailRow.itemId);
                 }
-
-                MD.Button {
-                    visible: root.sourceCapability(root.sourceId) === 1
-                    Layout.fillWidth: true
-                    Layout.leftMargin: 16
-                    Layout.rightMargin: 16
-                    Layout.bottomMargin: 16
-                    mdState.type: root.detailDownloadState === 3 ? MD.Enum.BtFilledTonal : MD.Enum.BtFilled
-                    enabled: root.detailDownloadState === 0 || root.detailDownloadState === 3
-                    text: {
-                        switch (root.detailDownloadState) {
-                        case 1:
-                            return qsTr("Pending");
-                        case 2:
-                            return qsTr("Downloading");
-                        case 3:
-                            return qsTr("Uninstall");
-                        case 4:
-                            return qsTr("Retry");
-                        case 5:
-                            return qsTr("Retry");
-                        default:
-                            return qsTr("Download");
-                        }
-                    }
-                    onClicked: {
-                        if (!root.detailRow)
-                            return;
-                        if (root.detailDownloadState === 3) {
-                            dlQuery.uninstall(root.detailRow.sourceId, root.detailRow.itemId);
-                        } else {
-                            root.detailDownloadState = 1;
-                            dlQuery.start(root.detailRow.sourceId, root.detailRow.itemId);
-                        }
-                    }
-                }
-
-                MD.Button {
-                    visible: root.sourceCapability(root.sourceId) === 2
-                    Layout.fillWidth: true
-                    Layout.leftMargin: 16
-                    Layout.rightMargin: 16
-                    Layout.bottomMargin: 16
-                    mdState.type: root.detailSubscriptionState === 2 ? MD.Enum.BtFilledTonal : MD.Enum.BtFilled
-                    enabled: root.detailSubscriptionState !== 3
-                    text: {
-                        switch (root.detailSubscriptionState) {
-                        case 0:
-                            return qsTr("Retry");
-                        case 1:
-                            return qsTr("Subscribe");
-                        case 2:
-                            return qsTr("Unsubscribe");
-                        case 3:
-                            return qsTr("Updating…");
-                        default:
-                            return qsTr("Subscribe");
-                        }
-                    }
-                    onClicked: {
-                        if (root.detailSubscriptionState === 0)
-                            root.refreshDetailSubscription();
-                        else
-                            root.setDetailSubscription(root.detailSubscriptionState === 1);
-                    }
-                }
-
-                MD.Label {
-                    visible: root.sourceCapability(root.sourceId) === 2 && root.sourceRemoteHint(root.sourceId).length > 0
-                    Layout.fillWidth: true
-                    Layout.leftMargin: 16
-                    Layout.rightMargin: 16
-                    Layout.bottomMargin: 16
-                    wrapMode: Text.WordWrap
-                    color: MD.Token.color.on_surface_variant
-                    text: root.sourceRemoteHint(root.sourceId)
-                }
+                onSubscriptionRefreshRequested: root.refreshDetailSubscription()
+                onSubscriptionChangeRequested: subscribed => root.setDetailSubscription(subscribed)
             }
         }
     }

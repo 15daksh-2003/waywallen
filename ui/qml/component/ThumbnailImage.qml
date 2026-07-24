@@ -6,7 +6,7 @@ import waywallen.ui as W
 
 // Wallpaper thumbnail view.
 //
-// When `source` (daemon-supplied preview file) is set, render it directly
+// When `source` (a preview path or URL) is set, render it directly
 // so animated formats (GIF/APNG/WebP) actually animate — the thumbnail
 // pipeline transcodes to a single-frame PNG and would kill animation.
 // When `source` is empty (typically video wallpapers), fall back to
@@ -22,7 +22,9 @@ Item {
 
     readonly property bool _useDirect: root.source.length > 0
     readonly property url  _displayUrl: _useDirect
-                                        ? Qt.url("file://" + root.source)
+                                        ? (/^[a-z][a-z0-9+.-]*:/i.test(root.source)
+                                           ? root.source
+                                           : Qt.url("file://" + root.source))
                                         : req.cachePath
 
     readonly property int    state    : _useDirect ? W.ThumbnailRequest.Ready : req.state

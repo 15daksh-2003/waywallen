@@ -1,0 +1,288 @@
+pragma ComponentBehavior: Bound
+import QtQuick
+import QtQuick.Layouts
+import Qcm.Material as MD
+import waywallen.ui as W
+
+Item {
+    id: root
+
+    property var item: null
+    property var details: null
+    property int remoteCapability: 0
+    property string remoteHint: ""
+    property int downloadState: 0
+    property int subscriptionState: 0
+
+    signal back
+    signal showInfo
+    signal downloadRequested
+    signal uninstallRequested
+    signal subscriptionRefreshRequested
+    signal subscriptionChangeRequested(bool subscribed)
+
+    function formatBytes(bytes) {
+        let value = Number(bytes ?? 0);
+        if (!(value > 0))
+            return "";
+        const units = ["B", "KB", "MB", "GB", "TB"];
+        let index = 0;
+        while (value >= 1024 && index < units.length - 1) {
+            value /= 1024;
+            ++index;
+        }
+        return value.toFixed(index === 0 ? 0 : 1) + " " + units[index];
+    }
+
+    function formatSize(size) {
+        const text = String(size ?? "").trim();
+        if (text.length === 0)
+            return "";
+        if (/^\d+$/.test(text))
+            return formatBytes(Number(text));
+        const match = text.match(/^([\d.,]+)\s*([KMGT]?B)$/i);
+        if (!match)
+            return text;
+        const value = parseFloat(match[1].replace(/,/g, ""));
+        if (isNaN(value))
+            return text;
+        return match[2].toUpperCase() === "B"
+            ? formatBytes(value)
+            : value.toFixed(1) + " " + match[2].toUpperCase();
+    }
+
+    MD.Action {
+        id: linkAction
+        text: qsTr("Open web page")
+        icon.name: MD.Token.icon.web
+        visible: String(root.details?.webUrl ?? "").length > 0
+        onTriggered: MD.Util.openUrlExternally(root.details.webUrl)
+    }
+
+    MD.Action {
+        id: infoAction
+        text: qsTr("Info")
+        icon.name: MD.Token.icon.info
+        enabled: root.item !== null
+        onTriggered: root.showInfo()
+    }
+
+    MD.Action {
+        id: closeAction
+        text: qsTr("Close")
+        icon.name: MD.Token.icon.close
+        onTriggered: root.back()
+    }
+
+    readonly property list<MD.Action> detailActions: [linkAction, infoAction, closeAction]
+
+    ColumnLayout {
+        anchors.fill: parent
+        spacing: 0
+
+        MD.VerticalListView {
+            id: detailView
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            clip: true
+            model: []
+            spacing: 8
+            leftMargin: 16
+            rightMargin: 16
+            topMargin: 0
+            bottomMargin: 8
+
+            header: ColumnLayout {
+                width: detailView.contentWidth
+                spacing: 12
+
+                W.ThumbnailImage {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: visible ? 200 : 0
+                    Layout.topMargin: 4
+                    visible: String(root.item?.previewUrl ?? "").length > 0
+                    source: root.item?.previewUrl ?? ""
+                    fillMode: Image.PreserveAspectFit
+                }
+
+                MD.Text {
+                    Layout.fillWidth: true
+                    text: root.item?.title || qsTr("Untitled")
+                    typescale: MD.Token.typescale.title_large
+                    color: MD.Token.color.on_surface
+                    wrapMode: Text.Wrap
+                    maximumLineCount: 2
+                    elide: Text.ElideRight
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    MD.Text {
+                        Layout.fillWidth: true
+                        text: root.item?.wpType ?? ""
+                        typescale: MD.Token.typescale.label_large
+                        color: MD.Token.color.on_surface_variant
+                        maximumLineCount: 1
+                        elide: Text.ElideRight
+                    }
+
+                    W.DetailActionBar {
+                        actions: root.detailActions
+                    }
+                }
+
+                MD.Text {
+                    Layout.fillWidth: true
+                    visible: String(root.item?.author ?? "").length > 0
+                    text: qsTr("by %1").arg(root.item?.author ?? "")
+                    typescale: MD.Token.typescale.body_medium
+                    color: MD.Token.color.on_surface_variant
+                    wrapMode: Text.WordWrap
+                }
+
+                GridLayout {
+                    id: metadata
+                    Layout.fillWidth: true
+                    columns: 2
+                    columnSpacing: 12
+                    rowSpacing: 4
+                    visible: hasResolution || hasSize
+
+                    readonly property bool hasResolution:
+                        Number(root.details?.width ?? 0) > 0 && Number(root.details?.height ?? 0) > 0
+                    readonly property string formattedSize: root.formatSize(root.details?.size)
+                    readonly property bool hasSize: formattedSize.length > 0
+
+                    MD.Text {
+                        visible: metadata.hasResolution
+                        text: qsTr("Resolution")
+                        typescale: MD.Token.typescale.label_medium
+                        color: MD.Token.color.on_surface_variant
+                    }
+                    MD.Text {
+                        visible: metadata.hasResolution
+                        text: (root.details?.width ?? 0) + "×" + (root.details?.height ?? 0)
+                        typescale: MD.Token.typescale.body_medium
+                        color: MD.Token.color.on_surface
+                    }
+
+                    MD.Text {
+                        visible: metadata.hasSize
+                        text: qsTr("Size")
+                        typescale: MD.Token.typescale.label_medium
+                        color: MD.Token.color.on_surface_variant
+                    }
+                    MD.Text {
+                        visible: metadata.hasSize
+                        text: metadata.formattedSize
+                        typescale: MD.Token.typescale.body_medium
+                        color: MD.Token.color.on_surface
+                    }
+                }
+
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: 6
+                    visible: (root.details?.tags?.length ?? 0) > 0
+
+                    Repeater {
+                        model: root.details?.tags ?? []
+                        delegate: W.Tag {
+                            required property string modelData
+                            text: modelData
+                        }
+                    }
+                }
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+                    visible: String(root.details?.description ?? "").length > 0
+                             || Boolean(root.details?.querying)
+
+                    MD.Divider { Layout.fillWidth: true }
+
+                    MD.Text {
+                        text: qsTr("Description")
+                        typescale: MD.Token.typescale.label_large
+                        color: MD.Token.color.on_surface_variant
+                    }
+                    MD.Text {
+                        Layout.fillWidth: true
+                        text: root.details?.querying ? qsTr("Loading…") : (root.details?.description ?? "")
+                        visible: text.length > 0
+                        typescale: MD.Token.typescale.body_medium
+                        color: MD.Token.color.on_surface
+                        wrapMode: Text.WordWrap
+                    }
+                }
+            }
+        }
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            Layout.leftMargin: 16
+            Layout.rightMargin: 16
+            Layout.topMargin: 8
+            Layout.bottomMargin: 8
+            spacing: 8
+            visible: root.remoteCapability === 1 || root.remoteCapability === 2
+
+            MD.Button {
+                visible: root.remoteCapability === 1
+                Layout.fillWidth: true
+                mdState.type: root.downloadState === 3 ? MD.Enum.BtFilledTonal : MD.Enum.BtFilled
+                enabled: root.downloadState === 0 || root.downloadState === 3
+                text: {
+                    switch (root.downloadState) {
+                    case 1: return qsTr("Pending");
+                    case 2: return qsTr("Downloading");
+                    case 3: return qsTr("Uninstall");
+                    case 4:
+                    case 5: return qsTr("Retry");
+                    default: return qsTr("Download");
+                    }
+                }
+                onClicked: {
+                    if (root.downloadState === 3)
+                        root.uninstallRequested();
+                    else
+                        root.downloadRequested();
+                }
+            }
+
+            MD.Button {
+                visible: root.remoteCapability === 2
+                Layout.fillWidth: true
+                mdState.type: root.subscriptionState === 2 ? MD.Enum.BtFilledTonal : MD.Enum.BtFilled
+                enabled: root.subscriptionState !== 3
+                text: {
+                    switch (root.subscriptionState) {
+                    case 0: return qsTr("Retry");
+                    case 1: return qsTr("Subscribe");
+                    case 2: return qsTr("Unsubscribe");
+                    case 3: return qsTr("Updating…");
+                    default: return qsTr("Subscribe");
+                    }
+                }
+                onClicked: {
+                    if (root.subscriptionState === 0)
+                        root.subscriptionRefreshRequested();
+                    else
+                        root.subscriptionChangeRequested(root.subscriptionState === 1);
+                }
+            }
+
+            MD.Text {
+                visible: root.remoteCapability === 2 && root.remoteHint.length > 0
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                color: MD.Token.color.on_surface_variant
+                typescale: MD.Token.typescale.body_small
+                text: root.remoteHint
+            }
+        }
+    }
+}

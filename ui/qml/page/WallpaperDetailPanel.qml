@@ -385,23 +385,8 @@ Item {
                         maximumLineCount: 1
                     }
 
-                    Item {
-                        id: detailActionBarHost
-                        readonly property real targetWidth: Math.ceil(detailActionToolBar.maximumContentWidth) + 2
-                        Layout.minimumWidth: targetWidth
-                        Layout.preferredWidth: targetWidth
-                        Layout.maximumWidth: targetWidth
-                        Layout.preferredHeight: detailActionToolBar.implicitHeight
-                        Layout.alignment: Qt.AlignVCenter
-
-                        MD.ActionToolBar {
-                            id: detailActionToolBar
-                            anchors.fill: parent
-                            actions: root.detailActions
-                            iconDelegate: MD.SmallIconButton {
-                                action: MD.ToolBarLayout.action
-                            }
-                        }
+                    W.DetailActionBar {
+                        actions: root.detailActions
                     }
                 }
 

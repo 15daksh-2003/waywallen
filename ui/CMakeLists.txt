@@ -164,6 +164,7 @@ set(QML_FILES
   qml/component/ThumbnailImage.qml
   qml/component/SearchChip.qml
   qml/component/ValueSlider.qml
+  qml/component/DetailActionBar.qml
   qml/component/filter/StringFilter.qml
   qml/component/filter/IntFilter.qml
   qml/component/filter/WpTypeFilter.qml
@@ -181,6 +182,7 @@ set(QML_FILES
   qml/page/WallpaperPage.qml
   qml/page/PlaylistDetailPanel.qml
   qml/page/WallpaperDetailPanel.qml
+  qml/page/RemoteDetailPanel.qml
   qml/page/WallpaperInfoPage.qml
   qml/page/WallpaperCard.qml
   qml/page/wallpaper/SelectSheet.qml
