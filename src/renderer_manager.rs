@@ -31,6 +31,39 @@ const MAX_EVENT_SUBSCRIPTIONS: usize = 16;
 const MAX_EVENT_KIND_BYTES: usize = 64;
 const MAX_EVENT_KIND_TOTAL_BYTES: usize = 512;
 const WRITER_QUEUE_CAPACITY: usize = 64;
+const RENDERER_FAILED_EXIT_GRACE: Duration = Duration::from_millis(250);
+
+async fn failed_renderer_process_status(child: &mut Child) -> String {
+    match tokio::time::timeout(RENDERER_FAILED_EXIT_GRACE, child.wait()).await {
+        Ok(Ok(status)) => format!("process_status={status}"),
+        Ok(Err(error)) => {
+            let kill = child.start_kill().map_or_else(
+                |kill_error| format!("kill failed: {kill_error}"),
+                |()| "kill requested".to_string(),
+            );
+            format!("process_status=wait failed: {error}; {kill}")
+        }
+        Err(_) => {
+            let kill = child.start_kill().map_or_else(
+                |error| format!("kill failed: {error}"),
+                |()| "killed after grace timeout".to_string(),
+            );
+            let status = match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
+                Ok(Ok(status)) => status.to_string(),
+                Ok(Err(error)) => format!("wait failed: {error}"),
+                Err(_) => "wait timed out after 2s".to_string(),
+            };
+            format!("process_status={status}; {kill}")
+        }
+    }
+}
+
+fn renderer_spawn_error_reason(error: Error) -> String {
+    match error {
+        Error::RendererSpawnFailed(reason) => reason,
+        other => other.to_string(),
+    }
+}
 
 pub const SUBSCRIPTION_STATUS_APPLIED: u32 = 0;
 pub const SUBSCRIPTION_STATUS_INVALID: u32 = 1;
@@ -972,14 +1005,23 @@ impl RendererManager {
         let handshake_stream = std_stream
             .try_clone()
             .context("try_clone for Init handshake")?;
-        let gpu =
+        let handshake =
             tokio::task::spawn_blocking(move || run_init_handshake(&handshake_stream, &init_msg))
                 .await
-                .context("init handshake join")?
-                .map_err(|e| {
-                    let _ = child.start_kill();
-                    e
-                })?;
+                .context("init handshake join")?;
+        let gpu = match handshake {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                let reason = renderer_spawn_error_reason(error);
+                drop(std_stream);
+                let process_status = failed_renderer_process_status(&mut child).await;
+                return Err(Error::RendererSpawnFailed(format!(
+                    "{reason}; renderer={} pid={}; {process_status}",
+                    renderer_def.name,
+                    child_pid.map_or_else(|| "unknown".to_string(), |pid| pid.to_string()),
+                )));
+            }
+        };
         log::info!(
             "renderer {id}: Ready (drm_render={}:{})",
             gpu.major,
@@ -2107,6 +2149,18 @@ impl RendererManager {
 mod subscription_tests {
     use super::*;
     use crate::ipc::uds::recv_control;
+
+    #[tokio::test]
+    async fn failed_renderer_process_status_includes_exit_code() {
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 23")
+            .spawn()
+            .unwrap();
+
+        let status = failed_renderer_process_status(&mut child).await;
+        assert_eq!(status, "process_status=exit status: 23");
+    }
 
     #[test]
     fn process_group_registration_publishes_generation_and_rolls_back() {

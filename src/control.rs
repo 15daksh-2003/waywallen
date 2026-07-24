@@ -947,11 +947,7 @@ async fn spawn_renderer_for_target(
             .await;
     }
 
-    let new_id = app
-        .renderer_manager
-        .spawn(spawn_req)
-        .await
-        .map_err(|e| Error::RendererSpawnFailed(e.to_string()))?;
+    let new_id = app.renderer_manager.spawn(spawn_req).await?;
     if let Some(handle) = app.renderer_manager.get(&new_id).await {
         app.router.register_renderer(handle).await;
     }

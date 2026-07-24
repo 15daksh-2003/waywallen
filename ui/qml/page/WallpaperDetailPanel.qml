@@ -142,7 +142,7 @@ Item {
                 const message = applyQuery.error && applyQuery.error.length > 0
                     ? applyQuery.error
                     : qsTr("Apply failed");
-                W.Action.toast(message, 6000, 1, null);
+                W.Global.toastError(message);
             }
         }
     }
