@@ -108,6 +108,17 @@ pub struct SourceSetting {
 pub enum SourceActionKind {
     Invoke,
     QrLogin,
+    Form,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SourceActionField {
+    pub key: String,
+    pub label: String,
+    pub description: String,
+    pub placeholder: String,
+    pub secret: bool,
+    pub required: bool,
 }
 
 /// A button declared by `info().actions` and routed through the generic plugin
@@ -116,11 +127,16 @@ pub enum SourceActionKind {
 pub struct SourceAction {
     pub id: String,
     pub label: String,
+    pub description: String,
+    pub browse_description: String,
+    pub browse_button_label: String,
     pub group: String,
     pub order: i32,
     pub kind: SourceActionKind,
     pub visible: bool,
     pub enabled: bool,
+    pub fields: Vec<SourceActionField>,
+    pub required_for_browsing: bool,
 }
 
 /// A read-only status row a source plugin declares via `info().status`. The
@@ -167,6 +183,8 @@ pub struct DiscoverSourceInfo {
     pub actions: Vec<SourceAction>,
     /// Status rows the plugin declares via `info().status` (values daemon-filled).
     pub status: Vec<SourceStatus>,
+    /// Provider-owned account image returned by `lifecycle.check()`.
+    pub avatar_url: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -270,6 +288,7 @@ pub struct PluginLifecycleCheck {
     pub state: PluginLifecycleState,
     pub display_value: String,
     pub error: String,
+    pub avatar_url: String,
 }
 
 /// One remote item returned by a plugin's `discover.search(ctx, params)`.
@@ -291,6 +310,7 @@ pub struct DiscoverDetails {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub tags: Vec<String>,
+    pub web_url: String,
     pub extra: HashMap<String, String>,
 }
 
@@ -1120,10 +1140,12 @@ impl LuaPluginRuntime {
                     ))
                 })?;
                 Self::require_table_function(actions_api, "status", "module.actions")?;
-                if actions
-                    .iter()
-                    .any(|action| action.kind == SourceActionKind::Invoke)
-                {
+                if actions.iter().any(|action| {
+                    matches!(
+                        action.kind,
+                        SourceActionKind::Invoke | SourceActionKind::Form
+                    )
+                }) {
                     Self::require_table_function(actions_api, "invoke", "module.actions")?;
                 } else {
                     Self::require_field_absent(actions_api, "invoke", "module.actions")?;
@@ -1173,7 +1195,7 @@ impl LuaPluginRuntime {
         })
     }
 
-    /// Parse the optional `info().actions` sequence (`{id,label,group,order}`).
+    /// Parse the optional `info().actions` sequence.
     fn parse_source_actions(info: &LuaTable, entry_version: u32) -> Result<Vec<SourceAction>> {
         let mut out = Vec::new();
         let mut ids = HashSet::new();
@@ -1194,15 +1216,73 @@ impl LuaPluginRuntime {
             let kind = match Self::optional_string(&entry, "kind", "info().actions")?.as_str() {
                 "" | "invoke" => SourceActionKind::Invoke,
                 "qr_login" if entry_version == ENTRY_VERSION_V3 => SourceActionKind::QrLogin,
+                "form" if entry_version == ENTRY_VERSION_V3 => SourceActionKind::Form,
                 value => {
                     return Err(Error::Internal(anyhow!(
                         "info().actions kind '{value}' is unsupported for entry_version {entry_version}"
                     )))
                 }
             };
+            let mut fields = Vec::new();
+            let mut field_keys = HashSet::new();
+            for field in Self::info_sequence(&entry, "fields")? {
+                let key = Self::require_string(&field, "key", "info().actions.fields")?;
+                if key.trim().is_empty() {
+                    return Err(Error::Internal(anyhow!(
+                        "info().actions.fields entry requires a non-empty key"
+                    )));
+                }
+                if !field_keys.insert(key.clone()) {
+                    return Err(Error::Internal(anyhow!(
+                        "info().actions contains duplicate field key '{key}'"
+                    )));
+                }
+                fields.push(SourceActionField {
+                    key,
+                    label: Self::optional_string(&field, "label", "info().actions.fields")?,
+                    description: Self::optional_string(
+                        &field,
+                        "description",
+                        "info().actions.fields",
+                    )?,
+                    placeholder: Self::optional_string(
+                        &field,
+                        "placeholder",
+                        "info().actions.fields",
+                    )?,
+                    secret: Self::optional_bool(&field, "secret", "info().actions.fields", false)?,
+                    required: Self::optional_bool(
+                        &field,
+                        "required",
+                        "info().actions.fields",
+                        false,
+                    )?,
+                });
+            }
+            if kind == SourceActionKind::Form && fields.is_empty() {
+                return Err(Error::Internal(anyhow!(
+                    "info().actions form action requires at least one field"
+                )));
+            }
+            if kind != SourceActionKind::Form && !fields.is_empty() {
+                return Err(Error::Internal(anyhow!(
+                    "info().actions fields are only valid for form actions"
+                )));
+            }
             out.push(SourceAction {
                 id,
                 label: Self::optional_string(&entry, "label", "info().actions")?,
+                description: Self::optional_string(&entry, "description", "info().actions")?,
+                browse_description: Self::optional_string(
+                    &entry,
+                    "browse_description",
+                    "info().actions",
+                )?,
+                browse_button_label: Self::optional_string(
+                    &entry,
+                    "browse_button_label",
+                    "info().actions",
+                )?,
                 group: Self::optional_string(&entry, "group", "info().actions")?,
                 order: entry
                     .get::<Option<i32>>("order")
@@ -1211,6 +1291,13 @@ impl LuaPluginRuntime {
                 kind,
                 visible: true,
                 enabled: true,
+                fields,
+                required_for_browsing: Self::optional_bool(
+                    &entry,
+                    "required_for_browsing",
+                    "info().actions",
+                    kind == SourceActionKind::QrLogin,
+                )?,
             });
         }
         Ok(out)
@@ -2256,6 +2343,7 @@ impl LuaPluginRuntime {
                 settings: info.settings.clone(),
                 actions: info.actions.clone(),
                 status: info.status.clone(),
+                avatar_url: String::new(),
             });
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -2452,6 +2540,7 @@ impl LuaPluginRuntime {
             width: result.get::<u32>("width").ok(),
             height: result.get::<u32>("height").ok(),
             tags: Self::require_string_sequence(&result, "tags", "module.discover.details result")?,
+            web_url: Self::optional_string(&result, "web_url", "module.discover.details result")?,
             extra: parse_lua_string_map(&result, "extra", "module.discover.details result")?,
         };
         self.persist_state(plugin_name)?;
@@ -2651,6 +2740,11 @@ impl LuaPluginRuntime {
                 "error",
                 "module.lifecycle.check result",
             )?),
+            avatar_url: Self::optional_string(
+                &result,
+                "avatar_url",
+                "module.lifecycle.check result",
+            )?,
         };
         self.persist_state(plugin_name)?;
         Ok(Some(checked))
@@ -2659,8 +2753,12 @@ impl LuaPluginRuntime {
     pub async fn call_action_status(
         &mut self,
         plugin_name: &str,
-    ) -> Result<(Vec<SourceAction>, Vec<SourceStatus>)> {
-        self.check_lifecycle(plugin_name).await?;
+    ) -> Result<(Vec<SourceAction>, Vec<SourceStatus>, String)> {
+        let avatar_url = self
+            .check_lifecycle(plugin_name)
+            .await?
+            .map(|checked| checked.avatar_url)
+            .unwrap_or_default();
         let info = self
             .plugin_infos
             .get(plugin_name)
@@ -2673,7 +2771,7 @@ impl LuaPluginRuntime {
             .get(plugin_name)
             .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
         let Some(status_key) = callbacks.actions_status.as_ref() else {
-            return Ok((actions, status));
+            return Ok((actions, status, avatar_url));
         };
         let status_fn: LuaFunction = self.lua.registry_value(status_key)?;
         let ctx = self.build_remote_ctx(plugin_name)?;
@@ -2713,21 +2811,61 @@ impl LuaPluginRuntime {
             }
         }
         self.persist_state(plugin_name)?;
-        Ok((actions, status))
+        Ok((actions, status, avatar_url))
     }
 
-    pub async fn invoke_action(&mut self, plugin_name: &str, action_id: &str) -> Result<()> {
+    pub async fn invoke_action(
+        &mut self,
+        plugin_name: &str,
+        action_id: &str,
+        values: &HashMap<String, String>,
+    ) -> Result<()> {
         let info = self
             .plugin_infos
             .get(plugin_name)
             .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
-        if !info
+        let action = info
             .actions
             .iter()
-            .any(|action| action.id == action_id && action.kind == SourceActionKind::Invoke)
-        {
+            .find(|action| action.id == action_id)
+            .cloned()
+            .ok_or_else(|| {
+                Error::InvalidArgument(format!(
+                    "plugin action '{plugin_name}:{action_id}' is not invokable"
+                ))
+            })?;
+        if !matches!(
+            action.kind,
+            SourceActionKind::Invoke | SourceActionKind::Form
+        ) {
             return Err(Error::InvalidArgument(format!(
                 "plugin action '{plugin_name}:{action_id}' is not invokable"
+            )));
+        }
+        if action.kind == SourceActionKind::Form {
+            let fields: HashMap<_, _> = action
+                .fields
+                .iter()
+                .map(|field| (field.key.as_str(), field))
+                .collect();
+            for key in values.keys() {
+                if !fields.contains_key(key.as_str()) {
+                    return Err(Error::InvalidArgument(format!(
+                        "plugin action '{plugin_name}:{action_id}' has no field '{key}'"
+                    )));
+                }
+            }
+            for field in &action.fields {
+                if field.required && values.get(&field.key).map_or(true, String::is_empty) {
+                    return Err(Error::InvalidArgument(format!(
+                        "plugin action '{plugin_name}:{action_id}' requires field '{}'",
+                        field.key
+                    )));
+                }
+            }
+        } else if !values.is_empty() {
+            return Err(Error::InvalidArgument(format!(
+                "plugin action '{plugin_name}:{action_id}' does not accept fields"
             )));
         }
         let callbacks = self
@@ -2741,10 +2879,14 @@ impl LuaPluginRuntime {
                 .ok_or_else(|| Error::InvalidArgument("plugin action is unsupported".into()))?,
         )?;
         let ctx = self.build_remote_ctx(plugin_name)?;
+        let value_table = self.lua.create_table()?;
+        for (key, value) in values {
+            value_table.set(key.as_str(), value.as_str())?;
+        }
         self.call_plugin_callback_async::<()>(
             plugin_name,
             &invoke_fn,
-            (ctx, action_id.to_string()),
+            (ctx, action_id.to_string(), value_table),
         )
         .await
         .map_err(|error| Error::DiscoverFailed {
@@ -3434,12 +3576,17 @@ impl LuaPluginRegistry {
             .await
     }
 
-    pub async fn invoke_action(&self, plugin_name: &str, action_id: &str) -> Result<()> {
+    pub async fn invoke_action(
+        &self,
+        plugin_name: &str,
+        action_id: &str,
+        values: &HashMap<String, String>,
+    ) -> Result<()> {
         self.handle(plugin_name)?
             .runtime
             .lock()
             .await
-            .invoke_action(plugin_name, action_id)
+            .invoke_action(plugin_name, action_id, values)
             .await
     }
 
@@ -3542,6 +3689,7 @@ impl LuaPluginRegistry {
                 settings: info.settings.clone(),
                 actions: info.actions.clone(),
                 status: info.status.clone(),
+                avatar_url: String::new(),
             });
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -3608,9 +3756,10 @@ impl LuaPluginRegistry {
             .collect();
         let mut sources = self.discover_sources()?;
         for source in &mut sources {
-            if let Some((actions, status)) = dynamic.get(&source.plugin_id) {
+            if let Some((actions, status, avatar_url)) = dynamic.get(&source.plugin_id) {
                 source.actions = actions.clone();
                 source.status = status.clone();
+                source.avatar_url = avatar_url.clone();
             }
         }
         Ok(sources)
@@ -4216,6 +4365,7 @@ function M.discover.details(ctx, id)
         width = 10,
         height = 20,
         tags = {"tag"},
+        web_url = "https://example.invalid/item/" .. id,
     }
 end
 function M.discover.download(ctx, id)
@@ -4259,6 +4409,7 @@ return M
         let detail = block_value(async { mgr.call_details("imported", "abc").await.unwrap() });
         assert_eq!(detail.width, Some(10));
         assert_eq!(detail.height, Some(20));
+        assert_eq!(detail.web_url, "https://example.invalid/item/abc");
     }
 
     #[test]
@@ -4430,13 +4581,13 @@ return M
     }
 
     #[test]
-    fn wallhaven_plugin_is_discover_only() {
+    fn wallhaven_plugin_supports_optional_api_key_login() {
         let plugin_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("plugins/org.waywallen.wallhaven/main.lua");
 
         let mgr = SourceManager::new().unwrap();
         let name = mgr
-            .load_plugin(&plugin_path, "test.plugin", "1.0", ENTRY_VERSION)
+            .load_plugin(&plugin_path, "test.plugin", "1.0", ENTRY_VERSION_V3)
             .unwrap();
         assert_eq!(name, "wallhaven");
         assert!(mgr.plugins().unwrap().is_empty());
@@ -4446,6 +4597,18 @@ return M
         assert_eq!(sources[0].plugin_id, "wallhaven");
         assert!(sources[0].supports_search);
         assert!(sources[0].tags.iter().any(|tag| tag == "Anime"));
+        assert_eq!(sources[0].actions[0].kind, SourceActionKind::Form);
+        assert_eq!(sources[0].actions[0].fields.len(), 1);
+        assert_eq!(sources[0].actions[0].fields[0].key, "api_key");
+        assert!(sources[0].actions[0].fields[0].secret);
+        assert!(sources[0].actions[0].fields[0].required);
+        assert_eq!(
+            block_value(async { mgr.check_lifecycle("wallhaven").await })
+                .unwrap()
+                .unwrap()
+                .state,
+            PluginLifecycleState::SignedOut
+        );
 
         let runtime = mgr.test_runtime("wallhaven");
         let runtime = runtime.blocking_lock();
@@ -4459,6 +4622,15 @@ return M
         item.set("id", "abc").unwrap();
         let mapped: LuaTable = search_item.call(item).unwrap();
         assert_eq!(mapped.get::<String>("wp_type").unwrap(), "image");
+
+        let details: LuaFunction = map.get("details").unwrap();
+        let detail = runtime.lua.create_table().unwrap();
+        detail.set("url", "https://wallhaven.cc/w/abc123").unwrap();
+        let mapped: LuaTable = details.call(detail).unwrap();
+        assert_eq!(
+            mapped.get::<String>("web_url").unwrap(),
+            "https://wallhaven.cc/w/abc123"
+        );
     }
 
     #[test]
@@ -4622,8 +4794,22 @@ function M.info()
             discover = { search = true, subscription = true },
         },
         actions = {
-            { id = "sign_in", kind = "qr_login" },
+            {
+                id = "sign_in",
+                kind = "qr_login",
+                label = "Log in",
+                description = "Open the account app",
+                browse_description = "Log in to browse this source",
+                browse_button_label = "Continue",
+            },
             { id = "sign_out", kind = "invoke" },
+            {
+                id = "set_alias",
+                kind = "form",
+                fields = {
+                    { key = "alias", label = "Alias", required = true },
+                },
+            },
         },
         status = { { id = "account" } },
         state_migrations = {
@@ -4646,6 +4832,7 @@ function M.lifecycle.check(ctx)
     return {
         state = signed_in and "signed_in" or "signed_out",
         display_value = display,
+        avatar_url = "https://example.invalid/avatar.png",
     }
 end
 function M.lifecycle.migrate(schema_id, raw)
@@ -4665,10 +4852,15 @@ function M.actions.status(ctx)
         },
     }
 end
-function M.actions.invoke(ctx, action_id)
-    if action_id ~= "sign_out" then error("unexpected action") end
-    signed_in = false
-    display = ""
+function M.actions.invoke(ctx, action_id, values)
+    if action_id == "sign_out" then
+        signed_in = false
+        display = ""
+    elseif action_id == "set_alias" then
+        display = values.alias
+    else
+        error("unexpected action")
+    end
 end
 
 M.qrlogin = {}
@@ -4736,8 +4928,17 @@ return M
 
         let sources = block_value(async { manager.discover_sources_with_status().await }).unwrap();
         assert_eq!(sources[0].status[0].value, "migrated");
+        assert_eq!(sources[0].avatar_url, "https://example.invalid/avatar.png");
+        assert_eq!(sources[0].actions[0].label, "Log in");
+        assert_eq!(sources[0].actions[0].description, "Open the account app");
+        assert_eq!(sources[0].actions[0].browse_button_label, "Continue");
+        assert_eq!(
+            sources[0].actions[0].browse_description,
+            "Log in to browse this source"
+        );
         assert!(sources[0].actions[0].visible);
         assert!(!sources[0].actions[1].visible);
+        assert_eq!(sources[0].actions[2].fields[0].key, "alias");
 
         let begin =
             block_value(async { manager.begin_qr_login("account_provider", "sign_in").await })
@@ -4806,7 +5007,36 @@ return M
                 .unwrap();
         assert_eq!(unsubscribed[0].state, SubscriptionState::Unsubscribed);
 
-        block_value(async { manager.invoke_action("account_provider", "sign_out").await }).unwrap();
+        let missing = block_value(async {
+            manager
+                .invoke_action("account_provider", "set_alias", &HashMap::new())
+                .await
+        });
+        assert!(missing
+            .unwrap_err()
+            .to_string()
+            .contains("requires field 'alias'"));
+        let values = HashMap::from([("alias".to_string(), "configured".to_string())]);
+        block_value(async {
+            manager
+                .invoke_action("account_provider", "set_alias", &values)
+                .await
+        })
+        .unwrap();
+        assert_eq!(
+            block_value(async { manager.check_lifecycle("account_provider").await })
+                .unwrap()
+                .unwrap()
+                .display_value,
+            "configured"
+        );
+
+        block_value(async {
+            manager
+                .invoke_action("account_provider", "sign_out", &HashMap::new())
+                .await
+        })
+        .unwrap();
         assert_eq!(
             block_value(async { manager.check_lifecycle("account_provider").await })
                 .unwrap()
@@ -5181,7 +5411,12 @@ return M
             block_value(async { restored.call_discover("first", "", "", 1, &[]).await }).unwrap();
         assert_eq!(after_restart.items[0].id, "failed");
 
-        block_value(async { restored.invoke_action("first", "sign_out").await }).unwrap();
+        block_value(async {
+            restored
+                .invoke_action("first", "sign_out", &HashMap::new())
+                .await
+        })
+        .unwrap();
         let signed_out =
             SourceManager::with_probe_and_state_store(Arc::new(AvFormatProbe::new()), state_store)
                 .unwrap();

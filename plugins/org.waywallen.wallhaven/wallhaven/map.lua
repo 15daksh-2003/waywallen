@@ -54,6 +54,7 @@ function M.details(detail)
         width = detail.dimension_x,
         height = detail.dimension_y,
         tags = tags_from_detail(detail),
+        web_url = detail.url or "",
         extra = {
             url = detail.url or "",
             path = detail.path or "",

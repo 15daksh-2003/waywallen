@@ -46,6 +46,8 @@ export class RemoteSearchQuery : public QueryList,
     Q_PROPERTY(QString query READ query WRITE setQuery NOTIFY queryChanged FINAL)
     Q_PROPERTY(QString sortKey READ sortKey WRITE setSortKey NOTIFY sortKeyChanged FINAL)
     Q_PROPERTY(QStringList tags READ tags WRITE setTags NOTIFY tagsChanged FINAL)
+    Q_PROPERTY(bool browsingEnabled READ browsingEnabled WRITE setBrowsingEnabled NOTIFY
+                   browsingEnabledChanged FINAL)
     Q_PROPERTY(waywallen::model::RemoteListModel* model READ model CONSTANT FINAL)
     Q_PROPERTY(bool hasMore READ hasMore NOTIFY stateChanged FINAL)
     Q_PROPERTY(QString errorText READ errorText NOTIFY stateChanged FINAL)
@@ -65,6 +67,9 @@ public:
     auto tags() const -> const QStringList&;
     void setTags(const QStringList&);
 
+    auto browsingEnabled() const -> bool;
+    void setBrowsingEnabled(bool);
+
     auto model() const -> model::RemoteListModel*;
     auto hasMore() const -> bool;
     auto errorText() const -> const QString&;
@@ -77,9 +82,11 @@ public:
     Q_SIGNAL void queryChanged();
     Q_SIGNAL void sortKeyChanged();
     Q_SIGNAL void tagsChanged();
+    Q_SIGNAL void browsingEnabledChanged();
     Q_SIGNAL void stateChanged();
 
 private:
+    void clearResults();
     void fetchPage(quint32 page, bool append);
 
     QString     m_source_id;
@@ -87,6 +94,8 @@ private:
     QString     m_sort_key;
     QStringList m_tags;
     QString     m_error;
+    bool        m_browsing_enabled { false };
+    quint64     m_generation { 0 };
 };
 
 export class RemoteDetailsQuery : public Query,
@@ -101,6 +110,7 @@ export class RemoteDetailsQuery : public Query,
     Q_PROPERTY(int width READ width NOTIFY loaded FINAL)
     Q_PROPERTY(int height READ height NOTIFY loaded FINAL)
     Q_PROPERTY(QStringList tags READ tags NOTIFY loaded FINAL)
+    Q_PROPERTY(QString webUrl READ webUrl NOTIFY loaded FINAL)
 
 public:
     RemoteDetailsQuery(QObject* parent = nullptr);
@@ -115,6 +125,7 @@ public:
     auto width() const -> int;
     auto height() const -> int;
     auto tags() const -> const QStringList&;
+    auto webUrl() const -> const QString&;
 
     void reload() override;
 
@@ -130,6 +141,7 @@ private:
     int         m_width { 0 };
     int         m_height { 0 };
     QStringList m_tags;
+    QString     m_web_url;
 };
 
 export class RemoteDownloadQuery : public Query,

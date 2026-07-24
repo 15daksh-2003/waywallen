@@ -1,5 +1,6 @@
 module;
 #include "QExtra/macro_qt.hpp"
+#include <QtCore/QVariant>
 
 #ifdef Q_MOC_RUN
 #    include "waywallen/query/plugin_action_query.moc"
@@ -27,6 +28,7 @@ public:
     QString actionId() const;
     void    setActionId(const QString& v);
     void    reload() override;
+    Q_INVOKABLE void invoke(const QVariantMap& values);
 
     Q_SIGNAL void pluginIdChanged();
     Q_SIGNAL void actionIdChanged();

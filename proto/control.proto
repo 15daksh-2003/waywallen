@@ -697,6 +697,8 @@ message RemoteSourceInfo {
   RemoteCapability remote_capability = 12;
   // Provider-owned explanation of the acquisition flow. The host displays it verbatim.
   string remote_hint = 13;
+  // Provider-owned account image returned by lifecycle.check().
+  string avatar_url = 14;
 }
 
 enum RemoteCapability {
@@ -709,6 +711,16 @@ enum PluginActionKind {
   PLUGIN_ACTION_KIND_UNSPECIFIED = 0;
   PLUGIN_ACTION_KIND_INVOKE = 1;
   PLUGIN_ACTION_KIND_QR_LOGIN = 2;
+  PLUGIN_ACTION_KIND_FORM = 3;
+}
+
+message PluginActionField {
+  string key = 1;
+  string label = 2;
+  string description = 3;
+  string placeholder = 4;
+  bool secret = 5;
+  bool required = 6;
 }
 
 message PluginActionDef {
@@ -719,6 +731,16 @@ message PluginActionDef {
   PluginActionKind kind = 5;
   bool visible = 6;
   bool enabled = 7;
+  // Optional plugin-owned explanation shown beside the action.
+  string description = 8;
+  // Ephemeral inputs sent only when this action is invoked. They are not settings.
+  repeated PluginActionField fields = 9;
+  // Whether browsing this source requires this action.
+  bool required_for_browsing = 10;
+  // Optional plugin-owned explanation shown while browsing requires this action.
+  string browse_description = 11;
+  // Optional plugin-owned label for the browse login button.
+  string browse_button_label = 12;
 }
 message PluginStatusRow {
   string id = 1;
@@ -733,6 +755,7 @@ message PluginStatusRow {
 message PluginActionRequest {
   string plugin_id = 1;
   string action_id = 2;
+  map<string, string> values = 3;
 }
 message PluginActionResponse {
   bool accepted = 1;
@@ -797,6 +820,7 @@ message RemoteDetailsResponse {
   string error = 4;
   uint32 width = 5;
   uint32 height = 6;
+  string web_url = 7;
 }
 
 enum RemoteDownloadState {

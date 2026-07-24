@@ -29,6 +29,10 @@ void    PluginActionQuery::setActionId(const QString& v) {
 }
 
 void PluginActionQuery::reload() {
+    invoke({});
+}
+
+void PluginActionQuery::invoke(const QVariantMap& values) {
     setStatus(Status::Querying);
     auto backend = App::instance()->backend();
 
@@ -36,6 +40,11 @@ void PluginActionQuery::reload() {
     auto inner = proto::PluginActionRequest {};
     inner.setPluginId(m_plugin_id);
     inner.setActionId(m_action_id);
+    proto::PluginActionRequest::ValuesEntry wire_values;
+    for (auto it = values.cbegin(); it != values.cend(); ++it) {
+        wire_values.insert(it.key(), it.value().toString());
+    }
+    inner.setValues(wire_values);
     req.setPluginAction(std::move(inner));
 
     auto self = QWatcher { this };

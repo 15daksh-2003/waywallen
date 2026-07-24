@@ -100,17 +100,20 @@ MD.Page {
                 }
             }
         }
+        const canBrowse = currentSourceLoginAction() === null;
+        searchQuery.browsingEnabled = canBrowse;
         const nextTags = sourceChanged ? [] : pruneTags(searchQuery.tags, s.tags ?? []);
         if (!sameList(searchQuery.tags, nextTags))
             searchQuery.tags = nextTags;
         searchQuery.sourceId = id;
         detailsQuery.sourceId = id;
         searchQuery.sortKey = sortOptions.length > 0 ? sortOptions[sortIndex].key : "";
-        if (sourceChanged) {
+        if (sourceChanged || !canBrowse) {
             detailRow = null;
             detailDownloadState = 0;
             detailSubscriptionState = 0;
             detailsQuery.itemId = "";
+            m_grid.currentIndex = -1;
         }
     }
 
@@ -167,6 +170,8 @@ MD.Page {
 
     function refreshDetailSubscription() {
         if (!root.detailRow || root.sourceCapability(root.detailRow.sourceId) !== 2)
+            return;
+        if (root.currentSourceLoginAction() !== null)
             return;
         root.detailSubscriptionState = 3;
         subscriptionQuery.refresh(root.detailRow.sourceId, root.detailRow.itemId);
@@ -261,7 +266,7 @@ MD.Page {
         id: refreshAction
         icon.name: MD.Token.icon.refresh
         text: "Refresh"
-        enabled: !searchQuery.querying
+        enabled: searchQuery.browsingEnabled && !searchQuery.querying
         onTriggered: searchQuery.reload()
     }
 
@@ -270,6 +275,14 @@ MD.Page {
         text: "Close"
         icon.name: MD.Token.icon.close
         onTriggered: root.closeDetail()
+    }
+
+    MD.Action {
+        id: linkAction
+        text: "Open web page"
+        icon.name: MD.Token.icon.web
+        visible: detailsQuery.webUrl.length > 0
+        onTriggered: MD.Util.openUrlExternally(detailsQuery.webUrl)
     }
 
     MD.Action {
@@ -283,12 +296,17 @@ MD.Page {
     W.RemoteAvailabilityQuery {
         id: availabilityQuery
         onSourcesChanged: {
-            if (sources.length === 0)
+            if (sources.length === 0) {
+                searchQuery.browsingEnabled = false;
                 return;
+            }
             if (root.sourceId.length === 0)
                 root.setSource(defaultSourceId.length > 0 ? defaultSourceId : sources[0].id);
             else
                 root.setSource(root.sourceId);
+            if (searchQuery.browsingEnabled)
+                searchQuery.delayReload();
+            root.refreshDetailSubscription();
         }
     }
 
@@ -302,14 +320,16 @@ MD.Page {
         return null;
     }
 
-    function currentSourceNeedsLogin() {
+    function currentSourceLoginAction() {
         const c = root.currentSourceConfig();
         const actions = c && c.actions ? c.actions : [];
         for (let i = 0; i < actions.length; ++i) {
-            if (Number(actions[i].kind) === 2 && (actions[i].visible === undefined || actions[i].visible))
-                return true;
+            const kind = Number(actions[i].kind);
+            if ((kind === 2 || kind === 3) && actions[i].requiredForBrowsing === true
+                && (actions[i].visible === undefined || actions[i].visible))
+                return actions[i];
         }
-        return false;
+        return null;
     }
 
     function openRemoteManagement() {
@@ -416,8 +436,6 @@ MD.Page {
 
     function reloadAll() {
         availabilityQuery.reload();
-        if (root.sourceId.length > 0)
-            searchQuery.reload();
     }
 
     Connections {
@@ -427,14 +445,9 @@ MD.Page {
         }
         function onSettingsChanged() {
             availabilityQuery.reload();
-            if (root.sourceId.length > 0)
-                searchQuery.reload();
         }
         function onPluginStateChanged() {
             availabilityQuery.reload();
-            if (root.sourceId.length > 0)
-                searchQuery.reload();
-            root.refreshDetailSubscription();
         }
     }
 
@@ -597,7 +610,27 @@ MD.Page {
                         spacing: 12
 
                         readonly property bool hasError: !searchQuery.querying && searchQuery.errorText.length > 0
-                        readonly property bool needsLogin: hasError && root.currentSourceNeedsLogin()
+                        readonly property var loginAction: root.currentSourceLoginAction()
+                        readonly property bool needsLogin: loginAction !== null
+                        readonly property string loginLabel: {
+                            const label = loginAction ? String(loginAction.label ?? "").trim() : "";
+                            return label.length > 0 ? label : qsTr("Log in to %1").arg(root.sourceName(root.sourceId));
+                        }
+                        readonly property string loginDescription: {
+                            const browseDescription = loginAction
+                                ? String(loginAction.browseDescription ?? "").trim() : "";
+                            if (browseDescription.length > 0)
+                                return browseDescription;
+                            const description = loginAction
+                                ? String(loginAction.description ?? "").trim() : "";
+                            return description.length > 0
+                                ? description : qsTr("Log in to start browsing.");
+                        }
+                        readonly property string loginButtonLabel: {
+                            const label = loginAction
+                                ? String(loginAction.browseButtonLabel ?? "").trim() : "";
+                            return label.length > 0 ? label : qsTr("Log in");
+                        }
 
                         MD.BusyIndicator {
                             Layout.alignment: Qt.AlignHCenter
@@ -615,8 +648,8 @@ MD.Page {
                         MD.Label {
                             Layout.fillWidth: true
                             horizontalAlignment: Text.AlignHCenter
-                            visible: parent.hasError
-                            text: parent.needsLogin ? qsTr("Log in to %1").arg(root.sourceName(root.sourceId)) : qsTr("Couldn't load this source")
+                            visible: parent.needsLogin || parent.hasError
+                            text: parent.needsLogin ? parent.loginLabel : qsTr("Couldn't load this source")
                             typescale: MD.Token.typescale.title_medium
                             color: MD.Token.color.on_surface
                             wrapMode: Text.WordWrap
@@ -624,10 +657,11 @@ MD.Page {
                         MD.Label {
                             Layout.fillWidth: true
                             horizontalAlignment: Text.AlignHCenter
-                            visible: parent.hasError
-                            text: parent.needsLogin ? qsTr("Log in to start browsing.") : searchQuery.errorText
+                            visible: parent.needsLogin || parent.hasError
+                            text: parent.needsLogin ? parent.loginDescription : searchQuery.errorText
                             typescale: MD.Token.typescale.body_medium
                             color: MD.Token.color.on_surface_variant
+                            font.capitalization: Font.MixedCase
                             wrapMode: Text.WordWrap
                             maximumLineCount: 4
                             elide: Text.ElideRight
@@ -635,14 +669,15 @@ MD.Page {
                         MD.Button {
                             Layout.alignment: Qt.AlignHCenter
                             visible: parent.needsLogin
-                            text: qsTr("Log in")
+                            text: parent.loginButtonLabel
                             mdState.type: MD.Enum.BtFilledTonal
                             onClicked: root.openRemoteManagement()
                         }
 
                         MD.Label {
                             Layout.alignment: Qt.AlignHCenter
-                            visible: !searchQuery.querying && searchQuery.errorText.length === 0
+                            visible: !searchQuery.querying && !parent.needsLogin
+                                     && searchQuery.errorText.length === 0
                             text: qsTr("No wallpapers found")
                             typescale: MD.Token.typescale.body_large
                             color: MD.Token.color.on_surface_variant
@@ -722,7 +757,7 @@ MD.Page {
                             }
 
                             MD.ActionToolBar {
-                                actions: [infoAction, closeDetailAction]
+                                actions: [linkAction, infoAction, closeDetailAction]
                                 iconDelegate: MD.SmallIconButton {
                                     action: MD.ToolBarLayout.action
                                 }

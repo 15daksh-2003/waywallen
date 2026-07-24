@@ -3,4 +3,4 @@ id = "org.waywallen.wallhaven"
 name = "Wallhaven"
 version = "0.1.0"
 entry = "main.lua"
-entry_version = 2
+entry_version = 3

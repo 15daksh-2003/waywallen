@@ -1,4 +1,5 @@
 local M = {}
+local session = import("wallhaven.session")
 
 local API = "https://wallhaven.cc/api/v1"
 
@@ -98,7 +99,15 @@ local function append_query(query, term)
 end
 
 local function request_json(ctx, url, query)
-    local rsp = ctx.http:get(url):query(query):timeout(20):send()
+    local rsp = ctx.http:get(url)
+        :headers(session.headers())
+        :query(query)
+        :timeout(20)
+        :send()
+    if rsp:status() == 401 or rsp:status() == 403 then
+        session.sign_out()
+        error("Wallhaven API key was rejected; log in again")
+    end
     if not rsp:ok() then
         error("wallhaven http " .. tostring(rsp:status()))
     end

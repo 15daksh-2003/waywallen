@@ -62,6 +62,7 @@ void RemoteAvailabilityQuery::reload() {
                 m[u"displayName"_s]      = src.displayName();
                 m[u"remoteCapability"_s] = static_cast<int>(src.remoteCapability());
                 m[u"remoteHint"_s]       = src.remoteHint();
+                m[u"avatarUrl"_s]        = src.avatarUrl();
 
                 QVariantList settings;
                 for (const auto& ss : src.settings()) {
@@ -89,13 +90,29 @@ void RemoteAvailabilityQuery::reload() {
                 QVariantList actions;
                 for (const auto& a : src.actions()) {
                     QVariantMap am;
-                    am[u"id"_s]      = a.id_proto();
-                    am[u"label"_s]   = a.label();
-                    am[u"group"_s]   = a.group();
-                    am[u"order"_s]   = static_cast<int>(a.order());
-                    am[u"kind"_s]    = static_cast<int>(a.kind());
-                    am[u"visible"_s] = a.visible();
-                    am[u"enabled"_s] = a.enabled();
+                    am[u"id"_s]                = a.id_proto();
+                    am[u"label"_s]             = a.label();
+                    am[u"description"_s]       = a.description();
+                    am[u"browseDescription"_s] = a.browseDescription();
+                    am[u"browseButtonLabel"_s] = a.browseButtonLabel();
+                    am[u"group"_s]             = a.group();
+                    am[u"order"_s]             = static_cast<int>(a.order());
+                    am[u"kind"_s]              = static_cast<int>(a.kind());
+                    am[u"visible"_s]           = a.visible();
+                    am[u"enabled"_s]           = a.enabled();
+                    QVariantList fields;
+                    for (const auto& field : a.fields()) {
+                        QVariantMap fm;
+                        fm[u"key"_s]         = field.key();
+                        fm[u"label"_s]       = field.label();
+                        fm[u"description"_s] = field.description();
+                        fm[u"placeholder"_s] = field.placeholder();
+                        fm[u"secret"_s]      = field.secret();
+                        fm[u"required"_s]    = field.required();
+                        fields.append(fm);
+                    }
+                    am[u"fields"_s]              = fields;
+                    am[u"requiredForBrowsing"_s] = a.requiredForBrowsing();
                     actions.append(am);
                 }
                 m[u"actions"_s] = actions;
@@ -160,6 +177,20 @@ void RemoteSearchQuery::setTags(const QStringList& v) {
     }
 }
 
+auto RemoteSearchQuery::browsingEnabled() const -> bool { return m_browsing_enabled; }
+void RemoteSearchQuery::setBrowsingEnabled(bool v) {
+    if (m_browsing_enabled == v) return;
+    m_browsing_enabled = v;
+    Q_EMIT browsingEnabledChanged();
+    if (v) {
+        delayReload();
+    } else {
+        ++m_generation;
+        cancel();
+        clearResults();
+    }
+}
+
 auto RemoteSearchQuery::model() const -> model::RemoteListModel* { return tdata(); }
 auto RemoteSearchQuery::hasMore() const -> bool {
     const auto t = model();
@@ -168,19 +199,33 @@ auto RemoteSearchQuery::hasMore() const -> bool {
 auto RemoteSearchQuery::errorText() const -> const QString& { return m_error; }
 
 void RemoteSearchQuery::reload() {
+    if (! m_browsing_enabled || m_source_id.isEmpty()) {
+        clearResults();
+        return;
+    }
     setOffset(0);
     setNoMore(false);
     fetchPage(1, false);
 }
 
 void RemoteSearchQuery::loadMore() {
-    if (noMore() || querying()) return;
+    if (! m_browsing_enabled || noMore() || querying()) return;
     fetchPage(static_cast<quint32>(offset() + 2), true);
 }
 
 void RemoteSearchQuery::fetchMore(qint32) {
-    if (noMore()) return;
+    if (! m_browsing_enabled || noMore()) return;
     fetchPage(static_cast<quint32>(offset() + 2), true);
+}
+
+void RemoteSearchQuery::clearResults() {
+    setOffset(0);
+    setNoMore(true);
+    m_error.clear();
+    setError({});
+    if (auto t = model()) t->reset({}, false);
+    setStatus(Status::Finished);
+    Q_EMIT stateChanged();
 }
 
 void RemoteSearchQuery::fetchPage(quint32 page, bool append) {
@@ -199,11 +244,13 @@ void RemoteSearchQuery::fetchPage(quint32 page, bool append) {
     inner.setRequiredTags(m_tags);
     req.setRemoteSearch(std::move(inner));
 
-    auto self = QWatcher { this };
-    spawn([self, backend, req = std::move(req), page, append]() mutable -> task<void> {
+    const auto generation = ++m_generation;
+    auto       self       = QWatcher { this };
+    spawn([self, backend, req = std::move(req), page, append, generation]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
         if (! co_await QAsyncResult::qexecutor()) co_return;
         if (! self) co_return;
+        if (self->m_generation != generation) co_return;
 
         self->inspect_set(result, [self, page, append](const proto::Response& rsp) {
             const auto&             sr = rsp.remoteSearch();
@@ -261,6 +308,7 @@ auto RemoteDetailsQuery::size() const -> const QString& { return m_size; }
 auto RemoteDetailsQuery::width() const -> int { return m_width; }
 auto RemoteDetailsQuery::height() const -> int { return m_height; }
 auto RemoteDetailsQuery::tags() const -> const QStringList& { return m_tags; }
+auto RemoteDetailsQuery::webUrl() const -> const QString& { return m_web_url; }
 
 void RemoteDetailsQuery::reload() {
     m_description.clear();
@@ -268,6 +316,7 @@ void RemoteDetailsQuery::reload() {
     m_width  = 0;
     m_height = 0;
     m_tags.clear();
+    m_web_url.clear();
     Q_EMIT loaded();
     if (m_item_id.isEmpty()) return;
     setStatus(Status::Querying);
@@ -291,6 +340,7 @@ void RemoteDetailsQuery::reload() {
             self->m_size        = dr.size();
             self->m_width       = static_cast<int>(dr.width());
             self->m_height      = static_cast<int>(dr.height());
+            self->m_web_url     = dr.webUrl();
             self->m_tags.clear();
             for (const auto& t : dr.tags()) self->m_tags.push_back(t);
             Q_EMIT self->loaded();

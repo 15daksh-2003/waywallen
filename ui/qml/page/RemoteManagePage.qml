@@ -17,6 +17,7 @@ MD.Page {
     property var schemaList: []
     property var actionList: []
     property var statusList: []
+    property string avatarUrl: ""
     property var currentValues: ({})
     property var pendingValues: ({})
     property int inFlightWrites: 0
@@ -77,6 +78,7 @@ MD.Page {
         schemaList = source.settings || [];
         actionList = source.actions || [];
         statusList = source.status || [];
+        avatarUrl = source.avatarUrl || "";
     }
 
     function valueFor(schema) {
@@ -116,10 +118,27 @@ MD.Page {
         flushPending();
     }
 
-    function runAction(actionId) {
+    function runAction(action) {
+        if (Number(action.kind) === 3) {
+            actionForm.openFor(action);
+            return;
+        }
         actionQuery.pluginId = sourceId;
-        actionQuery.actionId = actionId;
+        actionQuery.actionId = action.id;
         actionQuery.reload();
+    }
+
+    function submitAction(action, values) {
+        actionQuery.pluginId = sourceId;
+        actionQuery.actionId = action.id;
+        actionQuery.invoke(values);
+    }
+
+    W.PluginActionFormDialog {
+        id: actionForm
+        onSubmitted: function(values) {
+            root.submitAction(action, values);
+        }
     }
 
     W.RemoteAvailabilityQuery {
@@ -241,6 +260,7 @@ MD.Page {
                             delegate: RowLayout {
                                 id: statusRow
                                 required property var modelData
+                                required property int index
                                 Layout.fillWidth: true
                                 spacing: 12
 
@@ -251,6 +271,18 @@ MD.Page {
                                 }
                                 Item {
                                     Layout.fillWidth: true
+                                }
+                                MD.Image {
+                                    Layout.preferredWidth: 32
+                                    Layout.preferredHeight: 32
+                                    Layout.maximumWidth: 32
+                                    Layout.maximumHeight: 32
+                                    visible: statusRow.index === 0 && root.avatarUrl.length > 0
+                                    source: root.avatarUrl
+                                    sourceSize: Qt.size(64, 64)
+                                    asynchronous: true
+                                    fillMode: Image.PreserveAspectCrop
+                                    radius: 16
                                 }
                                 MD.Text {
                                     Layout.maximumWidth: accountColumn.width * 0.65
@@ -263,21 +295,37 @@ MD.Page {
                             }
                         }
 
-                        Flow {
+                        ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 8
                             visible: root.actionList.length > 0
 
                             Repeater {
                                 model: root.actionList
-                                delegate: MD.Button {
-                                    id: actionButton
+                                delegate: ColumnLayout {
+                                    id: actionItem
                                     required property var modelData
-                                    text: actionButton.modelData.label
-                                    visible: actionButton.modelData.visible === undefined || actionButton.modelData.visible
-                                    enabled: !actionQuery.querying && (actionButton.modelData.enabled === undefined || actionButton.modelData.enabled)
-                                    mdState.type: MD.Enum.BtFilledTonal
-                                    onClicked: root.runAction(actionButton.modelData.id)
+                                    Layout.fillWidth: true
+                                    visible: actionItem.modelData.visible === undefined || actionItem.modelData.visible
+                                    spacing: 6
+
+                                    MD.Text {
+                                        Layout.fillWidth: true
+                                        visible: String(actionItem.modelData.description || "").length > 0
+                                        text: actionItem.modelData.description || ""
+                                        typescale: MD.Token.typescale.body_medium
+                                        color: MD.Token.color.on_surface_variant
+                                        wrapMode: Text.WordWrap
+                                    }
+
+                                    MD.Button {
+                                        text: actionItem.modelData.label
+                                        enabled: !actionQuery.querying
+                                            && (actionItem.modelData.enabled === undefined
+                                                || actionItem.modelData.enabled)
+                                        mdState.type: MD.Enum.BtFilledTonal
+                                        onClicked: root.runAction(actionItem.modelData)
+                                    }
                                 }
                             }
                         }

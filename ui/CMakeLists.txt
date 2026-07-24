@@ -177,6 +177,7 @@ set(QML_FILES
   qml/dialog/WallpaperFilterDialog.qml
   qml/dialog/RemoteFilterDialog.qml
   qml/dialog/QrLoginDialog.qml
+  qml/dialog/PluginActionFormDialog.qml
   qml/page/WallpaperPage.qml
   qml/page/PlaylistDetailPanel.qml
   qml/page/WallpaperDetailPanel.qml

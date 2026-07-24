@@ -2124,6 +2124,7 @@ async fn dispatch_inner(
                             status,
                             remote_capability: remote_capability as i32,
                             remote_hint: s.remote_hint,
+                            avatar_url: s.avatar_url,
                         }
                     })
                     .collect(),
@@ -2314,6 +2315,7 @@ async fn dispatch_inner(
                         error: query_error("remote details", e),
                         width: 0,
                         height: 0,
+                        web_url: String::new(),
                     }));
                 }
             };
@@ -2326,6 +2328,7 @@ async fn dispatch_inner(
                     error: String::new(),
                     width: details.width.unwrap_or(0),
                     height: details.height.unwrap_or(0),
+                    web_url: details.web_url,
                 }),
                 Err(e) => Res::RemoteDetails(pb::RemoteDetailsResponse {
                     description: String::new(),
@@ -2334,6 +2337,7 @@ async fn dispatch_inner(
                     error: query_error("remote details", e),
                     width: 0,
                     height: 0,
+                    web_url: String::new(),
                 }),
             }
         }
@@ -2385,10 +2389,10 @@ async fn dispatch_inner(
         Req::PluginAction(r) => {
             use crate::plugin::source_manager::SourceActionKind;
             match state.source_manager.action_kind(&r.plugin_id, &r.action_id) {
-                Some(SourceActionKind::Invoke) => {
+                Some(SourceActionKind::Invoke | SourceActionKind::Form) => {
                     match state
                         .source_manager
-                        .invoke_action(&r.plugin_id, &r.action_id)
+                        .invoke_action(&r.plugin_id, &r.action_id, &r.values)
                         .await
                     {
                         Ok(()) => {
@@ -2526,13 +2530,10 @@ async fn dispatch_inner(
                 .set_subscription(&source_id, &r.item_id, r.subscribed)
                 .await
             {
-                Ok(()) => {
-                    state.events.publish(GlobalEvent::PluginStateChanged);
-                    Res::SubscriptionSet(pb::SubscriptionSetResponse {
-                        accepted: true,
-                        error: String::new(),
-                    })
-                }
+                Ok(()) => Res::SubscriptionSet(pb::SubscriptionSetResponse {
+                    accepted: true,
+                    error: String::new(),
+                }),
                 Err(error) => Res::SubscriptionSet(pb::SubscriptionSetResponse {
                     accepted: false,
                     error: query_error("subscription update", error),
