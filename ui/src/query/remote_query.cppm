@@ -154,12 +154,12 @@ public:
 
     void             reload() override;
     Q_INVOKABLE void start(const QString& sourceId, const QString& id);
-    Q_INVOKABLE void uninstall(const QString& sourceId, const QString& id);
+    Q_INVOKABLE void remove(const QString& sourceId, const QString& id);
 
     Q_SIGNAL void accepted(const QString& sourceId, const QString& id);
     Q_SIGNAL void rejected(const QString& sourceId, const QString& id, const QString& error);
-    Q_SIGNAL void uninstalled(const QString& sourceId, const QString& id);
-    Q_SIGNAL void uninstallFailed(const QString& sourceId, const QString& id, const QString& error);
+    Q_SIGNAL void removed(const QString& sourceId, const QString& id);
+    Q_SIGNAL void removeFailed(const QString& sourceId, const QString& id, const QString& error);
 };
 
 export class RemoteSubscriptionQuery

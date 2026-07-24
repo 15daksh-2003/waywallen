@@ -17,7 +17,7 @@ Item {
     signal back
     signal showInfo
     signal downloadRequested
-    signal uninstallRequested
+    signal removeRequested
     signal subscriptionRefreshRequested
     signal subscriptionChangeRequested(bool subscribed)
 
@@ -239,7 +239,7 @@ Item {
                     switch (root.downloadState) {
                     case 1: return qsTr("Pending");
                     case 2: return qsTr("Downloading");
-                    case 3: return qsTr("Uninstall");
+                    case 3: return qsTr("Remove");
                     case 4:
                     case 5: return qsTr("Retry");
                     default: return qsTr("Download");
@@ -247,7 +247,7 @@ Item {
                 }
                 onClicked: {
                     if (root.downloadState === 3)
-                        root.uninstallRequested();
+                        root.removeRequested();
                     else
                         root.downloadRequested();
                 }

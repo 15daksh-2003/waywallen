@@ -11,6 +11,9 @@ namespace waywallen::model
 WallpaperStoreItem::WallpaperStoreItem(QObject* parent)
     : base_type(AppStore::instance()->wallpapers, parent) {}
 
+RemoteStoreItem::RemoteStoreItem(QObject* parent)
+    : base_type(AppStore::instance()->remotes, parent) {}
+
 } // namespace waywallen::model
 
 #include "waywallen/model/store_item.moc.cpp"

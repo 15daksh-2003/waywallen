@@ -7,6 +7,7 @@ module;
 module waywallen;
 import :query.remote;
 import :app;
+import :msg.store;
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -154,6 +155,7 @@ void RemoteAvailabilityQuery::reload() {
 }
 
 RemoteSearchQuery::RemoteSearchQuery(QObject* parent): QueryList(parent) {
+    tdata()->set_store(tdata(), AppStore::instance()->remotes);
     connect_requet_reload(&RemoteSearchQuery::sourceIdChanged, this);
     connect_requet_reload(&RemoteSearchQuery::queryChanged, this);
     connect_requet_reload(&RemoteSearchQuery::sortKeyChanged, this);
@@ -370,6 +372,7 @@ void RemoteDownloadQuery::reload() {}
 
 void RemoteDownloadQuery::start(const QString& sourceId, const QString& id) {
     if (sourceId.isEmpty() || id.isEmpty()) return;
+    AppStore::instance()->setRemoteAcquisitionState(sourceId, id, 1);
     setStatus(Status::Querying);
     auto backend = App::instance()->backend();
 
@@ -385,11 +388,20 @@ void RemoteDownloadQuery::start(const QString& sourceId, const QString& id) {
         if (! co_await QAsyncResult::qexecutor()) co_return;
         if (! self) co_return;
 
+        if (! result) {
+            self->inspect_set(result, [](const proto::Response&) {
+            });
+            AppStore::instance()->setRemoteAcquisitionState(sourceId, id, 0);
+            Q_EMIT self->rejected(sourceId, id, self->error());
+            co_return;
+        }
+
         self->inspect_set(result, [self, sourceId, id](const proto::Response& rsp) {
             const auto& dr = rsp.remoteDownload();
             if (dr.accepted()) {
                 Q_EMIT self->accepted(sourceId, id);
             } else {
+                AppStore::instance()->setRemoteAcquisitionState(sourceId, id, 0);
                 Q_EMIT self->rejected(sourceId, id, dr.error());
             }
         });
@@ -397,7 +409,7 @@ void RemoteDownloadQuery::start(const QString& sourceId, const QString& id) {
     });
 }
 
-void RemoteDownloadQuery::uninstall(const QString& sourceId, const QString& id) {
+void RemoteDownloadQuery::remove(const QString& sourceId, const QString& id) {
     if (sourceId.isEmpty() || id.isEmpty()) return;
     setStatus(Status::Querying);
     auto backend = App::instance()->backend();
@@ -414,12 +426,20 @@ void RemoteDownloadQuery::uninstall(const QString& sourceId, const QString& id) 
         if (! co_await QAsyncResult::qexecutor()) co_return;
         if (! self) co_return;
 
+        if (! result) {
+            self->inspect_set(result, [](const proto::Response&) {
+            });
+            Q_EMIT self->removeFailed(sourceId, id, self->error());
+            co_return;
+        }
+
         self->inspect_set(result, [self, sourceId, id](const proto::Response& rsp) {
             const auto& ur = rsp.remoteUninstall();
             if (ur.removed()) {
-                Q_EMIT self->uninstalled(sourceId, id);
+                AppStore::instance()->setRemoteAcquisitionState(sourceId, id, 0);
+                Q_EMIT self->removed(sourceId, id);
             } else {
-                Q_EMIT self->uninstallFailed(sourceId, id, ur.error());
+                Q_EMIT self->removeFailed(sourceId, id, ur.error());
             }
         });
         co_return;
@@ -432,6 +452,7 @@ void RemoteSubscriptionQuery::reload() {}
 
 void RemoteSubscriptionQuery::refresh(const QString& sourceId, const QString& id) {
     if (sourceId.isEmpty() || id.isEmpty()) return;
+    AppStore::instance()->setRemoteAcquisitionState(sourceId, id, 3);
     const auto generation = ++m_refresh_generation;
     setStatus(Status::Querying);
     auto backend = App::instance()->backend();
@@ -452,6 +473,7 @@ void RemoteSubscriptionQuery::refresh(const QString& sourceId, const QString& id
         if (! result) {
             self->inspect_set(result, [](const proto::Response&) {
             });
+            AppStore::instance()->setRemoteAcquisitionState(sourceId, id, 0);
             Q_EMIT self->stateLoaded(sourceId, id, 0, self->error());
             co_return;
         }
@@ -465,6 +487,7 @@ void RemoteSubscriptionQuery::refresh(const QString& sourceId, const QString& id
                     break;
                 }
             }
+            AppStore::instance()->setRemoteAcquisitionState(sourceId, id, state);
             Q_EMIT self->stateLoaded(sourceId, id, state, status.error());
         });
         co_return;
@@ -474,6 +497,7 @@ void RemoteSubscriptionQuery::refresh(const QString& sourceId, const QString& id
 void RemoteSubscriptionQuery::setSubscribed(const QString& sourceId, const QString& id,
                                             bool subscribed) {
     if (sourceId.isEmpty() || id.isEmpty()) return;
+    AppStore::instance()->setRemoteAcquisitionState(sourceId, id, 3);
     setStatus(Status::Querying);
     auto backend = App::instance()->backend();
 
@@ -493,12 +517,15 @@ void RemoteSubscriptionQuery::setSubscribed(const QString& sourceId, const QStri
         if (! result) {
             self->inspect_set(result, [](const proto::Response&) {
             });
+            AppStore::instance()->setRemoteAcquisitionState(sourceId, id, subscribed ? 1 : 2);
             Q_EMIT self->setFinished(sourceId, id, subscribed, false, self->error());
             co_return;
         }
 
         self->inspect_set(result, [self, sourceId, id, subscribed](const proto::Response& rsp) {
             const auto& update = rsp.subscriptionSet();
+            const auto  state  = update.accepted() ? (subscribed ? 2 : 1) : (subscribed ? 1 : 2);
+            AppStore::instance()->setRemoteAcquisitionState(sourceId, id, state);
             Q_EMIT self->setFinished(sourceId, id, subscribed, update.accepted(), update.error());
         });
         co_return;

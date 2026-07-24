@@ -2326,7 +2326,7 @@ async fn dispatch_inner(
                 Err(e) => {
                     return Ok(Res::RemoteUninstall(pb::RemoteUninstallResponse {
                         removed: false,
-                        error: query_error("remote uninstall", e),
+                        error: query_error("remote remove", e),
                     }));
                 }
             };
@@ -2336,7 +2336,7 @@ async fn dispatch_inner(
                 return Ok(Res::RemoteUninstall(pb::RemoteUninstallResponse {
                     removed: false,
                     error: query_error(
-                        "remote uninstall",
+                        "remote remove",
                         "remote source does not own downloaded content",
                     ),
                 }));
@@ -2345,7 +2345,7 @@ async fn dispatch_inner(
             if rows.is_empty() {
                 Res::RemoteUninstall(pb::RemoteUninstallResponse {
                     removed: false,
-                    error: query_error("remote uninstall", "remote item is not downloaded"),
+                    error: query_error("remote remove", "remote item is not downloaded"),
                 })
             } else {
                 for (item, lib) in rows {

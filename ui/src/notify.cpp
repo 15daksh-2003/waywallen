@@ -4,6 +4,7 @@ module;
 module waywallen;
 import :notify;
 import :app;
+import :msg.store;
 
 namespace proto = waywallen::control::v1;
 
@@ -95,6 +96,8 @@ Notify::Notify(QObject* parent): QObject(parent) {
                     f.clientName(), f.clientProtocolVersion(), f.errorCode(), f.reason());
             } else if (evt.hasRemoteDownloadProgress()) {
                 const auto& p = evt.remoteDownloadProgress();
+                AppStore::instance()->setRemoteAcquisitionState(
+                    p.sourceId(), p.id_proto(), static_cast<int>(p.state()));
                 Q_EMIT remoteDownloadProgress(
                     p.sourceId(), p.id_proto(), static_cast<int>(p.state()), p.error());
             } else if (evt.hasQrLoginProgress()) {

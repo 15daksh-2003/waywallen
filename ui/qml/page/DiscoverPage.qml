@@ -10,9 +10,8 @@ MD.Page {
     showBackground: false
     padding: MD.MProp.size.isCompact ? 0 : 12
 
-    property var detailRow: null
-    property int detailDownloadState: 0
-    property int detailSubscriptionState: 0
+    property bool detailOpen: false
+    readonly property var detailRow: detailOpen ? detailStore.item : null
 
     property string sourceId: ""
     property var sortOptions: []
@@ -34,6 +33,10 @@ MD.Page {
 
     W.DiscoverState {
         id: discoverState
+    }
+
+    W.RemoteStoreItem {
+        id: detailStore
     }
 
     function sourceInfo(id) {
@@ -149,9 +152,7 @@ MD.Page {
         detailsQuery.sourceId = id;
         searchQuery.sortKey = sortOptions.length > 0 ? sortOptions[sortIndex].key : "";
         if (sourceChanged || !canBrowse) {
-            detailRow = null;
-            detailDownloadState = 0;
-            detailSubscriptionState = 0;
+            detailOpen = false;
             detailsQuery.itemId = "";
             m_grid.currentIndex = -1;
         }
@@ -165,9 +166,8 @@ MD.Page {
     }
 
     function selectItem(index) {
-        detailRow = searchQuery.model.get(index);
-        detailDownloadState = root.sourceCapability(detailRow.sourceId) === 1 ? Number(detailRow.acquisitionState ?? 0) : 0;
-        detailSubscriptionState = 0;
+        detailStore.item = searchQuery.model.item(index);
+        detailOpen = true;
         detailsQuery.sourceId = detailRow.sourceId;
         detailsQuery.itemId = detailRow.itemId;
         if (root.sourceCapability(detailRow.sourceId) === 2)
@@ -175,9 +175,7 @@ MD.Page {
     }
 
     function closeDetail() {
-        detailRow = null;
-        detailDownloadState = 0;
-        detailSubscriptionState = 0;
+        detailOpen = false;
         detailsQuery.itemId = "";
         m_grid.currentIndex = -1;
     }
@@ -188,7 +186,7 @@ MD.Page {
         MD.Util.showPopup('waywallen.ui/PagePopup', {
             source: 'waywallen.ui/RemoteInfoPage',
             props: {
-                item: root.detailRow,
+                itemStore: detailStore,
                 details: detailsQuery,
                 sourceName: root.sourceName(root.detailRow.sourceId),
                 remoteCapability: root.sourceCapability(root.detailRow.sourceId),
@@ -202,9 +200,6 @@ MD.Page {
             return;
         const sourceId = root.detailRow.sourceId;
         const itemId = root.detailRow.itemId;
-        root.detailSubscriptionState = 3;
-        root.detailRow.acquisitionState = 3;
-        searchQuery.model.setAcquisitionState(sourceId, itemId, 3);
         subscriptionQuery.setSubscribed(sourceId, itemId, subscribed);
     }
 
@@ -213,7 +208,6 @@ MD.Page {
             return;
         if (root.currentSourceLoginAction() !== null)
             return;
-        root.detailSubscriptionState = 3;
         subscriptionQuery.refresh(root.detailRow.sourceId, root.detailRow.itemId);
     }
 
@@ -360,20 +354,13 @@ MD.Page {
 
     W.RemoteDownloadQuery {
         id: dlQuery
-        function onUninstalled(sourceId, id) {
-            searchQuery.model.setAcquisitionState(sourceId, id, 0);
-            if (root.detailRow && root.detailRow.sourceId === sourceId && root.detailRow.itemId === id) {
-                root.detailRow.acquisitionState = 0;
-                root.detailDownloadState = 0;
-            }
-            W.Action.toast(qsTr("Uninstalled"));
+        function onRemoved(sourceId, id) {
+            W.Action.toast(qsTr("Removed"));
         }
-        function onUninstallFailed(sourceId, id, error) {
-            W.Action.toast(qsTr("Uninstall failed: ") + error);
+        function onRemoveFailed(sourceId, id, error) {
+            W.Action.toast(qsTr("Remove failed: ") + error);
         }
         function onRejected(sourceId, id, error) {
-            if (root.detailRow && root.detailRow.sourceId === sourceId && root.detailRow.itemId === id)
-                root.detailDownloadState = 0;
             W.Action.toast(qsTr("Download rejected: ") + error);
         }
     }
@@ -386,25 +373,10 @@ MD.Page {
     Connections {
         target: subscriptionQuery
         function onStateLoaded(sourceId, id, state, error) {
-            const matches = Boolean(root.detailRow)
-                    && String(root.detailRow.sourceId) === String(sourceId)
-                    && String(root.detailRow.itemId) === String(id);
-            if (!matches)
-                return;
-            const normalizedState = Number(state);
-            searchQuery.model.setAcquisitionState(sourceId, id, normalizedState);
-            root.detailRow.acquisitionState = normalizedState;
-            root.detailSubscriptionState = normalizedState;
             if (error.length > 0)
                 W.Action.toast(qsTr("Couldn't load subscription status: ") + error);
         }
         function onSetFinished(sourceId, id, subscribed, accepted, error) {
-            const state = accepted ? (subscribed ? 2 : 1) : (subscribed ? 1 : 2);
-            searchQuery.model.setAcquisitionState(sourceId, id, state);
-            if (root.detailRow && root.detailRow.sourceId === sourceId && root.detailRow.itemId === id) {
-                root.detailRow.acquisitionState = state;
-                root.detailSubscriptionState = state;
-            }
             if (accepted) {
                 const message = subscribed ? qsTr("Subscription request accepted") : qsTr("Unsubscribe request accepted");
                 const hint = root.sourceRemoteHint(sourceId);
@@ -418,11 +390,6 @@ MD.Page {
     Connections {
         target: W.Notify
         function onRemoteDownloadProgress(sourceId, id, state, error) {
-            searchQuery.model.setAcquisitionState(sourceId, id, state);
-            if (root.detailRow && root.detailRow.sourceId === sourceId && root.detailRow.itemId === id) {
-                root.detailDownloadState = state;
-                root.detailRow.acquisitionState = state;
-            }
             if (state === 5 && error.length > 0)
                 W.Action.toast(qsTr("Download failed: ") + error);
         }
@@ -697,20 +664,19 @@ MD.Page {
                     ? root.sourceCapability(root.detailRow.sourceId) : 0
                 remoteHint: root.detailRow
                     ? root.sourceRemoteHint(root.detailRow.sourceId) : ""
-                downloadState: root.detailDownloadState
-                subscriptionState: root.detailSubscriptionState
+                downloadState: Number(root.detailRow?.acquisitionState ?? 0)
+                subscriptionState: Number(root.detailRow?.acquisitionState ?? 0)
 
                 onBack: root.closeDetail()
                 onShowInfo: root.openInfo()
                 onDownloadRequested: {
                     if (!root.detailRow)
                         return;
-                    root.detailDownloadState = 1;
                     dlQuery.start(root.detailRow.sourceId, root.detailRow.itemId);
                 }
-                onUninstallRequested: {
+                onRemoveRequested: {
                     if (root.detailRow)
-                        dlQuery.uninstall(root.detailRow.sourceId, root.detailRow.itemId);
+                        dlQuery.remove(root.detailRow.sourceId, root.detailRow.itemId);
                 }
                 onSubscriptionRefreshRequested: root.refreshDetailSubscription()
                 onSubscriptionChangeRequested: subscribed => root.setDetailSubscription(subscribed)

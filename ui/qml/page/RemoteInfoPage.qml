@@ -8,7 +8,8 @@ MD.Page {
     title: "Remote info"
     scrolling: !infoFlick.atYBeginning
 
-    property var item: null
+    property var itemStore: null
+    readonly property var item: itemStore?.item ?? null
     property var details: null
     property string sourceName: ""
     property int remoteCapability: 0
