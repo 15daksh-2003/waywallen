@@ -299,8 +299,6 @@ MD.Page {
                     nextSourceId = sources[0].id;
             }
             root.setSource(nextSourceId);
-            if (searchQuery.browsingEnabled)
-                searchQuery.delayReload();
             root.refreshDetailSubscription();
         }
     }
