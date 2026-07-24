@@ -8,7 +8,7 @@ import Qcm.Material as MD
 MD.Dialog {
     id: root
     title: qsTr("Filters")
-    horizontalPadding: 16
+    horizontalPadding: 0
     implicitWidth: Math.min(440, parent ? parent.width - 48 : 440)
     standardButtons: T.Dialog.Close
 
@@ -130,7 +130,10 @@ MD.Dialog {
 
     contentItem: MD.VerticalFlickable {
         id: filterFlick
-        contentWidth: width
+        leftMargin: 16
+        rightMargin: 16
+        topMargin: 4
+        bottomMargin: 4
         contentHeight: filterColumn.implicitHeight
         implicitHeight: Math.min(filterColumn.implicitHeight, 520)
 
