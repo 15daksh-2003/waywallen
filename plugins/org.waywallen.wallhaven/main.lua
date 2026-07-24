@@ -53,7 +53,7 @@ function M.info()
                     { key = "recent", label = "Recent" },
                     { key = "popular", label = "Popular" },
                 },
-                tags = api.tags,
+                filters = api.filters,
             },
             wallpaper = {
                 extras = true,

@@ -158,6 +158,24 @@ pub struct DiscoverSort {
     pub label: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoverFilterType {
+    Select,
+    MultiSelect,
+    Toggle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DiscoverFilter {
+    pub id: String,
+    pub title: String,
+    pub ty: DiscoverFilterType,
+    pub values: Vec<String>,
+    pub description: String,
+    pub confirmation: String,
+}
+
 /// Discover capability of a single source plugin, derived from
 /// `info().capabilities.discover`. Plugins without that table are not listed.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -172,7 +190,7 @@ pub struct DiscoverSourceInfo {
     pub remote_capability: Option<RemoteCapability>,
     pub remote_hint: String,
     pub sorts: Vec<DiscoverSort>,
-    pub tags: Vec<String>,
+    pub filters: Vec<DiscoverFilter>,
     /// Domain id of the owning installable plugin (e.g.
     /// `org.waywallen.open-wallpaper-engine`). Source settings remain keyed by
     /// `plugin_id`, the Lua source name.
@@ -368,9 +386,9 @@ struct DiscoverCapability {
     remote: Option<RemoteCapability>,
     remote_hint: String,
     sorts: Vec<DiscoverSort>,
-    tags: Vec<String>,
+    filters: Vec<DiscoverFilter>,
     /// The plugin exposes `discover.tags(ctx)`; the daemon calls it to refresh
-    /// `tags` from a live source instead of the static declaration.
+    /// a legacy multi-select filter from a live source.
     dynamic_tags: bool,
 }
 
@@ -805,6 +823,147 @@ impl LuaPluginRuntime {
         Ok(sorts)
     }
 
+    fn legacy_discover_filter(tags: Vec<String>) -> Vec<DiscoverFilter> {
+        if tags.is_empty() {
+            return Vec::new();
+        }
+        vec![DiscoverFilter {
+            id: "tags".to_string(),
+            title: "Tags".to_string(),
+            ty: DiscoverFilterType::MultiSelect,
+            values: tags,
+            description: String::new(),
+            confirmation: String::new(),
+        }]
+    }
+
+    fn optional_discover_filters(discover_tbl: &LuaTable) -> Result<Option<Vec<DiscoverFilter>>> {
+        let Some(filters_tbl) =
+            Self::optional_table(discover_tbl, "filters", "info().capabilities.discover")?
+        else {
+            return Ok(None);
+        };
+
+        let mut filters = Vec::new();
+        let mut filter_ids = HashSet::new();
+        let mut filter_values = HashSet::new();
+        for (idx, filter) in filters_tbl.sequence_values::<LuaTable>().enumerate() {
+            let filter = filter.map_err(|error| {
+                Error::Internal(anyhow!(
+                    "info().capabilities.discover.filters[{}] must be a table: {error}",
+                    idx + 1
+                ))
+            })?;
+            let context = format!("info().capabilities.discover.filters[{}]", idx + 1);
+            let id = Self::require_string(&filter, "id", &context)?;
+            let title = Self::require_string(&filter, "title", &context)?;
+            if id.is_empty() || title.is_empty() {
+                return Err(Error::Internal(anyhow!(
+                    "{context}.id and {context}.title must not be empty"
+                )));
+            }
+            if !filter_ids.insert(id.clone()) {
+                return Err(Error::Internal(anyhow!(
+                    "{context}.id '{id}' is declared more than once"
+                )));
+            }
+
+            let type_name = Self::require_string(&filter, "type", &context)?;
+            let ty = match type_name.as_str() {
+                "select" => DiscoverFilterType::Select,
+                "multi_select" => DiscoverFilterType::MultiSelect,
+                "toggle" => DiscoverFilterType::Toggle,
+                _ => {
+                    return Err(Error::Internal(anyhow!(
+                        "{context}.type '{type_name}' must be select, multi_select, or toggle"
+                    )))
+                }
+            };
+            let values = Self::require_string_sequence(&filter, "values", &context)?;
+            if values.is_empty() {
+                return Err(Error::Internal(anyhow!(
+                    "{context}.values must not be empty"
+                )));
+            }
+            if ty == DiscoverFilterType::Toggle && values.len() != 1 {
+                return Err(Error::Internal(anyhow!(
+                    "{context}.values must contain exactly one value for a toggle"
+                )));
+            }
+            for value in &values {
+                if value.is_empty() {
+                    return Err(Error::Internal(anyhow!(
+                        "{context}.values must not contain an empty value"
+                    )));
+                }
+                if !filter_values.insert(value.clone()) {
+                    return Err(Error::Internal(anyhow!(
+                        "{context}.values contains duplicate discover value '{value}'"
+                    )));
+                }
+            }
+
+            let description = Self::optional_string(&filter, "description", &context)?;
+            let confirmation = Self::optional_string(&filter, "confirmation", &context)?;
+            if !confirmation.is_empty() && ty != DiscoverFilterType::Toggle {
+                return Err(Error::Internal(anyhow!(
+                    "{context}.confirmation is only supported for toggle filters"
+                )));
+            }
+            filters.push(DiscoverFilter {
+                id,
+                title,
+                ty,
+                values,
+                description,
+                confirmation,
+            });
+        }
+        Ok(Some(filters))
+    }
+
+    fn validate_discover_filter_values(
+        plugin_name: &str,
+        discover: &DiscoverCapability,
+        values: &[String],
+    ) -> Result<()> {
+        let mut selected = HashSet::new();
+        for value in values {
+            if !selected.insert(value.as_str()) {
+                return Err(Error::InvalidArgument(format!(
+                    "source plugin '{plugin_name}' discover filter value '{value}' is duplicated"
+                )));
+            }
+        }
+        for value in &selected {
+            if !discover
+                .filters
+                .iter()
+                .any(|filter| filter.values.iter().any(|candidate| candidate == *value))
+            {
+                return Err(Error::InvalidArgument(format!(
+                    "source plugin '{plugin_name}' does not declare discover filter value '{value}'"
+                )));
+            }
+        }
+        for filter in &discover.filters {
+            if filter.ty == DiscoverFilterType::Select
+                && filter
+                    .values
+                    .iter()
+                    .filter(|value| selected.contains(value.as_str()))
+                    .count()
+                    > 1
+            {
+                return Err(Error::InvalidArgument(format!(
+                    "source plugin '{plugin_name}' discover filter '{}' accepts one value",
+                    filter.id
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn require_table_function(tbl: &LuaTable, fn_name: &str, context: &str) -> Result<()> {
         tbl.get::<LuaFunction>(fn_name)
             .map(|_| ())
@@ -1050,14 +1209,20 @@ impl LuaPluginRuntime {
                     }
                 }
                 let sorts = Self::optional_discover_sorts(&discover_tbl)?;
-                let tags = Self::optional_string_sequence(
+                let declared_filters = Self::optional_discover_filters(&discover_tbl)?;
+                let legacy_tags = Self::optional_string_sequence(
                     &discover_tbl,
                     "tags",
                     "info().capabilities.discover",
                 )?;
-                // An optional `discover.tags(ctx)` function supplies the filter
-                // taxonomy at runtime; the static `tags` above is the fallback.
                 let dynamic_tags = discover_api.get::<LuaFunction>("tags").is_ok();
+                if declared_filters.is_some() && (!legacy_tags.is_empty() || dynamic_tags) {
+                    return Err(Error::Internal(anyhow!(
+                        "info().capabilities.discover.filters cannot be combined with legacy tags"
+                    )));
+                }
+                let filters =
+                    declared_filters.unwrap_or_else(|| Self::legacy_discover_filter(legacy_tags));
                 Some(DiscoverCapability {
                     supports_search: true,
                     supports_details,
@@ -1070,7 +1235,7 @@ impl LuaPluginRuntime {
                         "info().capabilities.discover",
                     )?,
                     sorts,
-                    tags,
+                    filters,
                     dynamic_tags,
                 })
             }
@@ -2322,7 +2487,7 @@ impl LuaPluginRuntime {
     // -----------------------------------------------------------------------
     // Discover API — generic remote browsing relayed into plugin Lua.
 
-    /// List plugins that opt into discovery and their declared sort/tag
+    /// List plugins that opt into discovery and their declared sort/filter
     /// options.
     pub fn discover_sources(&self) -> Result<Vec<DiscoverSourceInfo>> {
         let mut out = Vec::new();
@@ -2338,7 +2503,7 @@ impl LuaPluginRuntime {
                 remote_capability: disc.remote,
                 remote_hint: disc.remote_hint.clone(),
                 sorts: disc.sorts.clone(),
-                tags: disc.tags.clone(),
+                filters: disc.filters.clone(),
                 owner_plugin_id: info.plugin_id.clone(),
                 settings: info.settings.clone(),
                 actions: info.actions.clone(),
@@ -2367,9 +2532,12 @@ impl LuaPluginRuntime {
         let Some(info) = self.plugin_infos.get(plugin_name) else {
             return Err(Error::SourcePluginNotFound(plugin_name.to_string()));
         };
-        if info.capabilities.discover.is_none() {
-            return Err(Error::DiscoverUnsupported(plugin_name.to_string()));
-        }
+        let discover = info
+            .capabilities
+            .discover
+            .as_ref()
+            .ok_or_else(|| Error::DiscoverUnsupported(plugin_name.to_string()))?;
+        Self::validate_discover_filter_values(plugin_name, discover, tags)?;
         let default_wp_type = info
             .capabilities
             .source
@@ -2443,8 +2611,7 @@ impl LuaPluginRuntime {
         Ok(DiscoverSearchResult { items, has_more })
     }
 
-    /// Fetch a plugin's live filter taxonomy via its `discover.tags(ctx)` Lua
-    /// function.
+    /// Fetch a legacy plugin's live tag taxonomy via `discover.tags(ctx)`.
     pub async fn call_tags(&mut self, plugin_name: &str) -> Result<Vec<String>> {
         let callbacks = self
             .callbacks
@@ -2468,8 +2635,8 @@ impl LuaPluginRuntime {
         Ok(tags)
     }
 
-    /// Replace the declared filter tags of every plugin that supplies them
-    /// dynamically. Best-effort: a plugin whose fetch fails keeps its fallback.
+    /// Replace the compatibility filter of every legacy plugin that supplies
+    /// tags dynamically. Best-effort: a failed fetch keeps its fallback.
     pub async fn refresh_dynamic_tags(&mut self) {
         let names: Vec<String> = self
             .plugin_infos
@@ -2490,7 +2657,7 @@ impl LuaPluginRuntime {
                         .get_mut(&name)
                         .and_then(|info| info.capabilities.discover.as_mut())
                     {
-                        disc.tags = tags;
+                        disc.filters = Self::legacy_discover_filter(tags);
                     }
                 }
                 Ok(_) => {}
@@ -3684,7 +3851,7 @@ impl LuaPluginRegistry {
                 remote_capability: disc.remote,
                 remote_hint: disc.remote_hint.clone(),
                 sorts: disc.sorts.clone(),
-                tags: disc.tags.clone(),
+                filters: disc.filters.clone(),
                 owner_plugin_id: info.plugin_id.clone(),
                 settings: info.settings.clone(),
                 actions: info.actions.clone(),
@@ -3816,7 +3983,7 @@ impl LuaPluginRegistry {
                         .discover
                         .as_mut()
                     {
-                        discover.tags = tags;
+                        discover.filters = LuaPluginRuntime::legacy_discover_filter(tags);
                     }
                 }
                 Ok(_) => {}
@@ -4596,7 +4763,10 @@ return M
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].plugin_id, "wallhaven");
         assert!(sources[0].supports_search);
-        assert!(sources[0].tags.iter().any(|tag| tag == "Anime"));
+        assert!(sources[0].filters.iter().any(|filter| {
+            filter.ty == DiscoverFilterType::MultiSelect
+                && filter.values.iter().any(|value| value == "Anime")
+        }));
         assert_eq!(sources[0].actions[0].kind, SourceActionKind::Form);
         assert_eq!(sources[0].actions[0].fields.len(), 1);
         assert_eq!(sources[0].actions[0].fields[0].key, "api_key");
@@ -4702,13 +4872,65 @@ return M
         mgr.load_plugin(&path, "test.plugin", "1.0", ENTRY_VERSION)
             .unwrap();
         // Before the refresh, discovery advertises the static fallback.
-        assert_eq!(mgr.discover_sources().unwrap()[0].tags, vec!["fallback"]);
+        assert_eq!(
+            mgr.discover_sources().unwrap()[0].filters[0].values,
+            vec!["fallback"]
+        );
 
         block_value(async { mgr.refresh_dynamic_tags().await });
         assert_eq!(
-            mgr.discover_sources().unwrap()[0].tags,
+            mgr.discover_sources().unwrap()[0].filters[0].values,
             vec!["Live1", "Live2"]
         );
+    }
+
+    #[test]
+    fn discover_filters_validate_selected_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("filters.lua");
+        std::fs::write(
+            &path,
+            r#"
+local M = {}
+function M.info()
+    return {
+        name = "filters",
+        capabilities = {
+            discover = {
+                search = true,
+                filters = {
+                    { id = "kind", title = "Kind", type = "select", values = { "A", "B" } },
+                    { id = "tags", title = "Tags", type = "multi_select", values = { "X", "Y" } },
+                },
+            },
+        },
+    }
+end
+M.discover = {}
+function M.discover.search(ctx, params) return { items = {}, has_more = false } end
+return M
+"#,
+        )
+        .unwrap();
+
+        let mgr = SourceManager::new().unwrap();
+        mgr.load_plugin(&path, "test.plugin", "1.0", ENTRY_VERSION_V3)
+            .unwrap();
+        assert!(block_value(async {
+            mgr.call_discover("filters", "", "", 1, &["A".to_string(), "X".to_string()])
+                .await
+        })
+        .is_ok());
+        assert!(block_value(async {
+            mgr.call_discover("filters", "", "", 1, &["A".to_string(), "B".to_string()])
+                .await
+        })
+        .is_err());
+        assert!(block_value(async {
+            mgr.call_discover("filters", "", "", 1, &["unknown".to_string()])
+                .await
+        })
+        .is_err());
     }
 
     #[test]

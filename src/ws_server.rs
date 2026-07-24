@@ -2072,6 +2072,11 @@ async fn dispatch_inner(
                 sources: sources
                     .into_iter()
                     .map(|s| {
+                        let tags = s
+                            .filters
+                            .iter()
+                            .flat_map(|filter| filter.values.iter().cloned())
+                            .collect();
                         let settings = s
                             .settings
                             .iter()
@@ -2115,7 +2120,7 @@ async fn dispatch_inner(
                                     label: sort.label,
                                 })
                                 .collect(),
-                            tags: s.tags,
+                            tags,
                             content_dir,
                             owner_plugin_id: s.owner_plugin_id,
                             settings,
@@ -2125,6 +2130,28 @@ async fn dispatch_inner(
                             remote_capability: remote_capability as i32,
                             remote_hint: s.remote_hint,
                             avatar_url: s.avatar_url,
+                            filters: s
+                                .filters
+                                .into_iter()
+                                .map(|filter| pb::RemoteFilterDef {
+                                    id: filter.id,
+                                    title: filter.title,
+                                    r#type: match filter.ty {
+                                        crate::plugin::source_manager::DiscoverFilterType::Select => {
+                                            pb::RemoteFilterType::Select as i32
+                                        }
+                                        crate::plugin::source_manager::DiscoverFilterType::MultiSelect => {
+                                            pb::RemoteFilterType::MultiSelect as i32
+                                        }
+                                        crate::plugin::source_manager::DiscoverFilterType::Toggle => {
+                                            pb::RemoteFilterType::Toggle as i32
+                                        }
+                                    },
+                                    values: filter.values,
+                                    description: filter.description,
+                                    confirmation: filter.confirmation,
+                                })
+                                .collect(),
                         }
                     })
                     .collect(),

@@ -37,9 +37,9 @@ MD.Page {
         return s ? (s.displayName && s.displayName.length > 0 ? s.displayName : s.name) : "";
     }
 
-    function sourceTags(id) {
+    function sourceFilters(id) {
         const s = sourceInfo(id);
-        return s && s.tags ? s.tags : [];
+        return s && s.filters ? s.filters : [];
     }
 
     function sourceCapability(id) {
@@ -64,10 +64,12 @@ MD.Page {
         return true;
     }
 
-    function pruneTags(tags, allowedTags) {
+    function pruneTags(tags, filters) {
         const allowed = {};
-        for (const tag of allowedTags ?? [])
-            allowed[String(tag)] = true;
+        for (const filter of filters ?? []) {
+            for (const value of filter.values ?? [])
+                allowed[String(value)] = true;
+        }
         let out = [];
         for (const tag of tags ?? []) {
             const value = String(tag);
@@ -102,7 +104,7 @@ MD.Page {
         }
         const canBrowse = currentSourceLoginAction() === null;
         searchQuery.browsingEnabled = canBrowse;
-        const nextTags = sourceChanged ? [] : pruneTags(searchQuery.tags, s.tags ?? []);
+        const nextTags = sourceChanged ? [] : pruneTags(searchQuery.tags, s.filters ?? []);
         if (!sameList(searchQuery.tags, nextTags))
             searchQuery.tags = nextTags;
         searchQuery.sourceId = id;
@@ -257,7 +259,7 @@ MD.Page {
         id: filterAction
         icon.name: MD.Token.icon.filter_list
         text: "Filters"
-        enabled: m_filter_dialog.availableTags.length > 0
+        enabled: m_filter_dialog.filters.length > 0
         checked: searchQuery.tags.length > 0
         onTriggered: m_filter_dialog.open()
     }
@@ -353,10 +355,10 @@ MD.Page {
         id: m_filter_dialog
         parent: T.Overlay.overlay
         anchors.centerIn: parent
-        availableTags: root.sourceTags(root.sourceId)
-        selectedTags: searchQuery.tags
-        onApply: function (tags) {
-            searchQuery.tags = tags;
+        filters: root.sourceFilters(root.sourceId)
+        selectedValues: searchQuery.tags
+        onApply: function (values) {
+            searchQuery.tags = values;
         }
     }
 

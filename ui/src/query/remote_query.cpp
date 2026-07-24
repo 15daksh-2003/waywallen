@@ -51,12 +51,27 @@ void RemoteAvailabilityQuery::reload() {
                 }
                 QStringList tags;
                 for (const auto& tag : src.tags()) tags.push_back(tag);
+                QVariantList filters;
+                filters.reserve(src.filters().size());
+                for (const auto& filter : src.filters()) {
+                    QVariantMap fm;
+                    QStringList values;
+                    for (const auto& value : filter.values()) values.push_back(value);
+                    fm[u"id"_s]           = filter.id_proto();
+                    fm[u"title"_s]        = filter.title();
+                    fm[u"type"_s]         = static_cast<int>(filter.type());
+                    fm[u"values"_s]       = values;
+                    fm[u"description"_s]  = filter.description();
+                    fm[u"confirmation"_s] = filter.confirmation();
+                    filters.push_back(fm);
+                }
                 QVariantMap m;
                 m[u"id"_s]               = src.id_proto();
                 m[u"name"_s]             = src.name();
                 m[u"supportsSearch"_s]   = src.supportsSearch();
                 m[u"sorts"_s]            = sorts;
                 m[u"tags"_s]             = tags;
+                m[u"filters"_s]          = filters;
                 m[u"contentDir"_s]       = src.contentDir();
                 m[u"ownerPluginId"_s]    = src.ownerPluginId();
                 m[u"displayName"_s]      = src.displayName();

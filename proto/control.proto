@@ -675,11 +675,28 @@ message RemoteSortOption {
   string label = 2;
 }
 
+enum RemoteFilterType {
+  REMOTE_FILTER_TYPE_UNSPECIFIED = 0;
+  REMOTE_FILTER_TYPE_SELECT = 1;
+  REMOTE_FILTER_TYPE_MULTI_SELECT = 2;
+  REMOTE_FILTER_TYPE_TOGGLE = 3;
+}
+
+message RemoteFilterDef {
+  string id = 1;
+  string title = 2;
+  RemoteFilterType type = 3;
+  repeated string values = 4;
+  string description = 5;
+  string confirmation = 6;
+}
+
 message RemoteSourceInfo {
   string id = 1;
   string name = 2;
   bool supports_search = 3;
   repeated RemoteSortOption sorts = 4;
+  // Flattened filter values retained for older clients.
   repeated string tags = 5;
   string content_dir = 6;
   // Domain id of the owning installable plugin (e.g. org.waywallen.open-wallpaper-engine).
@@ -699,6 +716,7 @@ message RemoteSourceInfo {
   string remote_hint = 13;
   // Provider-owned account image returned by lifecycle.check().
   string avatar_url = 14;
+  repeated RemoteFilterDef filters = 15;
 }
 
 enum RemoteCapability {
