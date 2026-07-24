@@ -28,6 +28,7 @@ public:
     AppPrivate(App* self, quint16 port)
         : m_p(self),
           m_main_win(nullptr),
+          m_qml_network_cache(1024ll * 1024ll * 1024ll),
           m_backend(Box<Backend>::make(port)),
           m_display_mgr(Box<DisplayManager>::make()),
           m_renderer_mgr(Box<RendererManager>::make()),
@@ -49,6 +50,7 @@ public:
     Box<LibraryManager>        m_library_mgr;
     Box<GpuManager>            m_gpu_mgr;
     Box<QQmlApplicationEngine> m_qml_engine;
+    qint64                     m_network_cache_size { 0 };
     quint16                    m_port;
 };
 
@@ -74,6 +76,7 @@ void App::init() {
     Q_D(App);
     auto engine = this->engine();
     d->m_qml_network_cache.install(*engine);
+    refreshNetworkCacheSize();
 
     QAsyncResult::initEx(this, rstd::usize(4), [](QStringView error) {
         Q_EMIT App::instance()->errorOccurred(error.toString());
@@ -183,6 +186,38 @@ auto App::libraryManager() const -> LibraryManager* {
 auto App::gpuManager() const -> GpuManager* {
     Q_D(const App);
     return d->m_gpu_mgr.as_mut_ptr();
+}
+
+auto App::networkCacheSize() const -> qint64 {
+    Q_D(const App);
+    return d->m_network_cache_size;
+}
+
+auto App::networkCacheMaximumSize() const -> qint64 {
+    Q_D(const App);
+    return d->m_qml_network_cache.maximumCacheSize();
+}
+
+void App::refreshNetworkCacheSize() {
+    Q_D(App);
+    const auto size = d->m_qml_network_cache.cacheSize();
+    if (d->m_network_cache_size == size) return;
+    d->m_network_cache_size = size;
+    Q_EMIT networkCacheSizeChanged();
+}
+
+void App::setNetworkCacheMaximumSize(qint64 size) {
+    Q_D(App);
+    if (size <= 0 || d->m_qml_network_cache.maximumCacheSize() == size) return;
+    d->m_qml_network_cache.setMaximumCacheSize(size);
+    Q_EMIT networkCacheMaximumSizeChanged();
+    refreshNetworkCacheSize();
+}
+
+void App::clearNetworkCache() {
+    Q_D(App);
+    d->m_qml_network_cache.clear();
+    refreshNetworkCacheSize();
 }
 
 void App::load_settings() {}

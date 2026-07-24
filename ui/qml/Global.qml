@@ -9,6 +9,13 @@ QtObject {
     id: root
 
     property bool sidebarAutoExpand: true
+    property int networkCacheMaximumMiB: 1024
+
+    onNetworkCacheMaximumMiBChanged:
+        W.App.setNetworkCacheMaximumSize(networkCacheMaximumMiB * 1024 * 1024)
+
+    Component.onCompleted:
+        W.App.setNetworkCacheMaximumSize(networkCacheMaximumMiB * 1024 * 1024)
 
     readonly property Component errorToastAction: Component {
         MD.Action {
@@ -30,6 +37,7 @@ QtObject {
 
     readonly property Settings _generalSettings: Settings {
         property alias sidebarAutoExpand: root.sidebarAutoExpand
+        property alias networkCacheMaximumMiB: root.networkCacheMaximumMiB
     }
 
     // Per-vendor Material color schemes, seeded from each GPU vendor's brand

@@ -26,6 +26,9 @@ export class App : public QObject {
     Q_PROPERTY(RendererManager* rendererManager READ rendererManager CONSTANT FINAL)
     Q_PROPERTY(LibraryManager* libraryManager READ libraryManager CONSTANT FINAL)
     Q_PROPERTY(GpuManager* gpuManager READ gpuManager CONSTANT FINAL)
+    Q_PROPERTY(qint64 networkCacheSize READ networkCacheSize NOTIFY networkCacheSizeChanged FINAL)
+    Q_PROPERTY(qint64 networkCacheMaximumSize READ networkCacheMaximumSize NOTIFY
+                   networkCacheMaximumSizeChanged FINAL)
 
 public:
     App(quint16 port, rstd::empty);
@@ -43,14 +46,21 @@ public:
     auto rendererManager() const -> RendererManager*;
     auto libraryManager() const -> LibraryManager*;
     auto gpuManager() const -> GpuManager*;
+    auto networkCacheSize() const -> qint64;
+    auto networkCacheMaximumSize() const -> qint64;
 
     auto engine() const -> QQmlApplicationEngine*;
     auto backend() const -> Backend*;
 
     Q_SLOT void load_settings();
     Q_SLOT void save_settings();
+    Q_SLOT void refreshNetworkCacheSize();
+    Q_SLOT void setNetworkCacheMaximumSize(qint64 size);
+    Q_SLOT void clearNetworkCache();
 
     Q_SIGNAL void errorOccurred(const QString& error);
+    Q_SIGNAL void networkCacheSizeChanged();
+    Q_SIGNAL void networkCacheMaximumSizeChanged();
 
 private:
     QScopedPointer<AppPrivate> d_ptr;

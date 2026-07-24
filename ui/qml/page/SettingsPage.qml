@@ -65,6 +65,17 @@ MD.Page {
         }
     }
 
+    function formatBytes(bytes) {
+        let value = Math.max(0, Number(bytes ?? 0));
+        const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+        let index = 0;
+        while (value >= 1024 && index < units.length - 1) {
+            value /= 1024;
+            ++index;
+        }
+        return value.toFixed(index === 0 ? 0 : 1) + " " + units[index];
+    }
+
     W.SettingsGetQuery {
         id: getQ
         onGlobalChanged: root._maybeClearSubmittedGlobal()
@@ -110,12 +121,15 @@ MD.Page {
     }
 
     Component.onCompleted: {
+        W.App.refreshNetworkCacheSize();
         if (W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready) {
             getQ.reload();
             if (W.Util.isFlatpak)
                 autostartGetQ.reload();
         }
     }
+
+    onVisibleChanged: if (visible) W.App.refreshNetworkCacheSize()
 
     // Same pattern as WallpaperPage._persistGlobalChange but routed
     // through a 200ms debounce — slider drags would otherwise flood
@@ -221,6 +235,7 @@ MD.Page {
         m_pending.nextGlobal = null;
         m_pending.submittedGlobal = nextGlobal;
         W.Global.sidebarAutoExpand = true;
+        W.Global.networkCacheMaximumMiB = 1024;
         root.autoReplayRevision += 1;
         setQ.global = nextGlobal;
         setQ.plugins = getQ.plugins;
@@ -698,6 +713,69 @@ MD.Page {
                         text: qsTr("s")
                         typescale: MD.Token.typescale.body_medium
                         color: MD.Token.color.on_surface_variant
+                    }
+                }
+            }
+
+            SettingHeader { text: qsTr("Cache") }
+
+            MD.ListItem {
+                Layout.fillWidth: true
+                index: 0
+                model: null
+                count: 2
+                showDivider: false
+                text: qsTr("Network image cache")
+                supportText: qsTr("%1 of %2 used")
+                    .arg(root.formatBytes(W.App.networkCacheSize))
+                    .arg(root.formatBytes(W.App.networkCacheMaximumSize))
+                corners: MD.Util.listCorners(index, count, 16)
+                mdState.backgroundColor: MD.Token.color.surface_container
+
+                trailing: MD.Button {
+                    text: qsTr("Clear")
+                    mdState.type: MD.Enum.BtText
+                    enabled: W.App.networkCacheSize > 0
+                    onClicked: {
+                        W.App.clearNetworkCache();
+                        W.Action.toast(qsTr("Network image cache cleared"));
+                    }
+                }
+            }
+
+            MD.ListItem {
+                Layout.fillWidth: true
+                index: 1
+                model: null
+                count: 2
+                showDivider: false
+                text: qsTr("Maximum cache size")
+                corners: MD.Util.listCorners(index, count, 16)
+                mdState.backgroundColor: MD.Token.color.surface_container
+
+                below: W.ValueSlider {
+                    id: m_cache_maximum_slider
+                    width: parent.width
+                    from: 256
+                    to: 6144
+                    stepSize: 256
+                    snapMode: T.Slider.SnapAlways
+                    maxVisibleStops: 8
+                    valueText: root.formatBytes(Math.round(value) * 1024 * 1024)
+                    valueMaxText: root.formatBytes(to * 1024 * 1024)
+                    onMoved: {
+                        if (!pressed)
+                            W.Global.networkCacheMaximumMiB = Math.round(value);
+                    }
+                    onPressedChanged: {
+                        if (!pressed)
+                            W.Global.networkCacheMaximumMiB = Math.round(value);
+                    }
+
+                    Binding {
+                        target: m_cache_maximum_slider
+                        property: "value"
+                        value: W.Global.networkCacheMaximumMiB
                     }
                 }
             }
