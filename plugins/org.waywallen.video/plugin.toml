@@ -8,7 +8,7 @@
 [plugin]
 id = "org.waywallen.video"
 name = "Video"
-version = "0.2.5"
+version = "0.2.6"
 entry = "main.lua"
 entry_version = 2
 

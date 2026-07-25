@@ -1,3 +1,29 @@
+<release version="0.2.6" date="2026-07-25">
+  <description>
+    <p>Added:</p>
+    <ul>
+      <li>Remote source account sessions with QR sign-in, subscription controls, and discovery filters.</li>
+      <li>Global renderer audio controls, including capture toggles.</li>
+      <li>Automatic muting while other audio is playing.</li>
+      <li>Theme preference.</li>
+      <li>Persistent network image cache.</li>
+    </ul>
+    <p>Fixes:</p>
+    <ul>
+      <li>Renderer random freeze due to wrong mpmc channel.</li>
+      <li>Renderer buffers are no longer reused before every display releases them.</li>
+      <li>Displays remain bound to the exact buffer publication during wallpaper switches.</li>
+      <li>Pointer coordinates are mapped correctly on rotated displays.</li>
+      <li>Renderer resume retries now use backoff.</li>
+    </ul>
+    <p>Improved:</p>
+    <ul>
+      <li>Discover views preserve their state, avoid redundant reloads, and show clearer item details.</li>
+      <li>Renderer startup failures provide more useful diagnostics.</li>
+      <li>Audio capture and device lifetime management are more reliable.</li>
+    </ul>
+  </description>
+</release>
 <release version="0.2.5" date="2026-07-12">
   <description>
     <p>Added:</p>

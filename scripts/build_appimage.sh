@@ -23,7 +23,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_NAME="${WAYWALLEN_CONDA_ENV:-waywallen}"
 TMP_DIR="${TMPDIR:-/tmp}"
 WAYWALLEN_DISPLAY_REPO="${WAYWALLEN_DISPLAY_REPO:-https://github.com/waywallen/waywallen-display.git}"
-WAYWALLEN_DISPLAY_REF="${WAYWALLEN_DISPLAY_REF:-9cf9d8d93254bd64483cc14081ef9ee677e6e6a9}"
+WAYWALLEN_DISPLAY_REF="${WAYWALLEN_DISPLAY_REF:-ac37649a40d9d299281fc878752e0c272e500b3b}"
 APPDIR="$PROJECT_DIR/build/AppDir"
 INSTALL_DIR="$APPDIR/usr"          # AppDir's /usr is the cmake install prefix
 TOOLS_DIR="$PROJECT_DIR/build/_tools"
@@ -162,11 +162,12 @@ fi
 git -C "$WAYWALLEN_DISPLAY_SRC" fetch --tags origin "$WAYWALLEN_DISPLAY_REF" \
     || git -C "$WAYWALLEN_DISPLAY_SRC" fetch --tags origin
 git -C "$WAYWALLEN_DISPLAY_SRC" checkout --detach "$WAYWALLEN_DISPLAY_REF"
+pushd "$WAYWALLEN_DISPLAY_SRC"
 cargo build \
-    --manifest-path "$WAYWALLEN_DISPLAY_SRC/Cargo.toml" \
     --bin waywallen-layer-shell \
     --release \
     --locked
+popd
 install -Dm755 \
     "$WAYWALLEN_DISPLAY_SRC/target/release/waywallen-layer-shell" \
     "$INSTALL_DIR/bin/waywallen-layer-shell"
