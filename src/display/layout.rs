@@ -211,37 +211,53 @@ pub fn compute(i: LayoutInput) -> LayoutOutput {
     }
 }
 
-/// Map a display-local point to renderer-texture-local pixel coordinates,
-/// using the active projected source and destination rectangles.
+/// Map an actual display-surface point to renderer-texture-local pixels.
+/// The destination rectangle is in pre-transform display space, so the
+/// surface point must be transformed back before applying that rectangle.
 pub fn display_point_to_texture(
     disp_x: f32,
     disp_y: f32,
     cfg: &ProjectedConfig,
 ) -> Option<(f32, f32)> {
-    if cfg.dest_w <= 0.0 || cfg.dest_h <= 0.0 {
+    if cfg.display_w <= 0.0 || cfg.display_h <= 0.0 || cfg.dest_w <= 0.0 || cfg.dest_h <= 0.0 {
         return None;
     }
-    let u = (disp_x - cfg.dest_x) / cfg.dest_w;
-    let v = (disp_y - cfg.dest_y) / cfg.dest_h;
-    if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
+
+    let display_u = disp_x / cfg.display_w;
+    let display_v = disp_y / cfg.display_h;
+    if !(0.0..=1.0).contains(&display_u) || !(0.0..=1.0).contains(&display_v) {
         return None;
     }
-    // Inverse of wl_output.transform on the unit square. Buffer→display
-    // is the forward; here we go display→buffer.
-    let (uu, vv) = match cfg.transform {
-        0 => (u, v),
-        1 => (1.0 - v, u),
-        2 => (1.0 - u, 1.0 - v),
-        3 => (v, 1.0 - u),
-        4 => (1.0 - u, v),
-        5 => (v, u),
-        6 => (u, 1.0 - v),
-        7 => (1.0 - v, 1.0 - u),
-        _ => (u, v),
+
+    let (pre_u, pre_v) = match cfg.transform {
+        0 => (display_u, display_v),
+        1 => (display_v, 1.0 - display_u),
+        2 => (1.0 - display_u, 1.0 - display_v),
+        3 => (1.0 - display_v, display_u),
+        4 => (1.0 - display_u, display_v),
+        5 => (display_v, display_u),
+        6 => (display_u, 1.0 - display_v),
+        7 => (1.0 - display_v, 1.0 - display_u),
+        _ => (display_u, display_v),
     };
+
+    let swaps_dimensions = matches!(cfg.transform, 1 | 3 | 5 | 7);
+    let (pre_w, pre_h) = if swaps_dimensions {
+        (cfg.display_h, cfg.display_w)
+    } else {
+        (cfg.display_w, cfg.display_h)
+    };
+    let pre_x = pre_u * pre_w;
+    let pre_y = pre_v * pre_h;
+    let source_u = (pre_x - cfg.dest_x) / cfg.dest_w;
+    let source_v = (pre_y - cfg.dest_y) / cfg.dest_h;
+    if !(0.0..=1.0).contains(&source_u) || !(0.0..=1.0).contains(&source_v) {
+        return None;
+    }
+
     Some((
-        cfg.source_x + uu * cfg.source_w,
-        cfg.source_y + vv * cfg.source_h,
+        cfg.source_x + source_u * cfg.source_w,
+        cfg.source_y + source_v * cfg.source_h,
     ))
 }
 
@@ -484,8 +500,19 @@ mod tests {
         dest: (f32, f32, f32, f32),
         transform: u32,
     ) -> ProjectedConfig {
+        cfg_with_display(source, dest, (dest.0 + dest.2, dest.1 + dest.3), transform)
+    }
+
+    fn cfg_with_display(
+        source: (f32, f32, f32, f32),
+        dest: (f32, f32, f32, f32),
+        display: (f32, f32),
+        transform: u32,
+    ) -> ProjectedConfig {
         ProjectedConfig {
             config_generation: 1,
+            display_w: display.0,
+            display_h: display.1,
             source_x: source.0,
             source_y: source.1,
             source_w: source.2,
@@ -591,37 +618,118 @@ mod tests {
 
     #[test]
     fn point_transforms_apply_inverse_mapping() {
-        let square = ((0.0, 0.0, 100.0, 200.0), (0.0, 0.0, 200.0, 100.0));
+        let swapped = (
+            (0.0, 0.0, 100.0, 200.0),
+            (0.0, 0.0, 200.0, 100.0),
+            (100.0, 200.0),
+        );
         let hd = ((0.0, 0.0, 1920.0, 1080.0), (0.0, 0.0, 1920.0, 1080.0));
         let cases = [
-            (square, 1, (0.0, 0.0), (100.0, 0.0)),
-            (square, 1, (200.0, 0.0), (100.0, 200.0)),
-            (square, 1, (200.0, 100.0), (0.0, 200.0)),
-            (square, 1, (0.0, 100.0), (0.0, 0.0)),
-            (hd, 2, (0.0, 0.0), (1920.0, 1080.0)),
-            (hd, 2, (1920.0, 1080.0), (0.0, 0.0)),
-            (hd, 2, (960.0, 540.0), (960.0, 540.0)),
-            (square, 3, (0.0, 0.0), (0.0, 200.0)),
-            (square, 3, (200.0, 0.0), (0.0, 0.0)),
-            (hd, 4, (0.0, 100.0), (1920.0, 100.0)),
-            (hd, 4, (1920.0, 100.0), (0.0, 100.0)),
-            (hd, 4, (960.0, 540.0), (960.0, 540.0)),
-            (square, 5, (100.0, 50.0), (50.0, 100.0)),
-            (square, 5, (0.0, 0.0), (0.0, 0.0)),
-            (square, 5, (200.0, 100.0), (100.0, 200.0)),
-            (hd, 6, (100.0, 0.0), (100.0, 1080.0)),
-            (hd, 6, (100.0, 1080.0), (100.0, 0.0)),
-            (square, 7, (0.0, 0.0), (100.0, 200.0)),
-            (square, 7, (200.0, 100.0), (0.0, 0.0)),
+            (swapped, 1, (0.0, 0.0), (0.0, 200.0)),
+            (swapped, 1, (100.0, 0.0), (0.0, 0.0)),
+            (swapped, 1, (100.0, 200.0), (100.0, 0.0)),
+            (swapped, 1, (0.0, 200.0), (100.0, 200.0)),
+            (
+                (hd.0, hd.1, (1920.0, 1080.0)),
+                2,
+                (0.0, 0.0),
+                (1920.0, 1080.0),
+            ),
+            (
+                (hd.0, hd.1, (1920.0, 1080.0)),
+                2,
+                (1920.0, 1080.0),
+                (0.0, 0.0),
+            ),
+            (
+                (hd.0, hd.1, (1920.0, 1080.0)),
+                2,
+                (960.0, 540.0),
+                (960.0, 540.0),
+            ),
+            (swapped, 3, (0.0, 0.0), (100.0, 0.0)),
+            (swapped, 3, (100.0, 0.0), (100.0, 200.0)),
+            (swapped, 3, (100.0, 200.0), (0.0, 200.0)),
+            (swapped, 3, (0.0, 200.0), (0.0, 0.0)),
+            (
+                (hd.0, hd.1, (1920.0, 1080.0)),
+                4,
+                (0.0, 100.0),
+                (1920.0, 100.0),
+            ),
+            (
+                (hd.0, hd.1, (1920.0, 1080.0)),
+                4,
+                (1920.0, 100.0),
+                (0.0, 100.0),
+            ),
+            (
+                (hd.0, hd.1, (1920.0, 1080.0)),
+                4,
+                (960.0, 540.0),
+                (960.0, 540.0),
+            ),
+            (swapped, 5, (0.0, 0.0), (0.0, 0.0)),
+            (swapped, 5, (50.0, 100.0), (50.0, 100.0)),
+            (swapped, 5, (100.0, 200.0), (100.0, 200.0)),
+            (
+                (hd.0, hd.1, (1920.0, 1080.0)),
+                6,
+                (100.0, 0.0),
+                (100.0, 1080.0),
+            ),
+            (
+                (hd.0, hd.1, (1920.0, 1080.0)),
+                6,
+                (100.0, 1080.0),
+                (100.0, 0.0),
+            ),
+            (swapped, 7, (0.0, 0.0), (100.0, 200.0)),
+            (swapped, 7, (50.0, 100.0), (50.0, 100.0)),
+            (swapped, 7, (100.0, 200.0), (0.0, 0.0)),
         ];
 
-        for ((source, dest), transform, point, expected) in cases {
-            let c = cfg(source, dest, transform);
+        for ((source, dest, display), transform, point, expected) in cases {
+            let c = cfg_with_display(source, dest, display, transform);
             approx(
                 display_point_to_texture(point.0, point.1, &c).unwrap(),
                 expected,
             );
         }
+    }
+
+    #[test]
+    fn point_cw90_maps_actual_portrait_display_domain() {
+        let c = cfg_with_display(
+            (0.0, 0.0, 1920.0, 1080.0),
+            (0.0, 0.0, 1920.0, 1080.0),
+            (1080.0, 1920.0),
+            1,
+        );
+        approx(
+            display_point_to_texture(540.0, 960.0, &c).unwrap(),
+            (960.0, 540.0),
+        );
+        approx(
+            display_point_to_texture(540.0, 1500.0, &c).unwrap(),
+            (1500.0, 540.0),
+        );
+    }
+
+    #[test]
+    fn point_cw90_drops_rotated_letterbox_bar() {
+        let c = cfg_with_display(
+            (0.0, 0.0, 200.0, 100.0),
+            (0.0, 25.0, 200.0, 50.0),
+            (100.0, 200.0),
+            1,
+        );
+        approx(
+            display_point_to_texture(50.0, 100.0, &c).unwrap(),
+            (100.0, 50.0),
+        );
+        assert!(display_point_to_texture(10.0, 100.0, &c).is_none());
+        assert!(display_point_to_texture(90.0, 100.0, &c).is_none());
     }
 
     #[test]

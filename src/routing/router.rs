@@ -2516,6 +2516,8 @@ fn project_link(
         });
         return ProjectedConfig {
             config_generation,
+            display_w: info.width as f32,
+            display_h: info.height as f32,
             source_x: out.source.0,
             source_y: out.source.1,
             source_w: out.source.2,
@@ -2562,6 +2564,8 @@ fn project_link(
     let (dx, dy, dw, dh) = resolve_dst(link.dst_rect);
     ProjectedConfig {
         config_generation,
+        display_w: info.width as f32,
+        display_h: info.height as f32,
         source_x: sx,
         source_y: sy,
         source_w: sw,
@@ -3298,6 +3302,7 @@ mod tests {
             rotation: Default::default(),
         };
         let cfg = project_link(&link, &pool, &info, 1, &layout);
+        assert_eq!((cfg.display_w, cfg.display_h), (1280.0, 720.0));
         assert_eq!(
             (cfg.source_x, cfg.source_y, cfg.source_w, cfg.source_h),
             (100.0, 200.0, 800.0, 600.0)
@@ -3567,11 +3572,13 @@ mod tests {
         // Register display 1920x1080 — auto-link + initial Bind/SetConfig.
         let mut h = router.register_display(reg("HDMI-A-1", 1920, 1080)).await;
         let initial = last_set_config(&mut h.rx).expect("initial SetConfig");
+        assert_eq!((initial.display_w, initial.display_h), (1920.0, 1080.0));
         assert_eq!((initial.dest_w, initial.dest_h), (1920.0, 1080.0));
 
         // Resize to 1280x720 — Stretched + Center default → identity at new dims.
         router.update_display_size(h.id, 1280, 720).await;
         let resized = last_set_config(&mut h.rx).expect("SetConfig after resize");
+        assert_eq!((resized.display_w, resized.display_h), (1280.0, 720.0));
         assert_eq!((resized.dest_x, resized.dest_y), (0.0, 0.0));
         assert_eq!((resized.dest_w, resized.dest_h), (1280.0, 720.0));
         assert!(resized.config_generation > initial.config_generation);

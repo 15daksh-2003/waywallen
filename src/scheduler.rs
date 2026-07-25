@@ -32,11 +32,14 @@ pub struct ActiveBinding {
     pub tex_height: u32,
 }
 
-/// Identity SetConfig body derived from an `ActiveBinding` + a display's
-/// advertised size. Used to build the wire-level `set_config` event.
+/// Per-display presentation config. The geometry fields mirror `set_config`;
+/// the display extent remains daemon-local for pointer mapping.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectedConfig {
     pub config_generation: u64,
+    /// Actual post-transform surface coordinate extent reported by the consumer.
+    pub display_w: f32,
+    pub display_h: f32,
     pub source_x: f32,
     pub source_y: f32,
     pub source_w: f32,
@@ -194,6 +197,8 @@ impl Scheduler {
         self.next_config_generation += 1;
         Some(ProjectedConfig {
             config_generation: self.next_config_generation,
+            display_w: disp.width as f32,
+            display_h: disp.height as f32,
             source_x: 0.0,
             source_y: 0.0,
             source_w: active.tex_width as f32,
