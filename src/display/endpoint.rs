@@ -13,7 +13,7 @@ use crate::events::GlobalEvent;
 // display consumers over a UDS, not public WS or D-Bus surfaces.
 use crate::display::layout::display_point_to_texture;
 use crate::error::{Error, Result, ResultExt};
-use crate::renderer_manager::{BindSnapshot, RendererHandle};
+use crate::renderer_manager::{PublishedPool, RendererHandle};
 use crate::routing::{
     DisplayConsumptionPermit, DisplayHandle, DisplayOutEvent, DisplayRegistration, Router,
 };
@@ -325,9 +325,9 @@ async fn run_frame_loop(
                     log::info!("display {display_id}: router rx closed");
                     break Ok(());
                 }
-                Some(DisplayOutEvent::Bind { renderer }) => {
+                Some(DisplayOutEvent::Bind { renderer, pool, buffer_generation }) => {
                     bound_renderer = Some(Arc::clone(&renderer));
-                    if let Err(e) = send_bind_from_renderer(&stream, &renderer).await {
+                    if let Err(e) = send_bind(&stream, &pool, buffer_generation).await {
                         break Err(e);
                     }
                 }
@@ -546,20 +546,12 @@ async fn send_set_config(stream: &StdUnixStream, cfg: &ProjectedConfig) -> Resul
     Ok(())
 }
 
-async fn send_bind_from_renderer(
+async fn send_bind(
     stream: &StdUnixStream,
-    renderer: &Arc<RendererHandle>,
+    pool: &PublishedPool,
+    buffer_generation: u64,
 ) -> Result<()> {
-    let snapshot_arc = renderer.bind_snapshot();
-    let (event, dup_fds) = {
-        let guard = snapshot_arc
-            .lock()
-            .map_err(|e| Error::Internal(anyhow!("snapshot mutex poisoned: {e}")))?;
-        let snap = guard
-            .as_ref()
-            .ok_or_else(|| Error::Internal(anyhow!("renderer {} has no snapshot", renderer.id)))?;
-        build_bind_event(snap)?
-    };
+    let (event, dup_fds) = build_bind_event(pool, buffer_generation)?;
     let s = stream.try_clone().context("clone for bind")?;
     let event_for_send = event.clone();
     let dup_for_send = dup_fds.clone();
@@ -576,34 +568,33 @@ async fn send_bind_from_renderer(
     Ok(())
 }
 
-/// Translate `BindSnapshot` into the display-protocol `BindBuffers`
+/// Translate one immutable renderer publication into a `BindBuffers`
 /// event. Both schemas use flattened parallel arrays per plane.
-fn build_bind_event(snap: &BindSnapshot) -> Result<(Event, Vec<RawFd>)> {
-    let buffer_generation = snap.generation;
-    let count = snap.count;
-    let planes_per_buffer = snap.planes_per_buffer;
+fn build_bind_event(pool: &PublishedPool, buffer_generation: u64) -> Result<(Event, Vec<RawFd>)> {
+    let count = pool.count;
+    let planes_per_buffer = pool.planes_per_buffer;
     let n = (count as usize) * (planes_per_buffer as usize);
 
-    if snap.stride.len() != n
-        || snap.plane_offset.len() != n
-        || snap.size.len() != n
-        || snap.fds.len() != n
+    if pool.stride.len() != n
+        || pool.plane_offset.len() != n
+        || pool.size.len() != n
+        || pool.fds.len() != n
     {
         return Err(Error::Internal(anyhow!(
-            "BindSnapshot parallel arrays inconsistent: count={} planes={} expected={} \
+            "PublishedPool parallel arrays inconsistent: count={} planes={} expected={} \
              stride={} offset={} size={} fds={}",
             count,
             planes_per_buffer,
             n,
-            snap.stride.len(),
-            snap.plane_offset.len(),
-            snap.size.len(),
-            snap.fds.len()
+            pool.stride.len(),
+            pool.plane_offset.len(),
+            pool.size.len(),
+            pool.fds.len()
         )));
     }
 
     let mut dup_fds: Vec<RawFd> = Vec::with_capacity(n);
-    for fd in &snap.fds {
+    for fd in &pool.fds {
         let raw = nix::unistd::dup(fd.as_raw_fd())
             .map_err(|e| Error::Internal(anyhow!("dup dma-buf fd: {e}")))?;
         dup_fds.push(raw);
@@ -612,14 +603,14 @@ fn build_bind_event(snap: &BindSnapshot) -> Result<(Event, Vec<RawFd>)> {
     let event = Event::BindBuffers {
         buffer_generation,
         count,
-        width: snap.width,
-        height: snap.height,
-        fourcc: snap.fourcc,
-        modifier: snap.modifier,
+        width: pool.width,
+        height: pool.height,
+        fourcc: pool.fourcc,
+        modifier: pool.modifier,
         planes_per_buffer,
-        stride: snap.stride.clone(),
-        plane_offset: snap.plane_offset.clone(),
-        size: snap.size.clone(),
+        stride: pool.stride.clone(),
+        plane_offset: pool.plane_offset.clone(),
+        size: pool.size.clone(),
     };
     log::debug!(
         "display::endpoint: build_bind_event gen={} count={} planes={} {}x{} \
@@ -627,10 +618,10 @@ fn build_bind_event(snap: &BindSnapshot) -> Result<(Event, Vec<RawFd>)> {
         buffer_generation,
         count,
         planes_per_buffer,
-        snap.width,
-        snap.height,
-        snap.fourcc,
-        snap.modifier,
+        pool.width,
+        pool.height,
+        pool.fourcc,
+        pool.modifier,
     );
     for i in 0..n {
         let bi = i / (planes_per_buffer as usize).max(1);
@@ -640,9 +631,9 @@ fn build_bind_event(snap: &BindSnapshot) -> Result<(Event, Vec<RawFd>)> {
             bi,
             pi,
             dup_fds[i],
-            snap.stride[i],
-            snap.plane_offset[i],
-            snap.size[i],
+            pool.stride[i],
+            pool.plane_offset[i],
+            pool.size[i],
         );
     }
     Ok((event, dup_fds))
@@ -716,7 +707,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_bind_event_identity() {
+    fn build_bind_event_uses_display_generation() {
         use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
         use std::ffi::CString;
         use std::os::fd::FromRawFd;
@@ -724,7 +715,7 @@ mod tests {
         let fd1 = memfd_create(&name, MemFdCreateFlag::MFD_CLOEXEC).unwrap();
         let fd2 = memfd_create(&name, MemFdCreateFlag::MFD_CLOEXEC).unwrap();
 
-        let snap = BindSnapshot {
+        let pool = PublishedPool {
             generation: 7,
             flags: 0,
             count: 2,
@@ -739,7 +730,7 @@ mod tests {
             fds: vec![fd1, fd2],
         };
 
-        let (event, dup_fds) = build_bind_event(&snap).unwrap();
+        let (event, dup_fds) = build_bind_event(&pool, 11).unwrap();
         assert_eq!(dup_fds.len(), 2);
         match event {
             Event::BindBuffers {
@@ -754,7 +745,7 @@ mod tests {
                 plane_offset,
                 size,
             } => {
-                assert_eq!(buffer_generation, 7);
+                assert_eq!(buffer_generation, 11);
                 assert_eq!(count, 2);
                 assert_eq!(width, 800);
                 assert_eq!(height, 600);

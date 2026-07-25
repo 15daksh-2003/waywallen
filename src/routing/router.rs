@@ -16,7 +16,9 @@ const RESUME_RETRY_MAX: Duration = Duration::from_secs(10);
 
 use crate::display::layout::{FillMode, LayoutInput};
 use crate::ipc::proto::{ControlMsg, EventMsg};
-use crate::renderer_manager::{DrmNode, RendererHandle, RendererId, RendererManager};
+use crate::renderer_manager::{
+    DrmNode, PublishedPool, RendererHandle, RendererId, RendererManager,
+};
 use crate::scheduler::{DisplayId, DisplayInfo, ProjectedConfig};
 use crate::settings::{AutoAction, AutoReplayPolicy, ResolvedLayout, SettingsStore};
 use crate::wallpaper::properties::WallpaperLayoutOverride;
@@ -27,9 +29,12 @@ use super::table::{Link, LinkDstRect, LinkId, LinkSrcRect, RoutingTable};
 /// Wire-translated event streamed from router to a display endpoint.
 /// The endpoint owns translation to the on-the-wire `Event`.
 pub enum DisplayOutEvent {
-    /// Bind the buffer pool currently published by `renderer`. The
-    /// endpoint reads the snapshot from the handle.
-    Bind { renderer: Arc<RendererHandle> },
+    /// Bind this exact immutable pool using the display-local generation.
+    Bind {
+        renderer: Arc<RendererHandle>,
+        pool: Arc<PublishedPool>,
+        buffer_generation: u64,
+    },
     /// Retire the named buffer pool generation.
     Unbind { buffer_generation: u64 },
     /// Update composition geometry / clear color.
@@ -263,17 +268,21 @@ pub enum LayoutSource {
     Wallpaper,
 }
 
+#[derive(Clone)]
+struct DisplayBinding {
+    renderer: Arc<RendererHandle>,
+    pool: Arc<PublishedPool>,
+    wire_generation: u64,
+}
+
 struct DisplayState {
     info: DisplayInfo,
     /// DRM render-node id of the consumer's GPU. Compared against
     /// `RendererHandle::gpu` during DMA-BUF negotiation.
     gpu: DrmNode,
     tx: mpsc::UnboundedSender<DisplayOutEvent>,
-    /// Last renderer this display was bound to (None if currently unbound).
-    last_renderer: Option<RendererId>,
-    /// Last `buffer_generation` we sent in a `Bind` to this display.
-    /// Tracked so a follow-up `Unbind` retires the right gen.
-    last_buffer_generation: Option<u64>,
+    binding: Option<DisplayBinding>,
+    next_wire_buffer_generation: u64,
     /// Consumer's modifier-negotiation caps. `None` until the
     /// consumer_caps request is received.
     consumer_caps: Option<crate::dma::negotiate::PeerCaps>,
@@ -584,22 +593,17 @@ impl Router {
         }
         let display_links = inner.table.links_for_display(display_id);
         let target = display_links.into_iter().find(|l| l.enabled).and_then(|l| {
-            let renderer = inner.table.get_renderer(&l.renderer_id)?;
-            let gen = renderer
-                .bind_snapshot()
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().map(|s| s.generation))?;
-            Some((l, renderer, gen))
+            let binding = inner.displays.get(&display_id)?.binding.as_ref()?;
+            (binding.renderer.id == l.renderer_id).then(|| (l, Arc::clone(&binding.pool)))
         });
-        let Some((link, renderer, _gen)) = target else {
+        let Some((link, pool)) = target else {
             return;
         };
         inner.next_config_generation += 1;
         let cfg_gen = inner.next_config_generation;
         let info = inner.displays.get(&display_id).unwrap().info.clone();
         let layout = self.resolved_layout_for_renderer(&info, &link.renderer_id, &inner);
-        let cfg = project_link(&link, &renderer, &info, cfg_gen, &layout);
+        let cfg = project_link(&link, &pool, &info, cfg_gen, &layout);
         if let Some(state) = inner.displays.get(&display_id) {
             let _ = state.tx.send(DisplayOutEvent::SetConfig(cfg));
         }
@@ -653,37 +657,47 @@ impl Router {
             tokio::spawn(async move {
                 loop {
                     match events.recv().await {
-                        Ok(EventMsg::BindBuffers { .. }) => {
-                            router.on_renderer_bind(&rid).await;
-                        }
-                        Ok(EventMsg::FrameReady {
-                            image_index,
-                            seq,
-                            release_point,
-                            ..
-                        }) => {
-                            router
-                                .on_renderer_frame(&rid, image_index, seq, release_point)
-                                .await;
-                        }
-                        Ok(EventMsg::FormatCaps { .. }) => {
-                            // Renderer caps arrived; recompute negotiation
-                            // for affected display links.
-                            router.reconcile_buffer_flags().await;
-                        }
-                        Ok(EventMsg::BindFailed {
-                            fourcc, modifier, ..
-                        }) => {
-                            // Renderer rejected the picked format; blacklist
-                            // it on the producer side and retry.
-                            router.on_renderer_bind_failed(&rid, fourcc, modifier).await;
-                        }
-                        Ok(EventMsg::ReportState { .. }) => {
-                            // Reader parsed recognised keys onto the handle;
-                            // resync display config from that cached state.
-                            router.on_renderer_state_changed(&rid).await;
-                        }
-                        Ok(_) => {}
+                        Ok(event) => match event.message {
+                            EventMsg::BindBuffers { .. } if event.pool_generation.is_some() => {
+                                router.on_renderer_bind(&rid).await;
+                            }
+                            EventMsg::FrameReady {
+                                image_index,
+                                seq,
+                                release_point,
+                                ..
+                            } => {
+                                if let Some(buffer_generation) = event.pool_generation {
+                                    router
+                                        .on_renderer_frame(
+                                            &rid,
+                                            buffer_generation,
+                                            image_index,
+                                            seq,
+                                            release_point,
+                                        )
+                                        .await;
+                                }
+                            }
+                            EventMsg::FormatCaps { .. } => {
+                                // Renderer caps arrived; recompute negotiation
+                                // for affected display links.
+                                router.reconcile_buffer_flags().await;
+                            }
+                            EventMsg::BindFailed {
+                                fourcc, modifier, ..
+                            } => {
+                                // Renderer rejected the picked format; blacklist
+                                // it on the producer side and retry.
+                                router.on_renderer_bind_failed(&rid, fourcc, modifier).await;
+                            }
+                            EventMsg::ReportState { .. } => {
+                                // Reader parsed recognised keys onto the handle;
+                                // resync display config from that cached state.
+                                router.on_renderer_state_changed(&rid).await;
+                            }
+                            _ => {}
+                        },
                         Err(RecvError::Closed) => {
                             log::info!("router: renderer {rid} broadcast closed");
                             return;
@@ -877,8 +891,8 @@ impl Router {
                     info,
                     gpu: reg.gpu,
                     tx,
-                    last_renderer: None,
-                    last_buffer_generation: None,
+                    binding: None,
+                    next_wire_buffer_generation: 0,
                     consumer_caps: reg.consumer_caps,
                     auto_replay: auto_replay::State::new(),
                     consumption_epoch: Arc::new(AtomicU64::new(1)),
@@ -1824,23 +1838,19 @@ impl Router {
             let Some(link) = inner.table.get_link(link_id).cloned() else {
                 return false;
             };
-            let Some(renderer) = inner.table.get_renderer(&link.renderer_id) else {
-                return false;
-            };
-            let (info, bound_to_this) = match inner.displays.get(&link.display_id) {
-                Some(state) => (
-                    state.info.clone(),
-                    state.last_renderer.as_deref() == Some(link.renderer_id.as_str()),
-                ),
+            let (info, pool) = match inner.displays.get(&link.display_id) {
+                Some(state) => match state.binding.as_ref() {
+                    Some(binding) if binding.renderer.id == link.renderer_id => {
+                        (state.info.clone(), Arc::clone(&binding.pool))
+                    }
+                    _ => return true,
+                },
                 None => return false,
             };
-            if !bound_to_this {
-                return true;
-            }
             inner.next_config_generation += 1;
             let cfg_gen = inner.next_config_generation;
             let layout = self.resolved_layout_for_renderer(&info, &link.renderer_id, &inner);
-            let cfg = project_link(&link, &renderer, &info, cfg_gen, &layout);
+            let cfg = project_link(&link, &pool, &info, cfg_gen, &layout);
             Some((link.display_id, cfg))
         };
         let affected_display = payload.as_ref().map(|(d, _)| *d);
@@ -1888,6 +1898,7 @@ impl Router {
     async fn on_renderer_frame(
         self: &Arc<Self>,
         renderer_id: &str,
+        producer_generation: u64,
         buffer_index: u32,
         seq: u64,
         release_point: u64,
@@ -1896,28 +1907,23 @@ impl Router {
         let Some(renderer) = inner.table.get_renderer(renderer_id) else {
             return;
         };
-        let gen = renderer
-            .bind_snapshot()
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|s| s.generation));
-        let Some(gen) = gen else { return };
-
         // First pass: collect every display that should get this frame
         // so we can pre-compute fan-out width for the reaper.
-        let recipients: Vec<&DisplayState> = inner
+        let recipients: Vec<(&DisplayState, u64)> = inner
             .table
             .links_for_renderer(renderer_id)
             .into_iter()
             .filter(|link| link.enabled)
             .filter_map(|link| inner.displays.get(&link.display_id))
-            .filter(|state| {
-                state.last_buffer_generation == Some(gen)
-                    && state.last_renderer.as_deref() == Some(renderer_id)
+            .filter_map(|state| {
+                let binding = state.binding.as_ref()?;
+                (binding.pool.generation == producer_generation
+                    && Arc::ptr_eq(&binding.renderer, &renderer))
+                .then_some((state, binding.wire_generation))
             })
             .collect();
         let identity = crate::sync::FrameIdentity {
-            buffer_generation: gen,
+            buffer_generation: producer_generation,
             buffer_index,
             release_point,
         };
@@ -1932,10 +1938,10 @@ impl Router {
                 return;
             }
         };
-        for (state, member) in recipients.into_iter().zip(members) {
+        for ((state, wire_generation), member) in recipients.into_iter().zip(members) {
             let _ = state.tx.send(DisplayOutEvent::Frame {
                 renderer: renderer.clone(),
-                buffer_generation: gen,
+                buffer_generation: wire_generation,
                 buffer_index,
                 seq,
                 consumption: state.consumption_permit(),
@@ -2367,32 +2373,28 @@ impl Router {
         if !inner.displays.contains_key(&display_id) {
             return;
         }
-        // Compute target (link + renderer + generation) under immutable borrows.
+        // Capture one exact publication for the complete display decision.
         let display_links = inner.table.links_for_display(display_id);
         debug_assert!(
             display_links.iter().filter(|l| l.enabled).count() <= 1,
             "display {display_id} has multiple enabled links — invariant violated"
         );
-        let target: Option<(Link, Arc<RendererHandle>, u64)> =
+        let target: Option<(Link, Arc<RendererHandle>, Arc<PublishedPool>)> =
             display_links.into_iter().find(|l| l.enabled).and_then(|l| {
                 let renderer = inner.table.get_renderer(&l.renderer_id)?;
-                let gen = renderer
-                    .bind_snapshot()
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().map(|s| s.generation))?;
-                Some((l, renderer, gen))
+                let pool = renderer.published_pool()?;
+                Some((l, renderer, pool))
             });
 
         // When both producer and consumer have caps, only bind a snapshot
         // that satisfies the last negotiated scheme.
-        if let Some((_, ref renderer, _)) = target {
+        if let Some((_, ref renderer, ref pool)) = target {
             let state = inner.displays.get(&display_id).unwrap();
             let v2_both = renderer.format_caps().is_some() && state.consumer_caps.is_some();
-            if v2_both && !renderer.scheme_satisfied() {
+            if v2_both && !renderer.scheme_satisfied_by(pool) {
                 log::debug!(
                     "router: sync_display({display_id}) gated — renderer {} \
-                     bind_snapshot does not yet match last-dispatched scheme",
+                     published pool does not match last-dispatched scheme",
                     renderer.id
                 );
                 return;
@@ -2400,18 +2402,16 @@ impl Router {
         }
 
         // Snapshot what was last sent.
-        let (last_renderer, last_gen, info) = {
+        let (last_binding, info) = {
             let s = inner.displays.get(&display_id).unwrap();
-            (
-                s.last_renderer.clone(),
-                s.last_buffer_generation,
-                s.info.clone(),
-            )
+            (s.binding.clone(), s.info.clone())
         };
 
-        let needs_update = match (&last_renderer, last_gen, &target) {
-            (Some(or), Some(og), Some((link, _, ng))) => or != &link.renderer_id || og != *ng,
-            (None, None, None) => false,
+        let needs_update = match (&last_binding, &target) {
+            (Some(old), Some((link, _, pool))) => {
+                old.renderer.id != link.renderer_id || old.pool.generation != pool.generation
+            }
+            (None, None) => false,
             _ => true,
         };
         if !needs_update {
@@ -2425,54 +2425,60 @@ impl Router {
             .invalidate_consumption();
 
         // Retire the prior pool if one was bound.
-        if let Some(og) = last_gen {
+        if let Some(old) = last_binding.as_ref() {
             let s = inner.displays.get(&display_id).unwrap();
             let _ = s.tx.send(DisplayOutEvent::Unbind {
-                buffer_generation: og,
+                buffer_generation: old.wire_generation,
             });
             // If the OLD renderer is currently being torn down with
             // ack tracking active, record this unbind as pending.
-            if let Some(old_r) = last_renderer.as_ref() {
-                if let Some(pending) = inner.unbind_acks_pending.get_mut(old_r) {
-                    pending.insert((display_id, og));
-                }
+            if let Some(pending) = inner.unbind_acks_pending.get_mut(&old.renderer.id) {
+                pending.insert((display_id, old.wire_generation));
             }
         }
 
         // Bind the new pool if a target renderer is ready.
-        if let Some((link, renderer, new_g)) = target {
+        if let Some((link, renderer, pool)) = target {
             inner.next_config_generation += 1;
             let cfg_gen = inner.next_config_generation;
             let layout = self.resolved_layout_for_renderer(&info, &link.renderer_id, &inner);
-            let cfg = project_link(&link, &renderer, &info, cfg_gen, &layout);
-            let new_r = link.renderer_id.clone();
+            let cfg = project_link(&link, &pool, &info, cfg_gen, &layout);
             let replay = renderer
                 .wp_type
                 .eq_ignore_ascii_case("image")
                 .then(|| renderer.latest_frame())
                 .flatten()
-                .filter(|frame| frame.buffer_generation == new_g);
+                .filter(|frame| frame.buffer_generation == pool.generation);
             let s = inner.displays.get_mut(&display_id).unwrap();
+            s.next_wire_buffer_generation = s
+                .next_wire_buffer_generation
+                .checked_add(1)
+                .expect("display buffer generation exhausted");
+            let wire_generation = s.next_wire_buffer_generation;
             let _ = s.tx.send(DisplayOutEvent::Bind {
                 renderer: renderer.clone(),
+                pool: Arc::clone(&pool),
+                buffer_generation: wire_generation,
             });
             let _ = s.tx.send(DisplayOutEvent::SetConfig(cfg));
             if let Some(frame) = replay {
                 let _ = s.tx.send(DisplayOutEvent::Frame {
                     renderer: renderer.clone(),
-                    buffer_generation: frame.buffer_generation,
+                    buffer_generation: wire_generation,
                     buffer_index: frame.buffer_index,
                     seq: frame.seq,
                     consumption: s.consumption_permit(),
                     member: None,
                 });
             }
-            s.last_renderer = Some(new_r);
-            s.last_buffer_generation = Some(new_g);
+            s.binding = Some(DisplayBinding {
+                renderer,
+                pool,
+                wire_generation,
+            });
         } else {
             let s = inner.displays.get_mut(&display_id).unwrap();
-            s.last_renderer = None;
-            s.last_buffer_generation = None;
+            s.binding = None;
         }
     }
 }
@@ -2481,7 +2487,7 @@ impl Router {
 ///
 fn project_link(
     link: &Link,
-    renderer: &Arc<RendererHandle>,
+    pool: &PublishedPool,
     info: &DisplayInfo,
     config_generation: u64,
     layout: &ResolvedLayout,
@@ -2490,7 +2496,7 @@ fn project_link(
     let dst_full = link.dst_rect == super::table::FULL_DST;
 
     if src_full && dst_full {
-        let (tex_w, tex_h) = renderer.texture_size();
+        let (tex_w, tex_h) = (pool.width, pool.height);
         // The consumer (waywallen-display) draws into pre-rotation
         // display space, then rotates the rect onto the actual display.
         let (eff_disp_w, eff_disp_h) = match layout.rotation {
@@ -2525,7 +2531,7 @@ fn project_link(
 
     // Explicit per-link geometry: keep the legacy resolve-sentinels
     // path for tests and future manual routing APIs.
-    let (rtex_w, rtex_h) = renderer.texture_size();
+    let (rtex_w, rtex_h) = (pool.width, pool.height);
     let resolve_src = |r: LinkSrcRect| -> (f32, f32, f32, f32) {
         let w = if r.w.is_infinite() {
             rtex_w as f32
@@ -2699,7 +2705,7 @@ mod tests {
         router.attach_settings(settings.clone());
 
         let r = RendererHandle::test_stub("r1", "scene");
-        *r.bind_snapshot().lock().unwrap() = Some(fake_bind_snapshot(1, 1920, 1080));
+        r.test_publish_pool(fake_published_pool(1, 1920, 1080));
         mgr.register_test_handle(r.clone()).await;
         router.register_renderer(r.clone()).await;
 
@@ -3269,7 +3275,7 @@ mod tests {
     fn project_link_explicit_link_geometry_skips_layout() {
         // A link with explicit (non-sentinel) src/dst rects should
         // bypass display::layout::compute and pass rects through.
-        let renderer = RendererHandle::test_stub("r1", "scene");
+        let pool = fake_published_pool(1, 1920, 1080);
         let info = make_info("eDP-1", 1280, 720);
         let mut link = make_link("r1", 1);
         link.src_rect = super::super::table::LinkSrcRect {
@@ -3291,7 +3297,7 @@ mod tests {
             location: Default::default(),
             rotation: Default::default(),
         };
-        let cfg = project_link(&link, &renderer, &info, 1, &layout);
+        let cfg = project_link(&link, &pool, &info, 1, &layout);
         assert_eq!(
             (cfg.source_x, cfg.source_y, cfg.source_w, cfg.source_h),
             (100.0, 200.0, 800.0, 600.0)
@@ -3307,10 +3313,10 @@ mod tests {
     // -----------------------------------------------------------------
     // update_display_size resync
 
-    use crate::renderer_manager::{BindSnapshot, FrameSnapshot};
+    use crate::renderer_manager::{FrameSnapshot, PublishedPool};
 
-    fn fake_bind_snapshot(generation: u64, w: u32, h: u32) -> BindSnapshot {
-        BindSnapshot {
+    fn fake_published_pool(generation: u64, w: u32, h: u32) -> PublishedPool {
+        PublishedPool {
             generation,
             flags: 0,
             count: 0,
@@ -3350,6 +3356,96 @@ mod tests {
         out
     }
 
+    #[tokio::test]
+    async fn queued_bind_keeps_the_exact_published_pool() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        let renderer = RendererHandle::test_stub("r1", "image");
+        renderer.test_publish_pool(fake_published_pool(1, 1920, 1080));
+        mgr.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer.clone()).await;
+
+        let mut display = router.register_display(reg("HDMI-A-1", 1280, 720)).await;
+        let old_pool = renderer.published_pool().unwrap();
+        let old_pool_weak = Arc::downgrade(&old_pool);
+        drop(old_pool);
+        renderer.test_publish_pool(fake_published_pool(2, 3840, 2160));
+        router.on_renderer_bind("r1").await;
+
+        assert!(old_pool_weak.upgrade().is_some());
+
+        let events = drain_display_events(&mut display.rx);
+        {
+            let bound_pool = events
+                .iter()
+                .find_map(|event| match event {
+                    DisplayOutEvent::Bind { pool, .. } => Some(pool),
+                    _ => None,
+                })
+                .expect("initial Bind");
+            let config = events
+                .iter()
+                .find_map(|event| match event {
+                    DisplayOutEvent::SetConfig(config) => Some(config),
+                    _ => None,
+                })
+                .expect("initial SetConfig");
+
+            assert_eq!(bound_pool.generation, 1);
+            assert_eq!((bound_pool.width, bound_pool.height), (1920, 1080));
+            assert_eq!((config.source_w, config.source_h), (1920.0, 1080.0));
+        }
+        assert_eq!(renderer.published_pool().unwrap().generation, 2);
+        drop(events);
+        assert!(old_pool_weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn frame_keeps_the_generation_from_receive_time() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        let (renderer, mut frame_records) =
+            RendererHandle::test_stub_with_frame_records("r1", "video");
+        renderer.test_publish_pool(fake_published_pool(1, 1920, 1080));
+        mgr.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer.clone()).await;
+
+        let mut display = router.register_display(reg("HDMI-A-1", 1920, 1080)).await;
+        let initial_events = drain_display_events(&mut display.rx);
+        let wire_generation = initial_events
+            .iter()
+            .find_map(|event| match event {
+                DisplayOutEvent::Bind {
+                    buffer_generation, ..
+                } => Some(*buffer_generation),
+                _ => None,
+            })
+            .expect("initial Bind");
+
+        renderer.test_publish_pool(fake_published_pool(2, 3840, 2160));
+        router.on_renderer_frame("r1", 1, 0, 42, 7).await;
+
+        let events = drain_display_events(&mut display.rx);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DisplayOutEvent::Frame {
+                buffer_generation,
+                seq: 42,
+                ..
+            } if *buffer_generation == wire_generation
+        )));
+        match frame_records.try_recv().expect("frame registration") {
+            crate::sync::FrameRecord::Register {
+                identity,
+                expected_members,
+            } => {
+                assert_eq!(identity.buffer_generation, 1);
+                assert_eq!(expected_members, 1);
+            }
+            _ => panic!("unexpected frame record"),
+        }
+    }
+
     #[test]
     fn consumption_permit_is_invalidated_without_waiting_for_endpoint() {
         let epoch = Arc::new(AtomicU64::new(4));
@@ -3385,17 +3481,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn relink_to_reused_renderer_replays_latest_frame() {
+    async fn relink_with_reused_renderer_generation_maps_replayed_frame() {
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
 
         let r1 = RendererHandle::test_stub("r1", "image");
-        *r1.bind_snapshot().lock().unwrap() = Some(fake_bind_snapshot(1, 1920, 1080));
+        r1.test_publish_pool(fake_published_pool(1, 1920, 1080));
         mgr.register_test_handle(r1.clone()).await;
         router.register_renderer(r1.clone()).await;
 
         let r2 = RendererHandle::test_stub("r2", "image");
-        *r2.bind_snapshot().lock().unwrap() = Some(fake_bind_snapshot(1, 1920, 1080));
+        r2.test_publish_pool(fake_published_pool(1, 1920, 1080));
         mgr.register_test_handle(r2.clone()).await;
         router.register_renderer(r2.clone()).await;
 
@@ -3416,24 +3512,43 @@ mod tests {
 
         router.relink_displays_to(&[b.id], "r1").await;
         let events = drain_display_events(&mut b.rx);
+        let mut unbind_generation = None;
+        let mut bind_generation = None;
         let mut saw_frame = false;
         for ev in events {
-            if let DisplayOutEvent::Frame {
-                renderer,
-                buffer_generation,
-                buffer_index,
-                seq,
-                consumption: _,
-                member: _,
-            } = ev
-            {
-                assert_eq!(renderer.id, "r1");
-                assert_eq!(buffer_generation, 1);
-                assert_eq!(buffer_index, 0);
-                assert_eq!(seq, 42);
-                saw_frame = true;
+            match ev {
+                DisplayOutEvent::Unbind { buffer_generation } => {
+                    unbind_generation = Some(buffer_generation);
+                }
+                DisplayOutEvent::Bind {
+                    renderer,
+                    pool: _,
+                    buffer_generation,
+                } => {
+                    assert_eq!(renderer.id, "r1");
+                    assert!(buffer_generation > 1);
+                    bind_generation = Some(buffer_generation);
+                }
+                DisplayOutEvent::Frame {
+                    renderer,
+                    buffer_generation,
+                    buffer_index,
+                    seq,
+                    consumption: _,
+                    member: _,
+                } => {
+                    assert_eq!(renderer.id, "r1");
+                    assert_eq!(Some(buffer_generation), bind_generation);
+                    assert_eq!(buffer_index, 0);
+                    assert_eq!(seq, 42);
+                    saw_frame = true;
+                }
+                _ => {}
             }
         }
+        let unbind_generation = unbind_generation.expect("relink did not emit unbind");
+        let bind_generation = bind_generation.expect("relink did not emit a new bind");
+        assert!(unbind_generation < bind_generation);
         assert!(saw_frame, "relinked display did not receive current frame");
     }
 
@@ -3445,7 +3560,7 @@ mod tests {
         // Renderer with a bind snapshot so resync_display_set_config can
         // read a generation and texture size.
         let r = RendererHandle::test_stub("r1", "scene"); // 1920x1080
-        *r.bind_snapshot().lock().unwrap() = Some(fake_bind_snapshot(1, 1920, 1080));
+        r.test_publish_pool(fake_published_pool(1, 1920, 1080));
         mgr.register_test_handle(r.clone()).await;
         router.register_renderer(r.clone()).await;
 
@@ -3467,7 +3582,7 @@ mod tests {
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
         let r = RendererHandle::test_stub("r1", "scene");
-        *r.bind_snapshot().lock().unwrap() = Some(fake_bind_snapshot(1, 1920, 1080));
+        r.test_publish_pool(fake_published_pool(1, 1920, 1080));
         mgr.register_test_handle(r.clone()).await;
         router.register_renderer(r.clone()).await;
 
@@ -3862,11 +3977,11 @@ mod tests {
         );
 
         let r1 = RendererHandle::test_stub("r1", "scene");
-        *r1.bind_snapshot().lock().unwrap() = Some(fake_bind_snapshot(1, 1920, 1080));
+        r1.test_publish_pool(fake_published_pool(1, 1920, 1080));
         mgr.register_test_handle(r1.clone()).await;
         router.register_renderer(r1.clone()).await;
         let r2 = RendererHandle::test_stub("r2", "scene");
-        *r2.bind_snapshot().lock().unwrap() = Some(fake_bind_snapshot(1, 1920, 1080));
+        r2.test_publish_pool(fake_published_pool(1, 1920, 1080));
         mgr.register_test_handle(r2.clone()).await;
         router.register_renderer(r2.clone()).await;
 
@@ -4080,7 +4195,7 @@ mod tests {
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
         let r = RendererHandle::test_stub("r1", "scene");
-        *r.bind_snapshot().lock().unwrap() = Some(fake_bind_snapshot(1, 1920, 1080));
+        r.test_publish_pool(fake_published_pool(1, 1920, 1080));
         mgr.register_test_handle(r.clone()).await;
         router.register_renderer(r.clone()).await;
 

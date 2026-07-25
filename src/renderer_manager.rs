@@ -513,9 +513,10 @@ pub struct SpawnRequest {
     pub user_properties_json: Option<String>,
 }
 
-/// Snapshot of the most recent `BindBuffers` event, plus the DMA-BUF FDs
-/// attached to it. Owned here and copied out to display endpoints.
-pub struct BindSnapshot {
+/// Immutable renderer publication created from one `BindBuffers` event.
+/// References held by display events keep its DMA-BUF FDs alive even after
+/// the renderer publishes a newer pool.
+pub struct PublishedPool {
     /// Monotonically increasing per-renderer pool generation. Sourced
     /// from the renderer's `bind_buffers.generation` field.
     pub generation: u64,
@@ -548,7 +549,16 @@ pub struct FrameSnapshot {
     pub release_point: u64,
 }
 
-/// Bit 0 of `BindSnapshot::flags` / `ControlMsg::ConfigureBuffers.flags`:
+/// Renderer event plus the pool generation that owned it when it was received.
+/// `frame_ready` carries this relationship implicitly through event order, so
+/// consumers must not reconstruct it from the latest published pool later.
+#[derive(Clone, Debug)]
+pub struct RendererEvent {
+    pub message: EventMsg,
+    pub pool_generation: Option<u64>,
+}
+
+/// Bit 0 of `PublishedPool::flags` / `ControlMsg::ConfigureBuffers.flags`:
 /// the renderer must back the dmabuf with HOST_VISIBLE memory.
 pub const BUF_HOST_VISIBLE: u32 = 1 << 0;
 
@@ -600,11 +610,11 @@ pub struct RendererHandle {
     writer: RendererWriter,
 
     /// Broadcast of every event the host emits (besides the FDs on the
-    /// initial BindBuffers, whose fds are stored in `bind_snapshot`).
-    events: broadcast::Sender<EventMsg>,
+    /// initial BindBuffers, whose fds are stored in `published_pool`).
+    events: broadcast::Sender<RendererEvent>,
 
-    /// Populated when the host sends its first `BindBuffers` event.
-    bind_snapshot: Arc<StdMutex<Option<BindSnapshot>>>,
+    /// Latest immutable pool published by the renderer.
+    published_pool: Arc<StdMutex<Option<Arc<PublishedPool>>>>,
 
     /// In-flight `ConfigureBuffers` request. `Some(flags)` while the
     /// router has asked for a re-export not yet answered by BindBuffers.
@@ -641,7 +651,7 @@ pub struct RendererHandle {
 }
 
 impl RendererHandle {
-    pub fn events(&self) -> broadcast::Receiver<EventMsg> {
+    pub fn events(&self) -> broadcast::Receiver<RendererEvent> {
         self.events.subscribe()
     }
 
@@ -658,31 +668,24 @@ impl RendererHandle {
             .then_some(frame)
     }
 
-    /// Borrow the cached bind snapshot. Returns `None` until the host's
-    /// first frame has been rendered and the fds arrived.
-    pub fn bind_snapshot(&self) -> Arc<StdMutex<Option<BindSnapshot>>> {
-        Arc::clone(&self.bind_snapshot)
+    /// Return the current immutable publication. Callers retain the exact
+    /// pool and its FDs independently of later renderer publications.
+    pub fn published_pool(&self) -> Option<Arc<PublishedPool>> {
+        self.published_pool.lock().ok().and_then(|g| g.clone())
     }
 
     /// Actual texture dimensions reported by the renderer's most recent
     /// `BindBuffers`. Returns `(0, 0)` before the first BindBuffers.
     pub fn texture_size(&self) -> (u32, u32) {
-        if let Ok(g) = self.bind_snapshot.lock() {
-            if let Some(snap) = g.as_ref() {
-                return (snap.width, snap.height);
-            }
-        }
-        (0, 0)
+        self.published_pool()
+            .map(|pool| (pool.width, pool.height))
+            .unwrap_or((0, 0))
     }
 
     /// Current placement flags from the latest `BindBuffers`, or 0 if
     /// no snapshot has arrived yet.
     pub fn current_flags(&self) -> u32 {
-        self.bind_snapshot
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|s| s.flags))
-            .unwrap_or(0)
+        self.published_pool().map(|pool| pool.flags).unwrap_or(0)
     }
 
     /// Whether a `ConfigureBuffers` request is currently in flight (sent
@@ -736,20 +739,17 @@ impl RendererHandle {
         self.last_dispatched_scheme.lock().ok().and_then(|g| *g)
     }
 
-    /// True iff the renderer's most recent `BindBuffers` snapshot
-    /// matches the most recently dispatched [`crate::dma::negotiate::NegotiatedScheme`]
-    pub fn scheme_satisfied(&self) -> bool {
+    /// True iff `pool` matches the most recently dispatched scheme.
+    pub fn scheme_satisfied_by(&self, pool: &PublishedPool) -> bool {
         let Some(scheme) = self.current_scheme() else {
             return false;
         };
-        let snap = self.bind_snapshot();
-        let Ok(guard) = snap.lock() else {
-            return false;
-        };
-        match guard.as_ref() {
-            Some(s) => s.fourcc == scheme.fourcc && s.modifier == scheme.modifier,
-            None => false,
-        }
+        pool.fourcc == scheme.fourcc && pool.modifier == scheme.modifier
+    }
+
+    #[cfg(test)]
+    pub fn test_publish_pool(&self, pool: PublishedPool) {
+        *self.published_pool.lock().unwrap() = Some(Arc::new(pool));
     }
 
     pub fn register_frame_consumers(
@@ -1029,8 +1029,9 @@ impl RendererManager {
         );
 
         // Now wire up the permanent reader thread and store the handle.
-        let (events_tx, _events_rx) = broadcast::channel::<EventMsg>(256);
-        let bind_snapshot: Arc<StdMutex<Option<BindSnapshot>>> = Arc::new(StdMutex::new(None));
+        let (events_tx, _events_rx) = broadcast::channel::<RendererEvent>(256);
+        let published_pool: Arc<StdMutex<Option<Arc<PublishedPool>>>> =
+            Arc::new(StdMutex::new(None));
         let sync_fds: Arc<StdMutex<std::collections::VecDeque<(u64, OwnedFd)>>> =
             Arc::new(StdMutex::new(std::collections::VecDeque::new()));
         let latest_frame: Arc<StdMutex<Option<FrameSnapshot>>> = Arc::new(StdMutex::new(None));
@@ -1053,7 +1054,7 @@ impl RendererManager {
         let reader_writer = writer.clone();
         let reader_subscriptions = Arc::clone(&self.subscriptions);
         let reader_events = events_tx.clone();
-        let reader_snapshot = bind_snapshot.clone();
+        let reader_pool = published_pool.clone();
         let reader_sync_fds = sync_fds.clone();
         let reader_latest_frame = latest_frame.clone();
         let reader_release_syncobj = release_syncobj.clone();
@@ -1088,7 +1089,7 @@ impl RendererManager {
             gpu,
             writer,
             events: events_tx,
-            bind_snapshot,
+            published_pool,
             sync_fds,
             latest_frame,
             release_syncobj,
@@ -1125,7 +1126,7 @@ impl RendererManager {
                 reader_writer,
                 reader_subscriptions,
                 reader_events,
-                reader_snapshot,
+                reader_pool,
                 reader_sync_fds,
                 reader_latest_frame,
                 reader_release_syncobj,
@@ -1250,7 +1251,9 @@ impl RendererManager {
                 }
                 recv = events.recv() => {
                     match recv {
-                        Ok(EventMsg::FrameReady { .. }) => return Ok(()),
+                        Ok(event) if matches!(event.message, EventMsg::FrameReady { .. }) => {
+                            return Ok(())
+                        }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(_)) => {
                             if handle.frame_ready_seen() {
@@ -1654,8 +1657,8 @@ fn run_reader(
     read_stream: StdUnixStream,
     writer: RendererWriter,
     subscriptions: Arc<RendererSubscriptionRegistry>,
-    events: broadcast::Sender<EventMsg>,
-    bind_snapshot: Arc<StdMutex<Option<BindSnapshot>>>,
+    events: broadcast::Sender<RendererEvent>,
+    published_pool: Arc<StdMutex<Option<Arc<PublishedPool>>>>,
     sync_fds: Arc<StdMutex<std::collections::VecDeque<(u64, OwnedFd)>>>,
     latest_frame: Arc<StdMutex<Option<FrameSnapshot>>>,
     release_syncobj: Arc<StdMutex<Option<OwnedFd>>>,
@@ -1680,6 +1683,7 @@ fn run_reader(
             }
         };
         let (msg, fds) = received;
+        let mut event_pool_generation = None;
 
         if let EventMsg::SetEventSubscriptions {
             revision,
@@ -1735,7 +1739,7 @@ fn run_reader(
             } else if fds.is_empty() {
                 log::warn!("renderer {id}: BindBuffers arrived without fds");
             } else {
-                let prev_gen = bind_snapshot
+                let prev_gen = published_pool
                     .lock()
                     .ok()
                     .and_then(|g| g.as_ref().map(|s| s.generation));
@@ -1747,7 +1751,7 @@ fn run_reader(
                         );
                     }
                 }
-                let snap = BindSnapshot {
+                let pool = Arc::new(PublishedPool {
                     generation,
                     flags,
                     count,
@@ -1760,9 +1764,10 @@ fn run_reader(
                     plane_offset: plane_offset.clone(),
                     size: size.clone(),
                     fds,
-                };
-                if let Ok(mut guard) = bind_snapshot.lock() {
-                    *guard = Some(snap);
+                });
+                if let Ok(mut guard) = published_pool.lock() {
+                    *guard = Some(pool);
+                    event_pool_generation = Some(generation);
                     log::info!(
                         "renderer {id}: BindBuffers cached (gen={generation}, flags=0x{flags:x})"
                     );
@@ -1806,11 +1811,12 @@ fn run_reader(
                 }
                 guard.push_back((seq, fd));
             }
-            let gen = bind_snapshot
+            let gen = published_pool
                 .lock()
                 .ok()
                 .and_then(|g| g.as_ref().map(|s| s.generation));
             if let Some(buffer_generation) = gen {
+                event_pool_generation = Some(buffer_generation);
                 if let Ok(mut guard) = latest_frame.lock() {
                     *guard = Some(FrameSnapshot {
                         buffer_generation,
@@ -1929,7 +1935,10 @@ fn run_reader(
 
         // Broadcast to any subscribers. No subscribers means no error:
         // SendError is only returned when receivers drop, which is fine.
-        let _ = events.send(msg);
+        let _ = events.send(RendererEvent {
+            message: msg,
+            pool_generation: event_pool_generation,
+        });
     }
 }
 
@@ -2092,18 +2101,35 @@ impl RendererHandle {
     /// Construct a `RendererHandle` with no running child process.
     /// Used by routing-table unit tests.
     pub fn test_stub(id: &str, wp_type: &str) -> Arc<Self> {
-        let (handle, _peer) = Self::test_stub_with_peer_inner(id, wp_type);
+        let (handle, _peer) = Self::test_stub_with_peer_inner(id, wp_type, None);
         handle
     }
 
     #[cfg(test)]
     pub fn test_stub_with_peer(id: &str, wp_type: &str) -> (Arc<Self>, StdUnixStream) {
-        Self::test_stub_with_peer_inner(id, wp_type)
+        Self::test_stub_with_peer_inner(id, wp_type, None)
     }
 
-    fn test_stub_with_peer_inner(id: &str, wp_type: &str) -> (Arc<Self>, StdUnixStream) {
+    #[cfg(test)]
+    pub(crate) fn test_stub_with_frame_records(
+        id: &str,
+        wp_type: &str,
+    ) -> (
+        Arc<Self>,
+        tokio::sync::mpsc::UnboundedReceiver<crate::sync::FrameRecord>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (handle, _peer) = Self::test_stub_with_peer_inner(id, wp_type, Some(tx));
+        (handle, rx)
+    }
+
+    fn test_stub_with_peer_inner(
+        id: &str,
+        wp_type: &str,
+        frame_record_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::sync::FrameRecord>>,
+    ) -> (Arc<Self>, StdUnixStream) {
         let (a, b) = StdUnixStream::pair().expect("UnixStream pair");
-        let (events_tx, _) = broadcast::channel::<EventMsg>(8);
+        let (events_tx, _) = broadcast::channel::<RendererEvent>(8);
         let handle = Arc::new(Self {
             id: id.into(),
             wp_type: wp_type.into(),
@@ -2115,13 +2141,13 @@ impl RendererHandle {
             gpu: DrmNode::UNKNOWN,
             writer: Self::test_writer(id, a),
             events: events_tx,
-            bind_snapshot: Arc::new(StdMutex::new(None)),
+            published_pool: Arc::new(StdMutex::new(None)),
             sync_fds: Arc::new(StdMutex::new(std::collections::VecDeque::new())),
             latest_frame: Arc::new(StdMutex::new(None)),
             release_syncobj: Arc::new(StdMutex::new(None)),
             format_caps: Arc::new(StdMutex::new(None)),
             last_dispatched_scheme: Arc::new(StdMutex::new(None)),
-            frame_record_tx: None,
+            frame_record_tx,
             pending_configure: Arc::new(StdMutex::new(None)),
             child: Arc::new(TokioMutex::new(None)),
             clear_rgba: Arc::new(StdMutex::new([0.0, 0.0, 0.0, 1.0])),
@@ -2507,7 +2533,7 @@ mod reuse_tests {
     /// Mirrors `RendererHandle::test_stub` but lets tests pin extras.
     fn live_mpv_handle(id: &str, extras: HashMap<String, String>) -> Arc<RendererHandle> {
         let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
-        let (events_tx, _) = tokio::sync::broadcast::channel::<EventMsg>(8);
+        let (events_tx, _) = tokio::sync::broadcast::channel::<RendererEvent>(8);
         Arc::new(RendererHandle {
             id: id.into(),
             wp_type: "video".into(),
@@ -2519,7 +2545,7 @@ mod reuse_tests {
             gpu: DrmNode::UNKNOWN,
             writer: RendererHandle::test_writer(id, a),
             events: events_tx,
-            bind_snapshot: Arc::new(StdMutex::new(None)),
+            published_pool: Arc::new(StdMutex::new(None)),
             sync_fds: Arc::new(StdMutex::new(std::collections::VecDeque::new())),
             latest_frame: Arc::new(StdMutex::new(None)),
             release_syncobj: Arc::new(StdMutex::new(None)),
@@ -2608,7 +2634,7 @@ mod reuse_tests {
         daemon_side.set_nonblocking(false).unwrap();
         renderer_side.set_nonblocking(false).unwrap();
 
-        let (events_tx, _) = tokio::sync::broadcast::channel::<EventMsg>(8);
+        let (events_tx, _) = tokio::sync::broadcast::channel::<RendererEvent>(8);
         let h = Arc::new(RendererHandle {
             id: "h1".into(),
             wp_type: "video".into(),
@@ -2620,7 +2646,7 @@ mod reuse_tests {
             gpu: DrmNode::UNKNOWN,
             writer: RendererHandle::test_writer("h1", daemon_side),
             events: events_tx,
-            bind_snapshot: Arc::new(StdMutex::new(None)),
+            published_pool: Arc::new(StdMutex::new(None)),
             sync_fds: Arc::new(StdMutex::new(std::collections::VecDeque::new())),
             latest_frame: Arc::new(StdMutex::new(None)),
             release_syncobj: Arc::new(StdMutex::new(None)),
