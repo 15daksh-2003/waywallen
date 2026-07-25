@@ -974,6 +974,7 @@ Item {
                         model: W.App.displayManager.displays
                         MD.FilterChip {
                             required property var modelData
+                            width: Math.min(implicitWidth, 220)
                             text: (modelData?.displayLabel ?? "") || (modelData?.name ?? "").replace(/^waywallen-[a-z]+-[a-z]+-/, "") || ("Display " + modelData?.id)
                             checked: root.applyTargetIds.indexOf(modelData?.id) >= 0
                             onClicked: root.toggleTarget(modelData?.id)

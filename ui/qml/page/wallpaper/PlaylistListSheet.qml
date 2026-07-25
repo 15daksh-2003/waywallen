@@ -43,6 +43,7 @@ MD.BottomSheet {
             MD.EmbedChip {
                 id: playlistDisplayChip
 
+                Layout.maximumWidth: 280
                 text: control.sheetState.selectedDisplay
                     ? control.sheetState.displayLabel(control.sheetState.selectedDisplay)
                     : qsTr("No displays")
@@ -55,7 +56,9 @@ MD.BottomSheet {
                 MD.Menu {
                     id: playlistDisplayMenu
                     parent: playlistDisplayChip
-                    y: parent.height
+                    width: 280
+                    x: parent.width - width
+                    y: -height
                     model: control.sheetState.playDisplays
                     contentDelegate: MD.MenuItem {
                         required property var modelData
