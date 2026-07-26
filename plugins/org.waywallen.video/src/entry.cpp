@@ -241,12 +241,13 @@ const char* kv_get(const ww_kv_list_t& kv, const char* key) {
 
 wavsen::audio::AudioClientIdentity audio_client_identity() {
     return {
-        .application_name = WAYWALLEN_AUDIO_APPLICATION_NAME,
-        .application_id   = WAYWALLEN_AUDIO_APPLICATION_ID,
-        .stream_prefix    = WAYWALLEN_AUDIO_STREAM_PREFIX,
-        .component        = "video",
-        .media_name       = "Waywallen Video Renderer",
-        .media_role       = "music",
+        .application_name =
+            rstd::string::String::make(as_rstd_str(WAYWALLEN_AUDIO_APPLICATION_NAME)),
+        .application_id = rstd::string::String::make(as_rstd_str(WAYWALLEN_AUDIO_APPLICATION_ID)),
+        .stream_prefix  = rstd::string::String::make(as_rstd_str(WAYWALLEN_AUDIO_STREAM_PREFIX)),
+        .component      = rstd::string::String::make("video"_str),
+        .media_name     = rstd::string::String::make("Waywallen Video Renderer"_str),
+        .media_role     = rstd::string::String::make("music"_str),
     };
 }
 
@@ -985,7 +986,7 @@ int run(int argc, char** argv) {
      *   Failure (missing audio stream, unsupported codec, no audio device)
      *   is non-fatal: log and continue without audio (presenter falls
      *   back to wall-clock pacing). */
-    std::unique_ptr<wavsen::audio::AvPlayer> av_player;
+    rstd::Option<rstd::boxed::Box<wavsen::audio::AvPlayer>> av_player;
     {
         auto audio_file_res =
             wavsen::audio::open_file(rstd::ref<rstd::path::Path>(as_rstd_str(opt.video_path)));
@@ -998,13 +999,17 @@ int run(int argc, char** argv) {
                 rstd_warn("waywallen-video-renderer: audio open failed: {}",
                           std::move(p_res).unwrap_err().message);
             } else {
-                av_player = std::move(p_res).unwrap();
-                av_player->set_volume(rstd::f32(volume_pct / 100.0f));
+                auto player = rstd::move(p_res).unwrap();
+                player->set_volume(rstd::f32(volume_pct / 100.0f));
+                av_player.insert(rstd::move(player));
                 rstd_info("waywallen-video-renderer: audio decoder attached (volume={}%)",
                           volume_pct);
             }
         }
     }
+    auto current_av_player = [&av_player]() -> wavsen::audio::AvPlayer* {
+        return av_player.is_some() ? av_player->get() : nullptr;
+    };
     AudioRuntime audio_runtime {
         .volume_pct   = volume_pct,
         .enabled      = false,
@@ -1012,8 +1017,11 @@ int run(int argc, char** argv) {
         .muted        = false,
         .device_muted = false,
     };
-    set_audio_device_enabled(
-        av_player.get(), audio_runtime, effective_audio_enabled(host), rstd::f64(-1.0), volume_pct);
+    set_audio_device_enabled(current_av_player(),
+                             audio_runtime,
+                             effective_audio_enabled(host),
+                             rstd::f64(-1.0),
+                             volume_pct);
 
     ww_bridge_vk_dt_t vdt {};
     ww_bridge_vk_dt_load(&vdt, vkGetInstanceProcAddr, producer->instance());
@@ -1114,8 +1122,8 @@ int run(int argc, char** argv) {
 
     /* --- Main loop ----------------------------------------------------- */
     wavsen::video::Presenter presenter; // Iter 3: PTS-driven pacing.
-    if (av_player) {
-        presenter.set_external_clock([p = av_player.get()] {
+    if (auto* player = current_av_player()) {
+        presenter.set_external_clock([p = player] {
             return p->current_time_seconds();
         });
     }
@@ -1159,20 +1167,23 @@ int run(int argc, char** argv) {
         /* Audio settings — applied to AvPlayer atomically without rebuild. */
         if (host.volume_pending.exchange(false, std::memory_order_acq_rel)) {
             audio_runtime.volume_pct = host.pending_volume.load(std::memory_order_acquire);
-            if (av_player) {
-                av_player->set_volume(
+            if (auto* player = current_av_player()) {
+                player->set_volume(
                     rstd::f32(static_cast<float>(audio_runtime.volume_pct) / 100.0f));
             }
         }
         if (host.enable_audio_pending.exchange(false, std::memory_order_acq_rel)) {
             const bool audio_enabled = effective_audio_enabled(host);
-            set_audio_device_enabled(
-                av_player.get(), audio_runtime, audio_enabled, prev_pts, audio_runtime.volume_pct);
+            set_audio_device_enabled(current_av_player(),
+                                     audio_runtime,
+                                     audio_enabled,
+                                     prev_pts,
+                                     audio_runtime.volume_pct);
             presenter.reset();
         }
         const bool paused_now = host.paused.load(std::memory_order_acquire);
         const bool muted_now  = host.muted.load(std::memory_order_acquire);
-        sync_audio_state(av_player.get(),
+        sync_audio_state(current_av_player(),
                          audio_runtime,
                          paused_now,
                          muted_now,
@@ -1221,7 +1232,7 @@ int run(int argc, char** argv) {
                     hwaccel = new_h;
                     presenter.reset();
                     // Video reopened at PTS 0 — keep audio aligned.
-                    if (av_player) av_player->seek_to_start();
+                    if (auto* player = current_av_player()) player->seek_to_start();
                     prev_pts = rstd::f64(-1.0);
                     rstd_info("waywallen-video-renderer: reopened, kind={}",
                               kind_label(decoder->get()->kind()));
@@ -1283,7 +1294,7 @@ int run(int argc, char** argv) {
         const bool pts_regressed = frame_pts >= rstd::f64() && prev_pts >= rstd::f64() &&
                                    frame_pts + rstd::f64(0.5) < prev_pts;
         if (decoder_looped || pts_regressed) {
-            if (av_player) av_player->seek_to_start();
+            if (auto* player = current_av_player()) player->seek_to_start();
             presenter.reset();
         }
         prev_pts = frame_pts;
