@@ -361,8 +361,8 @@ UploadStatus upload_to_slot(HostState& host, wavsen::video::Producer& producer,
         host, directive, s, g_dump_seq.fetch_add(1, std::memory_order_relaxed));
 
     auto upload_res = producer.upload_into(reinterpret_cast<VkImage>(s.vk_image),
-                                           s.width,
-                                           s.height,
+                                           rstd::u32(s.width),
+                                           rstd::u32(s.height),
                                            host.rgba_data,
                                            rstd::usize(host.rgba_size));
     if (upload_res.is_err()) {
@@ -553,7 +553,8 @@ void reader_loop(HostState& host) {
 // a `socketpair(AF_UNIX)`, ask it to advertise, then drain the
 // `format_caps` message on the other end and decode it.
 static int print_caps_json(const Options& opt) {
-    auto producer_res = wavsen::video::Producer::create(opt.width, opt.height);
+    auto producer_res =
+        wavsen::video::Producer::create(rstd::u32(opt.width), rstd::u32(opt.height));
     if (producer_res.is_err()) {
         rstd_error("waywallen-image-renderer: vk_producer: {}",
                    std::move(producer_res).unwrap_err().message.as_str());
@@ -573,7 +574,7 @@ static int print_caps_json(const Options& opt) {
     pool_init.physical_device    = producer->physical_device();
     pool_init.device             = producer->device();
     pool_init.queue              = producer->queue();
-    pool_init.queue_family_index = producer->queue_family_index();
+    pool_init.queue_family_index = producer->queue_family_index().to_primitive();
     pool_init.get_instance_proc_addr =
         reinterpret_cast<void* (*)(void*, const char*)>(vkGetInstanceProcAddr);
     pool_init.device_uuid = producer->device_uuid();
@@ -744,7 +745,8 @@ int run(int argc, char** argv) {
     }
 
     if (opt.vulkan_probe) {
-        auto prod_res = wavsen::video::Producer::create(opt.width, opt.height);
+        auto prod_res =
+            wavsen::video::Producer::create(rstd::u32(opt.width), rstd::u32(opt.height));
         if (prod_res.is_err()) {
             rstd_error("waywallen-image-renderer: vk_producer: {}",
                        std::move(prod_res).unwrap_err().message.as_str());
@@ -835,10 +837,11 @@ int run(int argc, char** argv) {
     opt.width  = rgba_buf.width;
     opt.height = rgba_buf.height;
 
-    auto producer_res = opt.render_node.empty()
-                            ? wavsen::video::Producer::create(opt.width, opt.height)
-                            : wavsen::video::Producer::create_with_render_node(
-                                  opt.width, opt.height, as_rstd_str(opt.render_node));
+    auto producer_res =
+        opt.render_node.empty()
+            ? wavsen::video::Producer::create(rstd::u32(opt.width), rstd::u32(opt.height))
+            : wavsen::video::Producer::create_with_render_node(
+                  rstd::u32(opt.width), rstd::u32(opt.height), as_rstd_str(opt.render_node));
     if (producer_res.is_err()) {
         die("vk_producer: " + to_std_string(std::move(producer_res).unwrap_err().message));
     }
@@ -858,7 +861,7 @@ int run(int argc, char** argv) {
     pool_init.physical_device    = producer->physical_device();
     pool_init.device             = producer->device();
     pool_init.queue              = producer->queue();
-    pool_init.queue_family_index = producer->queue_family_index();
+    pool_init.queue_family_index = producer->queue_family_index().to_primitive();
     pool_init.get_instance_proc_addr =
         reinterpret_cast<void* (*)(void*, const char*)>(vkGetInstanceProcAddr);
     pool_init.device_uuid = producer->device_uuid();

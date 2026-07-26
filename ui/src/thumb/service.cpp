@@ -114,16 +114,16 @@ void ThumbnailJob::run() {
 
     if (m_is_video) {
         wavsen::decode::ThumbOptions opts;
-        opts.max_edge = kMaxEdge;
+        opts.max_edge = rstd::u32(kMaxEdge);
         auto res      = wavsen::decode::extract_thumbnail(m_key.toStdString(), opts);
         if (res.is_err()) {
             error = QString::fromStdString(std::move(res).unwrap_err().message);
         } else {
             auto rgba = std::move(res).unwrap();
             img       = QImage(rgba.data.data(),
-                               static_cast<int>(rgba.width),
-                               static_cast<int>(rgba.height),
-                               static_cast<int>(rgba.stride),
+                               static_cast<int>(rgba.width.to_primitive()),
+                               static_cast<int>(rgba.height.to_primitive()),
+                               static_cast<int>(rgba.stride.to_primitive()),
                                QImage::Format_RGBA8888)
                             .copy();
         }

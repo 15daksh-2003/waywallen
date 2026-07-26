@@ -514,11 +514,11 @@ void apply_audio_scale(wavsen::audio::AvPlayer* av_player, AudioRuntime& audio, 
     scale = clamp01(scale);
     if (! force && audio.target_scale == scale) return;
     audio.target_scale = scale;
-    av_player->set_volume_scale(scale, fade_ms);
+    av_player->set_volume_scale(rstd::f32(scale), rstd::u32(fade_ms));
 }
 
 bool set_audio_device_enabled(wavsen::audio::AvPlayer* av_player, AudioRuntime& audio, bool enabled,
-                              double seek_seconds, uint32_t volume_pct) {
+                              rstd::f64 seek_seconds, uint32_t volume_pct) {
     if (! av_player) {
         audio.enabled       = enabled;
         audio.pause_pending = false;
@@ -533,7 +533,7 @@ bool set_audio_device_enabled(wavsen::audio::AvPlayer* av_player, AudioRuntime& 
         return true;
     }
     if (! av_player->is_device_open()) {
-        if (seek_seconds >= 0.0 && std::isfinite(seek_seconds)) {
+        if (seek_seconds >= rstd::f64() && seek_seconds.is_finite()) {
             av_player->seek_to(seek_seconds);
         }
         if (! av_player->open_device()) {
@@ -544,7 +544,7 @@ bool set_audio_device_enabled(wavsen::audio::AvPlayer* av_player, AudioRuntime& 
             audio.target_scale  = -1.0f;
             return false;
         }
-        av_player->set_volume(static_cast<float>(volume_pct) / 100.0f);
+        av_player->set_volume(rstd::f32(static_cast<float>(volume_pct) / 100.0f));
         audio.target_scale = -1.0f;
     }
     audio.enabled = true;
@@ -630,7 +630,7 @@ int run_selftest(const Options& opt) {
     uint32_t even_h = opt.height + (opt.height & 1u);
 
     auto producer_res = wavsen::video::Producer::create_with_render_node(
-        even_w, even_h, as_rstd_str(opt.render_node));
+        rstd::u32(even_w), rstd::u32(even_h), as_rstd_str(opt.render_node));
     if (producer_res.is_err()) {
         rstd_error("selftest vk: {}", std::move(producer_res).unwrap_err().message.as_str());
         return 1;
@@ -642,8 +642,8 @@ int run_selftest(const Options& opt) {
                                                     producer->device(),
                                                     producer->queue_family_index(),
                                                     producer->queue(),
-                                                    even_w,
-                                                    even_h);
+                                                    rstd::u32(even_w),
+                                                    rstd::u32(even_h));
     if (yuv_res.is_err()) {
         rstd_error("selftest yuv: {}", std::move(yuv_res).unwrap_err().message.as_str());
         return 1;
@@ -655,8 +655,8 @@ int run_selftest(const Options& opt) {
         rstd::string::String::make(as_rstd_str(opt.render_node)),
     };
     auto decoder_res = wavsen::video::VideoDecoder::open_with_vk(as_rstd_str(opt.video_path),
-                                                                 even_w,
-                                                                 even_h,
+                                                                 rstd::u32(even_w),
+                                                                 rstd::u32(even_h),
                                                                  /*loop=*/false,
                                                                  *producer,
                                                                  dec_opts);
@@ -729,23 +729,26 @@ int run_selftest(const Options& opt) {
         }
         if (std::move(fs_res).unwrap() != wavsen::video::NextFrame::Ok) return 1;
         const auto cm = wavsen::video::make_color_matrix(
-            static_cast<wavsen::video::ColorSpace>(vkv.colorspace),
-            static_cast<wavsen::video::ColorRange>(vkv.color_range));
+            static_cast<wavsen::video::ColorSpace>(vkv.colorspace.to_primitive()),
+            static_cast<wavsen::video::ColorRange>(vkv.color_range.to_primitive()));
         wavsen::video::YuvToRgba::VkFrameImports im {};
-        im.y_image           = vkv.img[0];
-        im.uv_image          = vkv.plane_count > 1 ? vkv.img[1] : VK_NULL_HANDLE;
-        im.y_sem             = vkv.sem[0];
-        im.uv_sem            = vkv.plane_count > 1 ? vkv.sem[1] : vkv.sem[0];
-        im.y_sem_val_in_out  = &vkv.sem_value[0];
-        im.uv_sem_val_in_out = vkv.plane_count > 1 ? &vkv.sem_value[1] : &vkv.sem_value[0];
-        im.y_layout_in_out   = &vkv.layout[0];
-        im.uv_layout_in_out  = vkv.plane_count > 1 ? &vkv.layout[1] : &vkv.layout[0];
-        im.y_qf_in_out       = &vkv.queue_family[0];
-        im.uv_qf_in_out      = vkv.plane_count > 1 ? &vkv.queue_family[1] : &vkv.queue_family[0];
-        im.src_w             = vkv.width;
-        im.src_h             = vkv.height;
-        im.bit_depth         = vkv.bit_depth;
-        auto cv_res          = yuv->convert_av_vk_frame(im, dst_img, even_w, even_h, cm);
+        im.y_image          = vkv.img[0];
+        im.uv_image         = vkv.plane_count > rstd::u32(1) ? vkv.img[1] : VK_NULL_HANDLE;
+        im.y_sem            = vkv.sem[0];
+        im.uv_sem           = vkv.plane_count > rstd::u32(1) ? vkv.sem[1] : vkv.sem[0];
+        im.y_sem_val_in_out = &vkv.sem_value[0];
+        im.uv_sem_val_in_out =
+            vkv.plane_count > rstd::u32(1) ? &vkv.sem_value[1] : &vkv.sem_value[0];
+        im.y_layout_in_out  = &vkv.layout[0];
+        im.uv_layout_in_out = vkv.plane_count > rstd::u32(1) ? &vkv.layout[1] : &vkv.layout[0];
+        im.y_qf_in_out      = &vkv.queue_family[0];
+        im.uv_qf_in_out =
+            vkv.plane_count > rstd::u32(1) ? &vkv.queue_family[1] : &vkv.queue_family[0];
+        im.src_w     = vkv.width;
+        im.src_h     = vkv.height;
+        im.bit_depth = vkv.bit_depth;
+        auto cv_res =
+            yuv->convert_av_vk_frame(im, dst_img, rstd::u32(even_w), rstd::u32(even_h), cm);
         if (cv_res.is_err()) {
             rstd_error("selftest convert: {}", std::move(cv_res).unwrap_err().message.as_str());
             sync_fd = -1;
@@ -768,9 +771,10 @@ int run_selftest(const Options& opt) {
                   drmv.object_count,
                   drmv.layer_count);
         const auto cm = wavsen::video::make_color_matrix(
-            static_cast<wavsen::video::ColorSpace>(drmv.colorspace),
-            static_cast<wavsen::video::ColorRange>(drmv.color_range));
-        auto cv_res = yuv->convert_drm_prime(drmv, dst_img, even_w, even_h, cm);
+            static_cast<wavsen::video::ColorSpace>(drmv.colorspace.to_primitive()),
+            static_cast<wavsen::video::ColorRange>(drmv.color_range.to_primitive()));
+        auto cv_res =
+            yuv->convert_drm_prime(drmv, dst_img, rstd::u32(even_w), rstd::u32(even_h), cm);
         if (cv_res.is_err()) {
             rstd_error("selftest convert (drm): {}",
                        std::move(cv_res).unwrap_err().message.as_str());
@@ -787,10 +791,10 @@ int run_selftest(const Options& opt) {
         }
         if (std::move(fs_res).unwrap() != wavsen::video::NextFrame::Ok) return 1;
         const auto cm = wavsen::video::make_color_matrix(
-            static_cast<wavsen::video::ColorSpace>(frame.colorspace),
-            static_cast<wavsen::video::ColorRange>(frame.color_range));
-        auto cv_res =
-            yuv->convert_nv12(dst_img, even_w, even_h, frame.data.data(), frame.data.len(), cm);
+            static_cast<wavsen::video::ColorSpace>(frame.colorspace.to_primitive()),
+            static_cast<wavsen::video::ColorRange>(frame.color_range.to_primitive()));
+        auto cv_res = yuv->convert_nv12(
+            dst_img, rstd::u32(even_w), rstd::u32(even_h), frame.data.data(), frame.data.len(), cm);
         if (cv_res.is_err()) {
             rstd_error("selftest convert: {}", std::move(cv_res).unwrap_err().message.as_str());
             sync_fd = -1;
@@ -934,8 +938,8 @@ int run(int argc, char** argv) {
                 to_std_string(std::move(probe_res).unwrap_err().message));
         }
         auto probe = std::move(probe_res).unwrap();
-        native_w   = probe.width;
-        native_h   = probe.height;
+        native_w   = probe.width.to_primitive();
+        native_h   = probe.height.to_primitive();
     }
     opt.width  = native_w;
     opt.height = native_h;
@@ -948,7 +952,7 @@ int run(int argc, char** argv) {
 
     /* --- Vulkan device first, so the decoder can share it --- */
     auto producer_res = wavsen::video::Producer::create_with_render_node(
-        even_w, even_h, as_rstd_str(opt.render_node));
+        rstd::u32(even_w), rstd::u32(even_h), as_rstd_str(opt.render_node));
     if (producer_res.is_err()) {
         die("vk producer: " + to_std_string(std::move(producer_res).unwrap_err().message));
     }
@@ -961,8 +965,12 @@ int run(int argc, char** argv) {
         hwaccel,
         rstd::string::String::make(as_rstd_str(opt.render_node)),
     };
-    auto decoder_res = wavsen::video::VideoDecoder::open_with_vk(
-        as_rstd_str(opt.video_path), even_w, even_h, opt.loop_file, *producer, dec_opts);
+    auto decoder_res = wavsen::video::VideoDecoder::open_with_vk(as_rstd_str(opt.video_path),
+                                                                 rstd::u32(even_w),
+                                                                 rstd::u32(even_h),
+                                                                 opt.loop_file,
+                                                                 *producer,
+                                                                 dec_opts);
     if (decoder_res.is_err()) {
         die("decode " + opt.video_path + ": " +
             to_std_string(std::move(decoder_res).unwrap_err().message));
@@ -991,7 +999,7 @@ int run(int argc, char** argv) {
                           std::move(p_res).unwrap_err().message);
             } else {
                 av_player = std::move(p_res).unwrap();
-                av_player->set_volume(volume_pct / 100.0f);
+                av_player->set_volume(rstd::f32(volume_pct / 100.0f));
                 rstd_info("waywallen-video-renderer: audio decoder attached (volume={}%)",
                           volume_pct);
             }
@@ -1005,7 +1013,7 @@ int run(int argc, char** argv) {
         .device_muted = false,
     };
     set_audio_device_enabled(
-        av_player.get(), audio_runtime, effective_audio_enabled(host), -1.0, volume_pct);
+        av_player.get(), audio_runtime, effective_audio_enabled(host), rstd::f64(-1.0), volume_pct);
 
     ww_bridge_vk_dt_t vdt {};
     ww_bridge_vk_dt_load(&vdt, vkGetInstanceProcAddr, producer->instance());
@@ -1016,8 +1024,8 @@ int run(int argc, char** argv) {
                                                     producer->device(),
                                                     producer->queue_family_index(),
                                                     producer->queue(),
-                                                    even_w,
-                                                    even_h);
+                                                    rstd::u32(even_w),
+                                                    rstd::u32(even_h));
     if (yuv_res.is_err()) {
         die("yuv_to_rgba: " + to_std_string(std::move(yuv_res).unwrap_err().message));
     }
@@ -1029,7 +1037,7 @@ int run(int argc, char** argv) {
     pool_init.physical_device    = producer->physical_device();
     pool_init.device             = producer->device();
     pool_init.queue              = producer->queue();
-    pool_init.queue_family_index = producer->queue_family_index();
+    pool_init.queue_family_index = producer->queue_family_index().to_primitive();
     pool_init.get_instance_proc_addr =
         reinterpret_cast<void* (*)(void*, const char*)>(vkGetInstanceProcAddr);
     pool_init.device_uuid = producer->device_uuid();
@@ -1114,9 +1122,9 @@ int run(int argc, char** argv) {
     wavsen::video::Nv12Frame    frame;
     wavsen::video::VkFrameView  vkv {};
     wavsen::video::DrmFrameView drmv {};
-    double                      prev_pts = -1.0; // for loop-boundary detection (PTS regression)
-    uint32_t stall_warn_counter          = 0;    // throttle ETIME log spam during backpressure
-    bool     submitted_since_negotiate   = false;
+    rstd::f64                   prev_pts { -1.0 }; // for loop-boundary detection (PTS regression)
+    uint32_t stall_warn_counter        = 0;        // throttle ETIME log spam during backpressure
+    bool     submitted_since_negotiate = false;
 
     while (! host.shutdown.load(std::memory_order_acquire)) {
         {
@@ -1152,7 +1160,8 @@ int run(int argc, char** argv) {
         if (host.volume_pending.exchange(false, std::memory_order_acq_rel)) {
             audio_runtime.volume_pct = host.pending_volume.load(std::memory_order_acquire);
             if (av_player) {
-                av_player->set_volume(static_cast<float>(audio_runtime.volume_pct) / 100.0f);
+                av_player->set_volume(
+                    rstd::f32(static_cast<float>(audio_runtime.volume_pct) / 100.0f));
             }
         }
         if (host.enable_audio_pending.exchange(false, std::memory_order_acq_rel)) {
@@ -1197,8 +1206,8 @@ int run(int argc, char** argv) {
                     };
                     auto re_res = wavsen::video::VideoDecoder::open_with_vk(
                         as_rstd_str(opt.video_path),
-                        even_w,
-                        even_h,
+                        rstd::u32(even_w),
+                        rstd::u32(even_h),
                         host.loop_value.load(std::memory_order_acquire),
                         *producer,
                         new_opts);
@@ -1213,7 +1222,7 @@ int run(int argc, char** argv) {
                     presenter.reset();
                     // Video reopened at PTS 0 — keep audio aligned.
                     if (av_player) av_player->seek_to_start();
-                    prev_pts = -1.0;
+                    prev_pts = rstd::f64(-1.0);
                     rstd_info("waywallen-video-renderer: reopened, kind={}",
                               kind_label(decoder->get()->kind()));
                 }
@@ -1234,7 +1243,7 @@ int run(int argc, char** argv) {
             continue;
         }
 
-        double                                                       frame_pts = -1.0;
+        rstd::f64                                                    frame_pts { -1.0 };
         const auto                                                   fkind = decoder->get()->kind();
         rstd::Result<wavsen::video::NextFrame, wavsen::video::Error> fs_res =
             rstd::Ok(wavsen::video::NextFrame::Ok);
@@ -1271,8 +1280,8 @@ int run(int argc, char** argv) {
         case wavsen::video::FrameKind::Sw: frame_pts = frame.pts_seconds; break;
         }
 
-        const bool pts_regressed =
-            frame_pts >= 0.0 && prev_pts >= 0.0 && frame_pts + 0.5 < prev_pts;
+        const bool pts_regressed = frame_pts >= rstd::f64() && prev_pts >= rstd::f64() &&
+                                   frame_pts + rstd::f64(0.5) < prev_pts;
         if (decoder_looped || pts_regressed) {
             if (av_player) av_player->seek_to_start();
             presenter.reset();
@@ -1312,8 +1321,9 @@ int run(int argc, char** argv) {
             break;
         }
 
-        int      sync_fd = -1;
-        uint32_t cs_id = 0, cr_id = 0;
+        int       sync_fd = -1;
+        rstd::u32 cs_id;
+        rstd::u32 cr_id;
         switch (fkind) {
         case wavsen::video::FrameKind::VulkanShared:
             cs_id = vkv.colorspace;
@@ -1328,38 +1338,46 @@ int run(int argc, char** argv) {
             cr_id = frame.color_range;
             break;
         }
-        const auto color_matrix =
-            wavsen::video::make_color_matrix(static_cast<wavsen::video::ColorSpace>(cs_id),
-                                             static_cast<wavsen::video::ColorRange>(cr_id));
+        const auto color_matrix = wavsen::video::make_color_matrix(
+            static_cast<wavsen::video::ColorSpace>(cs_id.to_primitive()),
+            static_cast<wavsen::video::ColorRange>(cr_id.to_primitive()));
         rstd::Result<int, wavsen::video::Error> cv_res = rstd::Ok(-1);
         switch (fkind) {
         case wavsen::video::FrameKind::VulkanShared: {
             wavsen::video::YuvToRgba::VkFrameImports im {};
-            im.y_image           = vkv.img[0];
-            im.uv_image          = vkv.plane_count > 1 ? vkv.img[1] : VK_NULL_HANDLE;
-            im.y_sem             = vkv.sem[0];
-            im.uv_sem            = vkv.plane_count > 1 ? vkv.sem[1] : vkv.sem[0];
-            im.y_sem_val_in_out  = &vkv.sem_value[0];
-            im.uv_sem_val_in_out = vkv.plane_count > 1 ? &vkv.sem_value[1] : &vkv.sem_value[0];
-            im.y_layout_in_out   = &vkv.layout[0];
-            im.uv_layout_in_out  = vkv.plane_count > 1 ? &vkv.layout[1] : &vkv.layout[0];
-            im.y_qf_in_out       = &vkv.queue_family[0];
-            im.uv_qf_in_out = vkv.plane_count > 1 ? &vkv.queue_family[1] : &vkv.queue_family[0];
-            im.src_w        = vkv.width;
-            im.src_h        = vkv.height;
-            im.bit_depth    = vkv.bit_depth;
-            cv_res          = yuv->convert_av_vk_frame(
-                im, reinterpret_cast<VkImage>(s.vk_image), s.width, s.height, color_matrix);
+            im.y_image          = vkv.img[0];
+            im.uv_image         = vkv.plane_count > rstd::u32(1) ? vkv.img[1] : VK_NULL_HANDLE;
+            im.y_sem            = vkv.sem[0];
+            im.uv_sem           = vkv.plane_count > rstd::u32(1) ? vkv.sem[1] : vkv.sem[0];
+            im.y_sem_val_in_out = &vkv.sem_value[0];
+            im.uv_sem_val_in_out =
+                vkv.plane_count > rstd::u32(1) ? &vkv.sem_value[1] : &vkv.sem_value[0];
+            im.y_layout_in_out  = &vkv.layout[0];
+            im.uv_layout_in_out = vkv.plane_count > rstd::u32(1) ? &vkv.layout[1] : &vkv.layout[0];
+            im.y_qf_in_out      = &vkv.queue_family[0];
+            im.uv_qf_in_out =
+                vkv.plane_count > rstd::u32(1) ? &vkv.queue_family[1] : &vkv.queue_family[0];
+            im.src_w     = vkv.width;
+            im.src_h     = vkv.height;
+            im.bit_depth = vkv.bit_depth;
+            cv_res       = yuv->convert_av_vk_frame(im,
+                                                    reinterpret_cast<VkImage>(s.vk_image),
+                                                    rstd::u32(s.width),
+                                                    rstd::u32(s.height),
+                                                    color_matrix);
             break;
         }
         case wavsen::video::FrameKind::VaapiDrm:
-            cv_res = yuv->convert_drm_prime(
-                drmv, reinterpret_cast<VkImage>(s.vk_image), s.width, s.height, color_matrix);
+            cv_res = yuv->convert_drm_prime(drmv,
+                                            reinterpret_cast<VkImage>(s.vk_image),
+                                            rstd::u32(s.width),
+                                            rstd::u32(s.height),
+                                            color_matrix);
             break;
         case wavsen::video::FrameKind::Sw:
             cv_res = yuv->convert_nv12(reinterpret_cast<VkImage>(s.vk_image),
-                                       s.width,
-                                       s.height,
+                                       rstd::u32(s.width),
+                                       rstd::u32(s.height),
                                        frame.data.data(),
                                        frame.data.len(),
                                        color_matrix);
