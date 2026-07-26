@@ -66,6 +66,12 @@ It started life as a Wallpaper Engine plugin for KDE.
 > After installed, this plugin's update will be notified and handled by waywallen.  
 
 ## FAQ
+- How to get logs  
+  You must exit the pre-launched waywallen daemon.  
+  ```bash
+  export RSTD_LOG=debug RUST_LOG=debug,zbus=warn
+  ./waywallen
+  ```
 - How to debug in flatpak
   ```bash
   flatpak install org.waywallen.waywallen.Debug
