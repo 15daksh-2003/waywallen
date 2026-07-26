@@ -28,9 +28,7 @@ void    PluginActionQuery::setActionId(const QString& v) {
     Q_EMIT actionIdChanged();
 }
 
-void PluginActionQuery::reload() {
-    invoke({});
-}
+void PluginActionQuery::reload() { invoke({}); }
 
 void PluginActionQuery::invoke(const QVariantMap& values) {
     setStatus(Status::Querying);

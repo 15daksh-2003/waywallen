@@ -104,9 +104,9 @@ public:
     void send_untracked(proto::Request request) {
         if (! m_client || ! m_client->is_connected()) return;
         auto bytes = request.serialize(m_serializer.get());
-        m_client->send(slice<rstd::u8>::from_raw_parts(
-            reinterpret_cast<const rstd::byte*>(bytes.constData()),
-            static_cast<usize>(bytes.size())));
+        m_client->send(
+            slice<rstd::u8>::from_raw_parts(reinterpret_cast<const rstd::byte*>(bytes.constData()),
+                                            static_cast<usize>(bytes.size())));
     }
 
     void cancel(quint64 request_id) { m_handlers.erase(request_id); }

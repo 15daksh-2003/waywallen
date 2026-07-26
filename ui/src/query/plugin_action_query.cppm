@@ -23,11 +23,11 @@ export class PluginActionQuery : public Query,
 public:
     PluginActionQuery(QObject* parent = nullptr);
 
-    QString pluginId() const;
-    void    setPluginId(const QString& v);
-    QString actionId() const;
-    void    setActionId(const QString& v);
-    void    reload() override;
+    QString          pluginId() const;
+    void             setPluginId(const QString& v);
+    QString          actionId() const;
+    void             setActionId(const QString& v);
+    void             reload() override;
     Q_INVOKABLE void invoke(const QVariantMap& values);
 
     Q_SIGNAL void pluginIdChanged();
