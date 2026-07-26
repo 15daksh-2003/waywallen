@@ -2,7 +2,7 @@
   <description>
     <p>Added:</p>
     <ul>
-      <li>Remote source account sessions with QR sign-in, subscription controls, and discovery filters.</li>
+      <li>Remote source account sessions with QR sign-in, subscription controls, and discovery filters. #142 by @WorkingRobot</li>
       <li>Global renderer audio controls, including capture toggles.</li>
       <li>Automatic muting while other audio is playing.</li>
       <li>Theme preference.</li>
@@ -10,6 +10,7 @@
     </ul>
     <p>Fixes:</p>
     <ul>
+      <li>source: surface scan failures instead of reporting success. #153 by @ales-drnz</li>
       <li>Renderer random freeze due to wrong mpmc channel.</li>
       <li>Renderer buffers are no longer reused before every display releases them.</li>
       <li>Displays remain bound to the exact buffer publication during wallpaper switches.</li>
