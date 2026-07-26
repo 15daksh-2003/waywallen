@@ -1836,6 +1836,11 @@ impl LuaPluginRuntime {
             .filter_map(|(name, info)| info.capabilities.source.is_some().then(|| name.clone()))
             .collect();
         plugin_names.sort();
+        // Every plugin is scanned even if an earlier one fails, so one broken
+        // source does not hide the wallpapers the others found. The failures
+        // are still reported, otherwise a failed scan is indistinguishable from
+        // a scan that legitimately found nothing.
+        let mut failures: Vec<String> = Vec::new();
         for name in &plugin_names {
             let libs = libs_by_plugin
                 .get(name)
@@ -1843,7 +1848,14 @@ impl LuaPluginRuntime {
                 .unwrap_or(&[]);
             if let Err(e) = self.scan_plugin(name, libs).await {
                 log::warn!("scan plugin {name} failed: {e}");
+                failures.push(format!("{name}: {e:#}"));
             }
+        }
+        if !failures.is_empty() {
+            return Err(Error::Internal(anyhow!(
+                "source scan failed for {}",
+                failures.join("; ")
+            )));
         }
         Ok(())
     }
@@ -3658,10 +3670,18 @@ impl LuaPluginRegistry {
         });
         let results = futures_util::future::join_all(scans).await;
         let mut entries = Vec::new();
+        // The catalog is still replaced with whatever the healthy plugins
+        // returned, so one broken source does not hide the rest. The failures
+        // are reported afterwards: a scan that failed must not be presented as
+        // a scan that simply found nothing.
+        let mut failures: Vec<String> = Vec::new();
         for result in results {
             match result {
                 Ok(mut plugin_entries) => entries.append(&mut plugin_entries),
-                Err(e) => log::warn!("scan Lua plugin failed: {e}"),
+                Err(e) => {
+                    log::warn!("scan Lua plugin failed: {e}");
+                    failures.push(format!("{e:#}"));
+                }
             }
         }
         entries.sort_by(|a, b| {
@@ -3673,6 +3693,12 @@ impl LuaPluginRegistry {
             .write()
             .expect("source catalog lock poisoned")
             .replace(entries);
+        if !failures.is_empty() {
+            return Err(Error::Internal(anyhow!(
+                "source scan failed: {}",
+                failures.join("; ")
+            )));
+        }
         Ok(())
     }
 
@@ -4435,6 +4461,46 @@ return M
             .load_plugin(&plugin_path, "org.grouped", "1", ENTRY_VERSION_V3)
             .unwrap();
         block_value(async { manager.scan_all(&HashMap::new()).await }).unwrap();
+    }
+
+    #[test]
+    fn scan_all_reports_a_failing_plugin_instead_of_reporting_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_path = dir.path().join("failing_source.lua");
+        let mut f = std::fs::File::create(&plugin_path).unwrap();
+        write!(
+            f,
+            r#"
+local M = {{}}
+function M.info()
+    return {{
+        name = "failing",
+        capabilities = {{
+            source = {{ types = {{"image"}}, scan = true }},
+        }},
+    }}
+end
+M.source = {{}}
+function M.source.scan(ctx)
+    error("library root is unreadable")
+end
+return M
+"#
+        )
+        .unwrap();
+
+        let mgr = SourceManager::new().unwrap();
+        mgr.load_plugin(&plugin_path, "failing.plugin", "1.0", ENTRY_VERSION)
+            .unwrap();
+
+        let result = block_value(async { mgr.scan_all(&HashMap::new()).await });
+
+        let err = result.expect_err("a failing source scan must not report success");
+        assert!(
+            err.to_string().contains("failing"),
+            "error should name the plugin that failed, got: {err}"
+        );
+        assert!(mgr.list().is_empty());
     }
 
     #[test]

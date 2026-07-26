@@ -1670,12 +1670,16 @@ async fn refresh_sources_inner(app: &Arc<AppState>) -> Result<usize> {
     // Hold the Lua VM lock only during the scan; wallpaper reads hit the DB
     // and do not wait behind this section.
     let handle = tokio::runtime::Handle::current();
-    let snapshot: Vec<WallpaperEntry> = tokio::task::spawn_blocking(move || {
-        handle.block_on(source_mgr.scan_all(&libs_for_scan))?;
-        Ok::<_, anyhow::Error>(source_mgr.list())
-    })
-    .await
-    .map_err(|e| Error::Internal(anyhow!("source scan join: {e}")))??;
+    // A failing source plugin must not discard what the others found, so the
+    // scan error is carried alongside the snapshot and only surfaced once the
+    // successful entries have been synced.
+    let (snapshot, scan_error): (Vec<WallpaperEntry>, Option<Error>) =
+        tokio::task::spawn_blocking(move || {
+            let scan_error = handle.block_on(source_mgr.scan_all(&libs_for_scan)).err();
+            (source_mgr.list(), scan_error)
+        })
+        .await
+        .map_err(|e| Error::Internal(anyhow!("source scan join: {e}")))?;
 
     let plugins = match app.source_manager.plugins() {
         Ok(p) => p,
@@ -1752,5 +1756,8 @@ async fn refresh_sources_inner(app: &Arc<AppState>) -> Result<usize> {
         },
     );
 
+    if let Some(e) = scan_error {
+        return Err(e);
+    }
     Ok(count)
 }
