@@ -77,7 +77,7 @@ It started life as a Wallpaper Engine plugin for KDE.
   flatpak install org.waywallen.waywallen.Debug
   flatpak run --devel --command=bash org.waywallen.waywallen
   # 1. run directly
-  [📦 org.waywallen.waywallen ~]$ gdb Qcm
+  [📦 org.waywallen.waywallen ~]$ gdb waywallen
   (gdb) run
   Enable debuginfod for this session? (y or [n]) n
   ...
@@ -87,6 +87,6 @@ It started life as a Wallpaper Engine plugin for KDE.
   # 2. or use coredump file
   coredumpctl dump <id> -o core.save
   flatpak run --devel --filesystem=host --command=bash org.waywallen.waywallen
-  [📦 org.waywallen.waywallen ~]$ gdb Qcm core.save
+  [📦 org.waywallen.waywallen ~]$ gdb waywallen core.save
   ...
   ```
