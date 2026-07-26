@@ -47,6 +47,26 @@ cargo build --package waywallen-display --bin waywallen-layer-shell --release
 
 To skip components: `-DWAYWALLEN_BUILD_DAEMON=OFF`, `-DWAYWALLEN_BUILD_UI=OFF`, `-DWAYWALLEN_BUILD_PLUGINS=OFF`.
 
+### CMake 4.4 synthetic BMI builds
+
+Waywallen uses C++ modules. Starting with CMake 4.4, CMake may create a
+consumer-specific [synthetic target](https://cmake.org/cmake/help/latest/manual/cmake-cxxmodules.7.html#term-synthetic-target)
+when a module consumer and its provider have different compile options. The
+synthetic target rebuilds the provider's BMI with the consumer's compile
+profile; it does not rebuild the provider's object files.
+
+In the tested Linux/Clang/Qt build, target-local warning, pthread, and Qt
+options produced multiple `@synth_` variants. CMake 4.4 could then omit a build
+edge in the transitive synthetic provider closure or mix original and
+synthetic BMIs. Typical symptoms were a missing synthetic BMI during the build
+or a Clang `ASTReader` crash while importing a module.
+
+Current Waywallen avoids this path by defining one C++ compile profile at the
+top level, before any module provider or consumer is created. This includes
+`-fno-direct-access-external-data`, `-pthread`, and `_REENTRANT`, as well as the
+project warning options. Downstream builds should keep these options at the
+workspace level instead of moving them onto individual renderer or UI targets.
+
 ## Launching
 
 ```bash
