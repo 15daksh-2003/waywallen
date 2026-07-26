@@ -91,7 +91,7 @@ unsafe impl Send for PulseCapture {}
 impl PulseCapture {
     pub fn open() -> Result<Self, CaptureError> {
         let mut code = 0;
-        let mut error = [0i8; ERROR_CAPACITY];
+        let mut error = [0 as c_char; ERROR_CAPACITY];
         let handle = unsafe { ww_pulse_capture_open(&mut code, error.as_mut_ptr(), error.len()) };
         let Some(handle) = NonNull::new(handle) else {
             return Err(CaptureError {
@@ -103,7 +103,7 @@ impl PulseCapture {
     }
 
     fn status(&self) -> Result<(), CaptureError> {
-        let mut error = [0i8; ERROR_CAPACITY];
+        let mut error = [0 as c_char; ERROR_CAPACITY];
         let code = unsafe {
             ww_pulse_capture_failed(self.handle.as_ptr(), error.as_mut_ptr(), error.len())
         };
@@ -165,7 +165,7 @@ unsafe impl Send for PulsePlaybackObserver {}
 impl PulsePlaybackObserver {
     pub fn open() -> Result<Self, CaptureError> {
         let mut code = 0;
-        let mut error = [0i8; ERROR_CAPACITY];
+        let mut error = [0 as c_char; ERROR_CAPACITY];
         let handle =
             unsafe { ww_pulse_playback_observer_open(&mut code, error.as_mut_ptr(), error.len()) };
         let Some(handle) = NonNull::new(handle) else {
@@ -197,7 +197,7 @@ impl PulsePlaybackObserver {
     }
 
     fn status(&self) -> Result<(), CaptureError> {
-        let mut error = [0i8; ERROR_CAPACITY];
+        let mut error = [0 as c_char; ERROR_CAPACITY];
         let code = unsafe {
             ww_pulse_playback_observer_failed(self.handle.as_ptr(), error.as_mut_ptr(), error.len())
         };
