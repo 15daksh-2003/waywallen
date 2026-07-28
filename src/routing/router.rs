@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, broadcast::error::RecvError, mpsc, Mutex as TokioMutex, Notify};
 use tokio::task::JoinHandle;
@@ -13,9 +15,13 @@ const RESUME_RETRY_INITIAL: Duration = Duration::from_millis(100);
 const RESUME_RETRY_SECOND: Duration = Duration::from_secs(2);
 const RESUME_RETRY_THIRD: Duration = Duration::from_secs(5);
 const RESUME_RETRY_MAX: Duration = Duration::from_secs(10);
+const RUNTIME_WAITING_SOFT: Duration = Duration::from_secs(2);
+const RUNTIME_PROGRESS_HARD: Duration = Duration::from_secs(10);
+const RUNTIME_HEALTH_POLL: Duration = Duration::from_millis(500);
 
 use crate::display::layout::{FillMode, LayoutInput};
 use crate::ipc::proto::{ControlMsg, EventMsg};
+use crate::plugin::renderer_registry::RendererActivityMode;
 use crate::renderer_manager::{
     DrmNode, PublishedPool, RendererHandle, RendererId, RendererManager,
 };
@@ -136,12 +142,14 @@ pub struct DisplayRegistration {
     /// Modifier-negotiation capabilities the consumer declared in
     /// its `consumer_caps` request.
     pub consumer_caps: Option<crate::dma::negotiate::PeerCaps>,
+    pub protocol_version: u32,
 }
 
 /// Returned from `register_display` — the assigned id plus the rx end
 /// of the dispatcher's per-display channel.
 pub struct DisplayHandle {
     pub id: DisplayId,
+    pub session_id: crate::sync::DisplaySessionId,
     pub rx: mpsc::UnboundedReceiver<DisplayOutEvent>,
 }
 
@@ -201,6 +209,29 @@ pub struct ManualLifecycleState {
     pub muted: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RuntimeConditionKind {
+    Loading,
+    Waiting,
+    Hang,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RuntimeConditionOrigin {
+    Renderer,
+    Display,
+    Release,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeCondition {
+    pub kind: RuntimeConditionKind,
+    pub origin: RuntimeConditionOrigin,
+    pub reason: String,
+    pub related_renderer_id: Option<RendererId>,
+    pub related_display_id: Option<DisplayId>,
+}
+
 /// Lifecycle state of a renderer as seen by the router.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RendererStatus {
@@ -239,6 +270,7 @@ pub struct RendererSnapshot {
     pub drm_render_minor: u32,
     pub texture_width: u32,
     pub texture_height: u32,
+    pub conditions: Vec<RuntimeCondition>,
 }
 
 /// Read-only view of a registered display. Returned from
@@ -259,6 +291,7 @@ pub struct DisplaySnapshot {
     pub display_layout: ResolvedLayout,
     pub effective_layout: ResolvedLayout,
     pub effective_layout_source: LayoutSource,
+    pub conditions: Vec<RuntimeCondition>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,6 +310,7 @@ struct DisplayBinding {
 
 struct DisplayState {
     info: DisplayInfo,
+    session_id: crate::sync::DisplaySessionId,
     /// DRM render-node id of the consumer's GPU. Compared against
     /// `RendererHandle::gpu` during DMA-BUF negotiation.
     gpu: DrmNode,
@@ -292,6 +326,13 @@ struct DisplayState {
     consumption_epoch: Arc<AtomicU64>,
 }
 
+#[derive(Clone)]
+struct ReleaseWaitFact {
+    consumer: crate::sync::FrameConsumerIdentity,
+    state: crate::sync::ReleaseWaitState,
+    since: Instant,
+}
+
 impl DisplayState {
     fn consumption_permit(&self) -> DisplayConsumptionPermit {
         DisplayConsumptionPermit {
@@ -303,6 +344,84 @@ impl DisplayState {
     fn invalidate_consumption(&self) {
         self.consumption_epoch.fetch_add(1, Ordering::AcqRel);
     }
+}
+
+fn evaluate_renderer_conditions(
+    now: Instant,
+    renderer_id: &str,
+    status: RendererStatus,
+    has_audience: bool,
+    activity_mode: RendererActivityMode,
+    progress: crate::renderer_manager::RendererProgressSnapshot,
+    release_waits: impl Iterator<Item = ReleaseWaitFact>,
+    poisoned: Option<&crate::sync::FrameConsumerIdentity>,
+) -> Vec<RuntimeCondition> {
+    let mut conditions = Vec::new();
+    if progress.first_frame_at.is_none() {
+        conditions.push(RuntimeCondition {
+            kind: RuntimeConditionKind::Loading,
+            origin: RuntimeConditionOrigin::Renderer,
+            reason: "first_frame".to_owned(),
+            related_renderer_id: Some(renderer_id.to_owned()),
+            related_display_id: None,
+        });
+    }
+
+    let oldest_wait = release_waits.min_by_key(|wait| wait.since);
+    if let Some(wait) = oldest_wait {
+        let _state = wait.state;
+        let age = now.saturating_duration_since(wait.since);
+        if age >= RUNTIME_WAITING_SOFT {
+            conditions.push(RuntimeCondition {
+                kind: RuntimeConditionKind::Waiting,
+                origin: RuntimeConditionOrigin::Release,
+                reason: "consumer_release".to_owned(),
+                related_renderer_id: Some(renderer_id.to_owned()),
+                related_display_id: Some(wait.consumer.display_id),
+            });
+        }
+        if age >= RUNTIME_PROGRESS_HARD {
+            conditions.push(RuntimeCondition {
+                kind: RuntimeConditionKind::Hang,
+                origin: RuntimeConditionOrigin::Release,
+                reason: "consumer_release".to_owned(),
+                related_renderer_id: Some(renderer_id.to_owned()),
+                related_display_id: Some(wait.consumer.display_id),
+            });
+        }
+    }
+
+    if activity_mode == RendererActivityMode::Continuous
+        && status == RendererStatus::Playing
+        && has_audience
+    {
+        let last_progress = progress
+            .last_frame_at
+            .or(progress.bind_at)
+            .unwrap_or(progress.registered_at);
+        if now.saturating_duration_since(last_progress) >= RUNTIME_PROGRESS_HARD {
+            conditions.push(RuntimeCondition {
+                kind: RuntimeConditionKind::Hang,
+                origin: RuntimeConditionOrigin::Renderer,
+                reason: "frame_progress".to_owned(),
+                related_renderer_id: Some(renderer_id.to_owned()),
+                related_display_id: None,
+            });
+        }
+    }
+
+    if let Some(consumer) = poisoned {
+        conditions.push(RuntimeCondition {
+            kind: RuntimeConditionKind::Hang,
+            origin: RuntimeConditionOrigin::Release,
+            reason: "generation_poisoned".to_owned(),
+            related_renderer_id: Some(renderer_id.to_owned()),
+            related_display_id: Some(consumer.display_id),
+        });
+    }
+    conditions.sort();
+    conditions.dedup();
+    conditions
 }
 
 struct Inner {
@@ -330,7 +449,14 @@ struct Inner {
     /// emitted `Unbind` for and are waiting to be acked.
     unbind_acks_pending: HashMap<RendererId, HashSet<(DisplayId, u64)>>,
     wallpaper_layout_overrides: HashMap<RendererId, WallpaperLayoutOverride>,
+    release_waits:
+        HashMap<RendererId, HashMap<crate::sync::FrameConsumerIdentity, ReleaseWaitFact>>,
+    generation_poisoned: HashMap<RendererId, crate::sync::FrameConsumerIdentity>,
+    renderer_conditions: HashMap<RendererId, Vec<RuntimeCondition>>,
+    display_conditions: HashMap<DisplayId, Vec<RuntimeCondition>>,
+    generation_recoveries: HashSet<RendererId>,
     next_display_id: u64,
+    next_display_session_id: crate::sync::DisplaySessionId,
     next_config_generation: u64,
 }
 
@@ -372,7 +498,13 @@ impl Router {
                 orphan_timers: HashMap::new(),
                 unbind_acks_pending: HashMap::new(),
                 wallpaper_layout_overrides: HashMap::new(),
+                release_waits: HashMap::new(),
+                generation_poisoned: HashMap::new(),
+                renderer_conditions: HashMap::new(),
+                display_conditions: HashMap::new(),
+                generation_recoveries: HashSet::new(),
                 next_display_id: 0,
+                next_display_session_id: 0,
                 next_config_generation: 0,
                 session_locked: false,
                 session_inactive: false,
@@ -652,58 +784,90 @@ impl Router {
         let id = handle.id.clone();
         let task = {
             let mut events = handle.events();
+            let mut release_events = handle.take_release_events();
+            if release_events.is_none() {
+                log::warn!("router: renderer {id} release event receiver already taken");
+            }
             let router = Arc::clone(self);
             let rid = id.clone();
             tokio::spawn(async move {
+                let mut health_tick = tokio::time::interval(RUNTIME_HEALTH_POLL);
+                health_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
-                    match events.recv().await {
-                        Ok(event) => match event.message {
-                            EventMsg::BindBuffers { .. } if event.pool_generation.is_some() => {
-                                router.on_renderer_bind(&rid).await;
-                            }
-                            EventMsg::FrameReady {
-                                image_index,
-                                seq,
-                                release_point,
-                                ..
-                            } => {
-                                if let Some(buffer_generation) = event.pool_generation {
-                                    router
-                                        .on_renderer_frame(
-                                            &rid,
-                                            buffer_generation,
-                                            image_index,
-                                            seq,
-                                            release_point,
-                                        )
-                                        .await;
+                    tokio::select! {
+                        event = events.recv() => {
+                            match event {
+                                Ok(event) => match event.message {
+                                    EventMsg::BindBuffers { .. } if event.pool_generation.is_some() => {
+                                        router.on_renderer_bind(&rid).await;
+                                    }
+                                    EventMsg::FrameReady {
+                                        image_index,
+                                        seq,
+                                        release_point,
+                                        ..
+                                    } => {
+                                        if let Some(buffer_generation) = event.pool_generation {
+                                            router
+                                                .on_renderer_frame(
+                                                    &rid,
+                                                    buffer_generation,
+                                                    image_index,
+                                                    seq,
+                                                    release_point,
+                                                )
+                                                .await;
+                                        }
+                                    }
+                                    EventMsg::FormatCaps { .. } => {
+                                        router.reconcile_buffer_flags().await;
+                                    }
+                                    EventMsg::BindFailed {
+                                        fourcc, modifier, ..
+                                    } => {
+                                        router.on_renderer_bind_failed(&rid, fourcc, modifier).await;
+                                    }
+                                    EventMsg::ReportState { .. } => {
+                                        router.on_renderer_state_changed(&rid).await;
+                                    }
+                                    _ => {}
+                                },
+                                Err(RecvError::Closed) => {
+                                    log::info!("router: renderer {rid} broadcast closed");
+                                    return;
+                                }
+                                Err(RecvError::Lagged(n)) => {
+                                    log::warn!("router: renderer {rid} lagged {n} events");
                                 }
                             }
-                            EventMsg::FormatCaps { .. } => {
-                                // Renderer caps arrived; recompute negotiation
-                                // for affected display links.
-                                router.reconcile_buffer_flags().await;
-                            }
-                            EventMsg::BindFailed {
-                                fourcc, modifier, ..
-                            } => {
-                                // Renderer rejected the picked format; blacklist
-                                // it on the producer side and retry.
-                                router.on_renderer_bind_failed(&rid, fourcc, modifier).await;
-                            }
-                            EventMsg::ReportState { .. } => {
-                                // Reader parsed recognised keys onto the handle;
-                                // resync display config from that cached state.
-                                router.on_renderer_state_changed(&rid).await;
-                            }
-                            _ => {}
-                        },
-                        Err(RecvError::Closed) => {
-                            log::info!("router: renderer {rid} broadcast closed");
-                            return;
+                            router.refresh_runtime_health().await;
                         }
-                        Err(RecvError::Lagged(n)) => {
-                            log::warn!("router: renderer {rid} lagged {n} events");
+                        event = async {
+                            release_events
+                                .as_mut()
+                                .expect("release event branch is enabled only with a receiver")
+                                .recv()
+                                .await
+                        }, if release_events.is_some() => {
+                            match event {
+                                Some(event) => {
+                                    let recover = router.record_release_event(event).await;
+                                    router.refresh_runtime_health().await;
+                                    if recover {
+                                        let recovery_router = Arc::clone(&router);
+                                        let recovery_id = rid.clone();
+                                        tokio::spawn(async move {
+                                            recovery_router
+                                                .recover_poisoned_renderer(&recovery_id)
+                                                .await;
+                                        });
+                                    }
+                                }
+                                None => return,
+                            }
+                        }
+                        _ = health_tick.tick() => {
+                            router.refresh_runtime_health().await;
                         }
                     }
                 }
@@ -715,6 +879,7 @@ impl Router {
             inner.renderer_tasks.insert(id, task);
         }
         self.reconcile_lifecycle().await;
+        self.refresh_runtime_health().await;
     }
 
     pub async fn unregister_renderer(self: &Arc<Self>, id: &str) {
@@ -730,6 +895,10 @@ impl Router {
             }
             inner.renderer_states.remove(id);
             inner.resume_retries.remove(id);
+            inner.release_waits.remove(id);
+            inner.generation_poisoned.remove(id);
+            inner.renderer_conditions.remove(id);
+            inner.generation_recoveries.remove(id);
             removed.into_iter().map(|(_, did)| did).collect()
         };
         self.emit(RouterEvent::RendererRemoved(id.to_string()));
@@ -871,10 +1040,15 @@ impl Router {
             }
         }
         let (tx, rx) = mpsc::unbounded_channel();
-        let (display_id, auto_linked) = {
+        let (display_id, display_session_id, auto_linked) = {
             let mut inner = self.inner.lock().await;
             inner.next_display_id += 1;
+            inner.next_display_session_id = inner
+                .next_display_session_id
+                .checked_add(1)
+                .expect("display session id exhausted");
             let id = inner.next_display_id;
+            let session_id = inner.next_display_session_id;
             let info = DisplayInfo {
                 id,
                 name: reg.name,
@@ -889,6 +1063,7 @@ impl Router {
                 id,
                 DisplayState {
                     info,
+                    session_id,
                     gpu: reg.gpu,
                     tx,
                     binding: None,
@@ -903,7 +1078,7 @@ impl Router {
             if let Some(rid) = auto.clone() {
                 inner.table.add_link(rid, id);
             }
-            (id, auto)
+            (id, session_id, auto)
         };
         // A freshly auto-linked renderer just gained an audience —
         // cancel any pending orphan timer so it survives.
@@ -913,16 +1088,22 @@ impl Router {
         self.sync_display(display_id).await;
         self.reconcile_lifecycle().await;
         self.reconcile_buffer_flags().await;
+        self.refresh_runtime_health().await;
         if let Some(snap) = self.snapshot_display(display_id).await {
             self.emit(RouterEvent::DisplayUpsert(snap));
         }
-        DisplayHandle { id: display_id, rx }
+        DisplayHandle {
+            id: display_id,
+            session_id: display_session_id,
+            rx,
+        }
     }
 
     pub async fn unregister_display(self: &Arc<Self>, display_id: DisplayId) {
         {
             let mut inner = self.inner.lock().await;
             inner.displays.remove(&display_id);
+            inner.display_conditions.remove(&display_id);
             inner.table.remove_display(display_id);
         }
         // Any renderer that just lost its last link enters the 5s
@@ -930,6 +1111,7 @@ impl Router {
         self.mark_orphans(None).await;
         self.reconcile_lifecycle().await;
         self.reconcile_buffer_flags().await;
+        self.refresh_runtime_health().await;
         self.emit(RouterEvent::DisplayRemoved(display_id));
     }
 
@@ -1329,6 +1511,201 @@ impl Router {
         self.events_tx.subscribe()
     }
 
+    async fn record_release_event(self: &Arc<Self>, event: crate::sync::ReleaseEvent) -> bool {
+        let mut inner = self.inner.lock().await;
+        match event {
+            crate::sync::ReleaseEvent::Waiting { consumer, state } => {
+                let waits = inner
+                    .release_waits
+                    .entry(consumer.renderer_id.clone())
+                    .or_default();
+                waits
+                    .entry(consumer.clone())
+                    .and_modify(|wait| wait.state = state)
+                    .or_insert(ReleaseWaitFact {
+                        consumer,
+                        state,
+                        since: Instant::now(),
+                    });
+                false
+            }
+            crate::sync::ReleaseEvent::Resolved { consumer } => {
+                if let Some(waits) = inner.release_waits.get_mut(&consumer.renderer_id) {
+                    waits.remove(&consumer);
+                    if waits.is_empty() {
+                        inner.release_waits.remove(&consumer.renderer_id);
+                    }
+                }
+                false
+            }
+            crate::sync::ReleaseEvent::GenerationPoisoned { consumer, reason } => {
+                log::error!(
+                    "renderer {} release generation {} poisoned by display {} session {}: {}",
+                    consumer.renderer_id,
+                    consumer.frame.buffer_generation,
+                    consumer.display_id,
+                    consumer.display_session_id,
+                    reason,
+                );
+                inner
+                    .generation_poisoned
+                    .insert(consumer.renderer_id.clone(), consumer.clone());
+                inner.generation_recoveries.insert(consumer.renderer_id)
+            }
+        }
+    }
+
+    async fn refresh_runtime_health(self: &Arc<Self>) {
+        let now = Instant::now();
+        let (renderer_changes, display_changes) = {
+            let mut inner = self.inner.lock().await;
+            let mut renderer_conditions = HashMap::new();
+            for renderer_id in inner.table.renderer_ids() {
+                let Some(handle) = inner.table.get_renderer(&renderer_id) else {
+                    continue;
+                };
+                let status = inner
+                    .renderer_states
+                    .get(&renderer_id)
+                    .map(|status| RendererStatus::Paused(*status))
+                    .unwrap_or(RendererStatus::Playing);
+                let has_audience = inner
+                    .table
+                    .links_for_renderer(&renderer_id)
+                    .into_iter()
+                    .any(|link| link.enabled && inner.displays.contains_key(&link.display_id));
+                let waits = inner
+                    .release_waits
+                    .get(&renderer_id)
+                    .into_iter()
+                    .flat_map(|waits| waits.values().cloned());
+                let conditions = evaluate_renderer_conditions(
+                    now,
+                    &renderer_id,
+                    status,
+                    has_audience,
+                    handle.activity_mode,
+                    handle.progress(),
+                    waits,
+                    inner.generation_poisoned.get(&renderer_id),
+                );
+                renderer_conditions.insert(renderer_id, conditions);
+            }
+
+            let mut display_conditions = HashMap::new();
+            for display_id in inner.displays.keys().copied() {
+                let mut conditions = Vec::new();
+                for link in inner
+                    .table
+                    .links_for_display(display_id)
+                    .into_iter()
+                    .filter(|link| link.enabled)
+                {
+                    if let Some(renderer) = renderer_conditions.get(&link.renderer_id) {
+                        conditions.extend(renderer.iter().cloned());
+                    }
+                }
+                conditions.sort();
+                conditions.dedup();
+                display_conditions.insert(display_id, conditions);
+            }
+
+            let renderer_changes = renderer_conditions
+                .iter()
+                .filter_map(|(id, conditions)| {
+                    (inner.renderer_conditions.get(id) != Some(conditions)).then(|| id.clone())
+                })
+                .collect::<Vec<_>>();
+            let display_changes = display_conditions
+                .iter()
+                .filter_map(|(id, conditions)| {
+                    (inner.display_conditions.get(id) != Some(conditions)).then_some(*id)
+                })
+                .collect::<Vec<_>>();
+            inner.renderer_conditions = renderer_conditions;
+            inner.display_conditions = display_conditions;
+            (renderer_changes, display_changes)
+        };
+
+        for renderer_id in renderer_changes {
+            if let Some(snapshot) = self.snapshot_renderer(&renderer_id).await {
+                self.emit(RouterEvent::RendererUpsert(snapshot));
+            }
+        }
+        for display_id in display_changes {
+            if let Some(snapshot) = self.snapshot_display(display_id).await {
+                self.emit(RouterEvent::DisplayUpsert(snapshot));
+            }
+        }
+    }
+
+    fn recover_poisoned_renderer<'a>(
+        self: &'a Arc<Self>,
+        renderer_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let (spawn_request, layout) = {
+                let inner = self.inner.lock().await;
+                if !inner.generation_recoveries.contains(renderer_id) {
+                    return;
+                }
+                let Some(handle) = inner.table.get_renderer(renderer_id) else {
+                    return;
+                };
+                (
+                    handle.spawn_request(),
+                    inner.wallpaper_layout_overrides.get(renderer_id).copied(),
+                )
+            };
+
+            log::warn!("renderer {renderer_id}: rebuilding poisoned release generation");
+            let new_id = match self.mgr.spawn(spawn_request).await {
+                Ok(id) => id,
+                Err(error) => {
+                    log::error!(
+                        "renderer {renderer_id}: poisoned generation rebuild failed: {error}"
+                    );
+                    return;
+                }
+            };
+            let Some(handle) = self.mgr.get(&new_id).await else {
+                log::error!("renderer {renderer_id}: rebuilt renderer {new_id} is unavailable");
+                return;
+            };
+            Box::pin(self.register_renderer(handle)).await;
+            if let Some(layout) = layout {
+                self.set_renderer_wallpaper_layout_override(&new_id, layout)
+                    .await;
+            }
+            self.begin_unbind_ack_tracking(renderer_id).await;
+            let affected = {
+                let mut inner = self.inner.lock().await;
+                inner.table.retarget_renderer_links(renderer_id, &new_id)
+            };
+            for display_id in &affected {
+                self.sync_display(*display_id).await;
+            }
+            self.reconcile_lifecycle().await;
+            self.reconcile_buffer_flags().await;
+            if !affected.is_empty() {
+                self.emit(RouterEvent::DisplaysReplace(self.snapshot_displays().await));
+            }
+            if self
+                .await_unbind_acks_for(renderer_id, Duration::from_secs(1))
+                .await
+                .is_err()
+            {
+                log::warn!(
+                    "renderer {renderer_id}: poisoned generation unbind acknowledgement timed out"
+                );
+            }
+            if let Err(error) = self.mgr.kill(renderer_id).await {
+                log::warn!("renderer {renderer_id}: poisoned generation stop failed: {error}");
+            }
+            log::info!("renderer {renderer_id}: recovered as {new_id}");
+        })
+    }
+
     pub fn subscribe_auto_stop(self: &Arc<Self>) -> broadcast::Receiver<AutoStopEvent> {
         self.auto_stop_tx.subscribe()
     }
@@ -1545,6 +1922,11 @@ impl Router {
             display_layout,
             effective_layout,
             effective_layout_source,
+            conditions: inner
+                .display_conditions
+                .get(&id)
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 
@@ -1569,6 +1951,11 @@ impl Router {
             drm_render_minor: handle.gpu.minor,
             texture_width: tw,
             texture_height: th,
+            conditions: inner
+                .renderer_conditions
+                .get(id)
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 
@@ -1597,6 +1984,11 @@ impl Router {
                     drm_render_minor: handle.gpu.minor,
                     texture_width: tw,
                     texture_height: th,
+                    conditions: inner
+                        .renderer_conditions
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_default(),
                 })
             })
             .collect()
@@ -1652,6 +2044,11 @@ impl Router {
                     display_layout,
                     effective_layout,
                     effective_layout_source,
+                    conditions: inner
+                        .display_conditions
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_default(),
                 })
             })
             .collect()
@@ -1927,8 +2324,18 @@ impl Router {
             buffer_index,
             release_point,
         };
-        let expected_members = recipients.len() as u32;
-        let members = match renderer.register_frame_consumers(identity, expected_members) {
+        let consumers = recipients
+            .iter()
+            .map(|(state, _)| crate::sync::FrameConsumerIdentity {
+                frame: identity,
+                renderer_id: renderer_id.to_string(),
+                display_id: state.info.id,
+                display_session_id: state.session_id,
+                display_name: state.info.name.clone(),
+                frame_seq: seq,
+            })
+            .collect();
+        let members = match renderer.register_frame_consumers(identity, consumers) {
             Ok(members) => members,
             Err(error) => {
                 log::warn!(
@@ -2146,6 +2553,7 @@ impl Router {
                 }
             }
         }
+        self.refresh_runtime_health().await;
         for id in changed_ids {
             if let Some(snap) = self.snapshot_renderer(&id).await {
                 self.emit(RouterEvent::RendererUpsert(snap));
@@ -2584,6 +2992,141 @@ mod tests {
     use super::*;
     use crate::renderer_manager::RendererManager;
 
+    fn progress_at(
+        now: Instant,
+        first_frame: bool,
+    ) -> crate::renderer_manager::RendererProgressSnapshot {
+        crate::renderer_manager::RendererProgressSnapshot {
+            registered_at: now,
+            bind_at: Some(now),
+            buffer_generation: Some(1),
+            first_frame_at: first_frame.then_some(now),
+            last_frame_at: first_frame.then_some(now),
+        }
+    }
+
+    fn release_wait_at(now: Instant) -> ReleaseWaitFact {
+        let frame = crate::sync::FrameIdentity {
+            buffer_generation: 1,
+            buffer_index: 0,
+            release_point: 1,
+        };
+        ReleaseWaitFact {
+            consumer: crate::sync::FrameConsumerIdentity {
+                frame,
+                renderer_id: "r1".into(),
+                display_id: 7,
+                display_session_id: 70,
+                display_name: "lock-screen".into(),
+                frame_seq: 1,
+            },
+            state: crate::sync::ReleaseWaitState::Armed,
+            since: now,
+        }
+    }
+
+    #[test]
+    fn runtime_loading_clears_on_first_frame() {
+        let now = Instant::now();
+        let loading = evaluate_renderer_conditions(
+            now,
+            "r1",
+            RendererStatus::Playing,
+            true,
+            RendererActivityMode::Continuous,
+            progress_at(now, false),
+            std::iter::empty(),
+            None,
+        );
+        assert!(loading.iter().any(|condition| {
+            condition.kind == RuntimeConditionKind::Loading && condition.reason == "first_frame"
+        }));
+
+        let ready = evaluate_renderer_conditions(
+            now,
+            "r1",
+            RendererStatus::Playing,
+            true,
+            RendererActivityMode::Continuous,
+            progress_at(now, true),
+            std::iter::empty(),
+            None,
+        );
+        assert!(!ready
+            .iter()
+            .any(|condition| condition.kind == RuntimeConditionKind::Loading));
+    }
+
+    #[test]
+    fn runtime_release_wait_uses_soft_and_hard_deadlines() {
+        let started = Instant::now();
+        let evaluate = |elapsed| {
+            evaluate_renderer_conditions(
+                started + elapsed,
+                "r1",
+                RendererStatus::Playing,
+                true,
+                RendererActivityMode::OnDemand,
+                progress_at(started, true),
+                std::iter::once(release_wait_at(started)),
+                None,
+            )
+        };
+        assert!(!evaluate(Duration::from_millis(1999))
+            .iter()
+            .any(|condition| condition.kind == RuntimeConditionKind::Waiting));
+        assert!(evaluate(Duration::from_secs(2))
+            .iter()
+            .any(|condition| condition.kind == RuntimeConditionKind::Waiting));
+        let hard = evaluate(Duration::from_secs(10));
+        assert!(hard
+            .iter()
+            .any(|condition| condition.kind == RuntimeConditionKind::Waiting));
+        assert!(hard
+            .iter()
+            .any(|condition| condition.kind == RuntimeConditionKind::Hang));
+    }
+
+    #[test]
+    fn runtime_frame_hang_is_gated_by_activity_lifecycle_and_audience() {
+        let started = Instant::now();
+        let now = started + Duration::from_secs(10);
+        let has_frame_hang = |activity, status, audience| {
+            evaluate_renderer_conditions(
+                now,
+                "r1",
+                status,
+                audience,
+                activity,
+                progress_at(started, true),
+                std::iter::empty(),
+                None,
+            )
+            .iter()
+            .any(|condition| condition.reason == "frame_progress")
+        };
+        assert!(has_frame_hang(
+            RendererActivityMode::Continuous,
+            RendererStatus::Playing,
+            true
+        ));
+        assert!(!has_frame_hang(
+            RendererActivityMode::OnDemand,
+            RendererStatus::Playing,
+            true
+        ));
+        assert!(!has_frame_hang(
+            RendererActivityMode::Continuous,
+            RendererStatus::Paused(PausedRendererStatus::Paused),
+            true
+        ));
+        assert!(!has_frame_hang(
+            RendererActivityMode::Continuous,
+            RendererStatus::Playing,
+            false
+        ));
+    }
+
     fn reg(name: &str, w: u32, h: u32) -> DisplayRegistration {
         DisplayRegistration {
             name: name.into(),
@@ -2594,6 +3137,7 @@ mod tests {
             gpu: DrmNode::UNKNOWN,
             properties: vec![],
             consumer_caps: None,
+            protocol_version: 8,
         }
     }
 
@@ -2602,6 +3146,36 @@ mod tests {
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr);
         assert!(router.snapshot_displays().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn runtime_conditions_are_projected_to_linked_displays() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(Arc::clone(&mgr));
+        let renderer = RendererHandle::test_stub("r-health", "image");
+        mgr.register_test_handle(Arc::clone(&renderer)).await;
+        router.register_renderer(renderer).await;
+        let display = router.register_display(reg("HDMI-A-1", 1920, 1080)).await;
+
+        let renderer_snapshot = router.snapshot_renderer("r-health").await.unwrap();
+        let display_snapshot = router.snapshot_display(display.id).await.unwrap();
+        assert!(renderer_snapshot.conditions.iter().any(|condition| {
+            condition.kind == RuntimeConditionKind::Loading && condition.reason == "first_frame"
+        }));
+        assert_eq!(display_snapshot.conditions, renderer_snapshot.conditions);
+    }
+
+    #[tokio::test]
+    async fn poisoned_generation_recovery_is_single_flight() {
+        let router = Router::new(Arc::new(RendererManager::new_default()));
+        let consumer = release_wait_at(Instant::now()).consumer;
+        let event = || crate::sync::ReleaseEvent::GenerationPoisoned {
+            consumer: consumer.clone(),
+            reason: "kernel state unavailable".into(),
+        };
+
+        assert!(router.record_release_event(event()).await);
+        assert!(!router.record_release_event(event()).await);
     }
 
     #[tokio::test]
@@ -2650,6 +3224,7 @@ mod tests {
             gpu: DrmNode::UNKNOWN,
             properties: vec![],
             consumer_caps: None,
+            protocol_version: 8,
         }
     }
 
@@ -3057,11 +3632,14 @@ mod tests {
         let _ = recv_event(&mut rx).await; // consume the RendererUpsert
 
         router.unregister_renderer("R1").await;
-        let evt = recv_event(&mut rx).await.expect("no event");
-        match evt {
-            RouterEvent::RendererRemoved(id) => assert_eq!(id, "R1"),
-            other => panic!("expected RendererRemoved, got {other:?}"),
+        for _ in 0..3 {
+            let evt = recv_event(&mut rx).await.expect("no event");
+            if let RouterEvent::RendererRemoved(id) = evt {
+                assert_eq!(id, "R1");
+                return;
+            }
         }
+        panic!("expected RendererRemoved");
     }
 
     #[tokio::test]
@@ -3442,10 +4020,10 @@ mod tests {
         match frame_records.try_recv().expect("frame registration") {
             crate::sync::FrameRecord::Register {
                 identity,
-                expected_members,
+                consumers,
             } => {
                 assert_eq!(identity.buffer_generation, 1);
-                assert_eq!(expected_members, 1);
+                assert_eq!(consumers.len(), 1);
             }
             _ => panic!("unexpected frame record"),
         }

@@ -102,7 +102,8 @@ Display::Display(const proto::DisplayInfo& info, QObject* parent)
       m_layout_overridden_by_wallpaper(layoutOverriddenByWallpaperFromPb(info)),
       m_layout_override(layoutOverrideFromPb(info)),
       m_drm_render_major(info.drmRenderMajor()),
-      m_drm_render_minor(info.drmRenderMinor()) {}
+      m_drm_render_minor(info.drmRenderMinor()),
+      m_runtime_conditions(runtimeConditionsFromPb(info.conditions())) {}
 
 void Display::updateFrom(const proto::DisplayInfo& info) {
     rstd_assert(info.displayId() == m_id, "Display::updateFrom id mismatch");
@@ -149,6 +150,11 @@ void Display::updateFrom(const proto::DisplayInfo& info) {
         m_layout_overridden_by_wallpaper = new_overridden;
         m_layout_override                = std::move(new_ovr);
         Q_EMIT layoutChanged();
+    }
+    auto conditions = runtimeConditionsFromPb(info.conditions());
+    if (m_runtime_conditions != conditions) {
+        m_runtime_conditions = std::move(conditions);
+        Q_EMIT runtimeConditionsChanged();
     }
 }
 

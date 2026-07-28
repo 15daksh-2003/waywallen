@@ -1,4 +1,5 @@
 use anyhow::anyhow;
+use std::collections::HashMap;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
@@ -128,7 +129,12 @@ async fn handle_client(
 ) -> Result<()> {
     log::info!("display client connected; performing handshake");
     let registration = do_handshake(&stream, &events_tx, &mut shutdown_rx).await?;
-    let DisplayHandle { id: display_id, rx } = router.register_display(registration).await;
+    let client_protocol_version = registration.protocol_version;
+    let DisplayHandle {
+        id: display_id,
+        session_id,
+        rx,
+    } = router.register_display(registration).await;
     log::info!("display {display_id} registered with router");
 
     let send_ack_stream = stream.try_clone().context("clone for accepted")?;
@@ -143,7 +149,16 @@ async fn handle_client(
     .context("accepted join")?
     .map_err(|e| Error::Internal(anyhow!("send display_accepted: {e}")))?;
 
-    let result = run_frame_loop(stream, router.clone(), display_id, rx, shutdown_rx).await;
+    let result = run_frame_loop(
+        stream,
+        router.clone(),
+        display_id,
+        session_id,
+        client_protocol_version,
+        rx,
+        shutdown_rx,
+    )
+    .await;
     router.unregister_display(display_id).await;
     result
 }
@@ -281,6 +296,7 @@ async fn do_handshake(
         // consumer_caps arrives ASYNCHRONOUSLY in the frame loop's
         // request handler; registration does not block on it.
         consumer_caps: None,
+        protocol_version: client_protocol_version,
     })
 }
 
@@ -291,6 +307,8 @@ async fn run_frame_loop(
     stream: StdUnixStream,
     router: Arc<Router>,
     display_id: crate::scheduler::DisplayId,
+    display_session_id: crate::sync::DisplaySessionId,
+    client_protocol_version: u32,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<DisplayOutEvent>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
@@ -313,6 +331,8 @@ async fn run_frame_loop(
     // Latest SetConfig pushed to this display. Used to inverse-map
     // pointer coords from display pixels into renderer texture pixels.
     let mut latest_config: Option<ProjectedConfig> = None;
+    let mut pending_arms = HashMap::<(u64, u64), crate::sync::FrameConsumerArm>::new();
+    let mut release_sessions = HashMap::<String, crate::sync::FrameConsumerSession>::new();
 
     let result = loop {
         tokio::select! {
@@ -348,11 +368,20 @@ async fn run_frame_loop(
                     renderer, buffer_generation, buffer_index, seq,
                     consumption, member,
                 }) => {
-                    if let Err(e) = forward_frame_ready(
+                    match forward_frame_ready(
                         &stream, &renderer, buffer_generation, buffer_index, seq,
-                        consumption, member,
+                        consumption, member, client_protocol_version >= 8,
                     ).await {
-                        break Err(e);
+                        Ok(Some(forwarded)) => {
+                            release_sessions
+                                .entry(forwarded.session.renderer_id().to_string())
+                                .or_insert(forwarded.session);
+                            if let Some(arm) = forwarded.arm {
+                                pending_arms.insert((buffer_generation, seq), arm);
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => break Err(e),
                     }
                 }
             },
@@ -366,6 +395,20 @@ async fn run_frame_loop(
                         "display {display_id}: window_state flags=0x{flags:x}"
                     );
                     router.update_display_window_state(display_id, flags).await;
+                }
+                Some(Ok(Request::FrameArmed { buffer_generation, seq })) => {
+                    if client_protocol_version < 8 {
+                        log::warn!(
+                            "display {display_id} session {display_session_id}: frame_armed from legacy protocol v{client_protocol_version}"
+                        );
+                        continue;
+                    }
+                    match pending_arms.remove(&(buffer_generation, seq)) {
+                        Some(arm) => arm.arm(),
+                        None => log::warn!(
+                            "display {display_id} session {display_session_id}: stale or unknown frame_armed gen={buffer_generation} seq={seq}"
+                        ),
+                    }
                 }
                 Some(Ok(Request::ConsumerCaps {
                     fourccs, mod_counts, modifiers, plane_counts,
@@ -473,6 +516,10 @@ async fn run_frame_loop(
     // operates on the socket itself, so all dup'd handles observe it.
     let _ = stream.shutdown(std::net::Shutdown::Both);
     let _ = reader_handle.await;
+    pending_arms.clear();
+    for (_, session) in release_sessions {
+        session.close();
+    }
     result
 }
 
@@ -658,12 +705,13 @@ async fn forward_frame_ready(
     seq: u64,
     consumption: DisplayConsumptionPermit,
     member: Option<crate::sync::FrameConsumerMember>,
-) -> Result<()> {
+    requires_arm: bool,
+) -> Result<Option<ForwardedFrame>> {
     if !consumption.is_current() {
         if let Some(member) = member {
             member.skip();
         }
-        return Ok(());
+        return Ok(None);
     }
     let fence = acquire_sync_fd(renderer, seq)?;
     // Allocate a fresh BINARY drm_syncobj for this consumer and frame.
@@ -693,10 +741,17 @@ async fn forward_frame_ready(
     drop(release_fd);
     send_result.map_err(|e| Error::Internal(anyhow!("send frame_ready: {e}")))?;
 
-    if let Some(member) = member {
-        member.released(consumer_handle);
-    }
-    Ok(())
+    let forwarded = member.map(|member| {
+        let session = member.session();
+        let arm = member.delivered(consumer_handle, requires_arm);
+        ForwardedFrame { arm, session }
+    });
+    Ok(forwarded)
+}
+
+struct ForwardedFrame {
+    arm: Option<crate::sync::FrameConsumerArm>,
+    session: crate::sync::FrameConsumerSession,
 }
 
 // ---------------------------------------------------------------------------

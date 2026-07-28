@@ -212,6 +212,38 @@ impl RoutingTable {
         true
     }
 
+    /// Move every link owned by `old_renderer_id` to `new_renderer_id`
+    /// without changing link identity, geometry, enabled state, or ordering.
+    pub fn retarget_renderer_links(
+        &mut self,
+        old_renderer_id: &str,
+        new_renderer_id: &str,
+    ) -> Vec<DisplayId> {
+        if old_renderer_id == new_renderer_id {
+            return self
+                .links_for_renderer(old_renderer_id)
+                .into_iter()
+                .map(|link| link.display_id)
+                .collect();
+        }
+        let link_ids = self.by_renderer.remove(old_renderer_id).unwrap_or_default();
+        let mut displays = Vec::with_capacity(link_ids.len());
+        for link_id in &link_ids {
+            let Some(link) = self.links.get_mut(link_id) else {
+                continue;
+            };
+            link.renderer_id = new_renderer_id.to_owned();
+            displays.push(link.display_id);
+        }
+        self.by_renderer
+            .entry(new_renderer_id.to_owned())
+            .or_default()
+            .extend(link_ids);
+        displays.sort_unstable();
+        displays.dedup();
+        displays
+    }
+
     pub fn remove_link(&mut self, link_id: LinkId) -> Option<Link> {
         let link = self.links.remove(&link_id)?;
         if let Some(v) = self.by_display.get_mut(&link.display_id) {
@@ -298,6 +330,43 @@ mod tests {
         assert!(t.links_for_display(1).is_empty());
         assert!(t.links_for_display(2).is_empty());
         assert_eq!(t.links_for_display(3).len(), 1);
+    }
+
+    #[test]
+    fn retarget_renderer_preserves_link_configuration() {
+        let mut t = RoutingTable::new();
+        let link_id = t.add_link("old".into(), 7);
+        assert!(t.update_link_geometry(
+            link_id,
+            Some(LinkSrcRect {
+                x: 1.0,
+                y: 2.0,
+                w: 3.0,
+                h: 4.0,
+            }),
+            Some(LinkDstRect {
+                x: 5.0,
+                y: 6.0,
+                w: 7.0,
+                h: 8.0,
+            }),
+            Some(2),
+            Some([0.1, 0.2, 0.3, 1.0]),
+            Some(9),
+        ));
+        assert!(t.set_link_enabled(link_id, false));
+
+        assert_eq!(t.retarget_renderer_links("old", "new"), vec![7]);
+        assert!(t.links_for_renderer("old").is_empty());
+        let link = t.links_for_renderer("new").pop().unwrap();
+        assert_eq!(link.id, link_id);
+        assert_eq!(link.display_id, 7);
+        assert!(!link.enabled);
+        assert_eq!(link.transform, 2);
+        assert_eq!(link.clear_rgba, [0.1, 0.2, 0.3, 1.0]);
+        assert_eq!(link.z_order, 9);
+        assert_eq!(link.src_rect.x, 1.0);
+        assert_eq!(link.dst_rect.x, 5.0);
     }
 
     #[test]

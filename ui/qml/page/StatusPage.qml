@@ -277,6 +277,14 @@ MD.Page {
                             }
                             trailing: RowLayout {
                                 spacing: 6
+                                Repeater {
+                                    model: modelData.runtimeConditions || []
+                                    delegate: W.RuntimeConditionTag {
+                                        required property var modelData
+                                        Layout.alignment: Qt.AlignVCenter
+                                        condition: modelData
+                                    }
+                                }
                                 W.GpuTag {
                                     Layout.alignment: Qt.AlignVCenter
                                     drmRenderMajor: modelData.drmRenderMajor || 0

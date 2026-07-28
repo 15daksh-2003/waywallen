@@ -133,13 +133,23 @@
       that never send `window_state` keep working (daemon defaults
       that display to "no window-state condition met").
 
+  v8 (release fence arm acknowledgement):
+    - New request `frame_armed` (opcode 13): consumer→daemon confirmation
+      that the release syncobj for one frame now contains either a real
+      pending GPU fence or a signaled fence.
+    - The consumer sends the acknowledgement only after the ioctl or GPU
+      submission that attaches the fence succeeds. On disconnect the daemon
+      may safely skip an unacknowledged syncobj only when the public DRM wait
+      API confirms that it still has no fence.
+    - v6/v7 clients remain accepted through the conservative legacy path.
+
   Informational features (welcome.features, advisory only in v3+):
     "explicit_sync_fd"           — acquire fence as dma_fence sync_file.
     "drm_syncobj_release"        — release fence as drm_syncobj fd.
     "modifier_negotiation_v1"    — consumer_caps + bind_failed plumbing.
   Optional features (reserved): "color_management", "hdr"
 -->
-<protocol name="waywallen_display" version="7">
+<protocol name="waywallen_display" version="8">
 
   <!-- ==================================================================
        REQUESTS  (display -> manager)
@@ -393,6 +403,21 @@
   -->
   <request name="window_state" opcode="12">
     <arg name="flags" type="u32"/>
+  </request>
+
+  <!--
+    Confirm that the release syncobj attached to the matching frame_ready
+    now contains a real pending GPU fence or is already signaled. This is
+    an ownership acknowledgement, not a completion notification.
+
+    The consumer MUST attach/signal the release fence before sending this
+    request. `buffer_generation` and `seq` identify the frame within this
+    display connection; stale, duplicate, and unknown acknowledgements do
+    not affect any other frame.
+  -->
+  <request name="frame_armed" opcode="13">
+    <arg name="buffer_generation" type="u64"/>
+    <arg name="seq" type="u64"/>
   </request>
 
 

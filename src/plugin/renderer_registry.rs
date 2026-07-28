@@ -133,6 +133,14 @@ impl PluginRoot {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RendererActivityMode {
+    Continuous,
+    #[default]
+    OnDemand,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct RendererDef {
     /// Component name. Empty in a manifest map value — filled from the
@@ -151,6 +159,10 @@ pub struct RendererDef {
     pub types: Vec<WallpaperType>,
     #[serde(default = "default_priority")]
     pub priority: u32,
+    /// Declares whether lack of frame progress is meaningful. Third-party
+    /// manifests default to on-demand for backward compatibility.
+    #[serde(default)]
+    pub activity: RendererActivityMode,
     /// Wire-protocol `Init.spawn_version` to emit for this renderer.
     /// `None` means use the daemon compile-time default.
     #[serde(default)]
@@ -867,6 +879,7 @@ types = ["image"]
             bin: PathBuf::from("/dev/null"),
             types: vec!["image".to_string()],
             priority: 100,
+            activity: RendererActivityMode::OnDemand,
             spawn_version: None,
             extras: Vec::new(),
             settings: Default::default(),

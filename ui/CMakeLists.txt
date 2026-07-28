@@ -65,6 +65,7 @@ qt_add_protobuf(waywallen-control
 
 set(SOURCES_NO_MOC
   src/entry.cpp
+  src/proto.cpp
   src/action.cpp
   src/util.cpp
   src/backend.cpp
@@ -158,6 +159,7 @@ set(QML_FILES
   qml/component/PagePopup.qml
   qml/component/Tag.qml
   qml/component/GpuTag.qml
+  qml/component/RuntimeConditionTag.qml
   qml/component/KdeDisplaysHelp.qml
   qml/component/GnomeDisplaysHelp.qml
   qml/component/LayerShellDisplaysHelp.qml

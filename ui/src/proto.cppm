@@ -1,5 +1,6 @@
 module;
 #include "control.qpb.h"
+#include <QVariantList>
 
 export module waywallen:proto;
 
@@ -31,6 +32,9 @@ using proto::RendererPauseRequest;
 using proto::RendererPlayRequest;
 using proto::RendererSpawnRequest;
 using proto::RendererSpawnResponse;
+using proto::RuntimeCondition;
+using proto::RuntimeConditionKindGadget::RuntimeConditionKind;
+using proto::RuntimeConditionOriginGadget::RuntimeConditionOrigin;
 
 using proto::RendererPluginInfo;
 using proto::RendererPluginListRequest;
@@ -196,3 +200,8 @@ using proto::StringConditionGadget::StringCondition;
 using proto::WallpaperFilterTypeGadget::WallpaperFilterType;
 using proto::WallpaperSortKeyGadget::WallpaperSortKey;
 } // namespace waywallen::control::v1
+
+export namespace waywallen
+{
+auto runtimeConditionsFromPb(const QList<proto::RuntimeCondition>& conditions) -> QVariantList;
+} // namespace waywallen

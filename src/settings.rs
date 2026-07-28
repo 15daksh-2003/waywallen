@@ -1327,6 +1327,7 @@ baz = "7"
             bin: PathBuf::from("/dev/null"),
             types: vec!["video".into()],
             priority: 100,
+            activity: crate::plugin::renderer_registry::RendererActivityMode::Continuous,
             spawn_version: Some(1),
             extras: Vec::new(),
             settings: s,

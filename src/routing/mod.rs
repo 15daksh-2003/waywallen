@@ -5,6 +5,7 @@ pub mod table;
 pub use router::{
     AutoStopEvent, DisplayConsumptionPermit, DisplayHandle, DisplayLinkSnapshot, DisplayOutEvent,
     DisplayRegistration, DisplaySnapshot, LayoutSource, LibrarySnapshot, RendererSnapshot,
-    RendererStatus, Router, RouterEvent,
+    RendererStatus, Router, RouterEvent, RuntimeCondition, RuntimeConditionKind,
+    RuntimeConditionOrigin,
 };
 pub use table::{Link, LinkId, RoutingTable};

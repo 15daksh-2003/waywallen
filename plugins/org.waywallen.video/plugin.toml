@@ -16,6 +16,7 @@ entry_version = 2
 bin = "../../../../bin/waywallen-video-renderer"
 types = ["video"]
 priority = 100
+activity = "continuous"
 spawn_version = 8
 
 [renderers.waywallen-video.settings]

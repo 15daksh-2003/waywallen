@@ -157,6 +157,26 @@ mod handshake {
     }
 
     #[tokio::test]
+    async fn accepts_legacy_protocol_versions() {
+        let (sock, server_task) = start_display_endpoint("display-legacy-versions").await;
+
+        for version in 6..PROTOCOL_VERSION {
+            let sock_for_client = sock.clone();
+            let display_id = tokio::task::spawn_blocking(move || {
+                drive_display_registration(&sock_for_client, version)
+            })
+            .await
+            .expect("client join")
+            .expect("legacy client flow");
+            assert!(display_id >= 1, "display_id={display_id}");
+        }
+
+        assert!(!server_task.is_finished(), "server task exited prematurely");
+        server_task.abort();
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
     async fn rejects_wrong_protocol_string() {
         let (sock, server_task) = start_display_endpoint("display-bad-proto").await;
 

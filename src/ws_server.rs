@@ -23,6 +23,7 @@ use crate::queue;
 use crate::renderer_manager;
 use crate::routing::{
     DisplaySnapshot, LayoutSource, LibrarySnapshot, RendererSnapshot, RouterEvent,
+    RuntimeCondition, RuntimeConditionKind, RuntimeConditionOrigin,
 };
 use crate::settings::{SettingsStore, WallpaperFilterState, WallpaperSortRuleState};
 use crate::tasks;
@@ -467,6 +468,31 @@ fn display_snapshot_to_pb(s: DisplaySnapshot, settings: &SettingsStore) -> pb::D
         alias: override_prefs.alias.clone().unwrap_or_default(),
         display_layout: Some(layout_prefs_to_pb_resolved(&s.display_layout)),
         effective_layout_source: layout_source_to_pb(s.effective_layout_source) as i32,
+        conditions: s
+            .conditions
+            .into_iter()
+            .map(runtime_condition_to_pb)
+            .collect(),
+    }
+}
+
+fn runtime_condition_to_pb(condition: RuntimeCondition) -> pb::RuntimeCondition {
+    let kind = match condition.kind {
+        RuntimeConditionKind::Loading => pb::RuntimeConditionKind::RuntimeConditionLoading,
+        RuntimeConditionKind::Waiting => pb::RuntimeConditionKind::RuntimeConditionWaiting,
+        RuntimeConditionKind::Hang => pb::RuntimeConditionKind::RuntimeConditionHang,
+    };
+    let origin = match condition.origin {
+        RuntimeConditionOrigin::Renderer => pb::RuntimeConditionOrigin::Renderer,
+        RuntimeConditionOrigin::Display => pb::RuntimeConditionOrigin::Display,
+        RuntimeConditionOrigin::Release => pb::RuntimeConditionOrigin::Release,
+    };
+    pb::RuntimeCondition {
+        kind: kind as i32,
+        origin: origin as i32,
+        reason: condition.reason,
+        related_renderer_id: condition.related_renderer_id.unwrap_or_default(),
+        related_display_id: condition.related_display_id.unwrap_or_default(),
     }
 }
 
@@ -721,6 +747,11 @@ fn renderer_snapshot_to_pb(s: RendererSnapshot, settings: &SettingsStore) -> pb:
         drm_render_minor: s.drm_render_minor,
         texture_width: s.texture_width,
         texture_height: s.texture_height,
+        conditions: s
+            .conditions
+            .into_iter()
+            .map(runtime_condition_to_pb)
+            .collect(),
     }
 }
 
@@ -1313,47 +1344,15 @@ async fn dispatch_inner(
         }
 
         Req::RendererList(_) => {
-            let ids = state.renderer_manager.list().await;
-            let mut instances = Vec::with_capacity(ids.len());
-            for id in &ids {
-                let (name, pid, drm_render_major, drm_render_minor, texture_width, texture_height) =
-                    match state.renderer_manager.get(id).await {
-                        Some(h) => {
-                            let (tw, th) = h.texture_size();
-                            (
-                                h.name.clone(),
-                                h.pid.unwrap_or(0),
-                                h.gpu.major,
-                                h.gpu.minor,
-                                tw,
-                                th,
-                            )
-                        }
-                        None => (String::new(), 0, 0, 0, 0, 0),
-                    };
-                // fps now lives in the reconciled plugin settings store.
-                let fps: u32 = state
-                    .settings
-                    .plugin(&name)
-                    .and_then(|kv| kv.get("fps").and_then(|v| v.parse().ok()))
-                    .unwrap_or(0);
-                let status = if state.router.is_paused(id).await {
-                    "paused"
-                } else {
-                    "playing"
-                };
-                instances.push(pb::RendererInstance {
-                    renderer_id: id.clone(),
-                    fps,
-                    status: status.into(),
-                    name,
-                    pid,
-                    drm_render_major,
-                    drm_render_minor,
-                    texture_width,
-                    texture_height,
-                });
-            }
+            let snapshots = state.router.snapshot_renderers().await;
+            let ids = snapshots
+                .iter()
+                .map(|snapshot| snapshot.id.clone())
+                .collect();
+            let instances = snapshots
+                .into_iter()
+                .map(|snapshot| renderer_snapshot_to_pb(snapshot, &state.settings))
+                .collect();
             Res::RendererList(pb::RendererListResponse {
                 renderers: ids,
                 instances,

@@ -258,6 +258,29 @@ message RendererListResponse {
   repeated string renderers = 1;
   repeated RendererInstance instances = 2;
 }
+
+enum RuntimeConditionKind {
+  RUNTIME_CONDITION_UNSPECIFIED = 0;
+  RUNTIME_CONDITION_LOADING = 1;
+  RUNTIME_CONDITION_WAITING = 2;
+  RUNTIME_CONDITION_HANG = 3;
+}
+
+enum RuntimeConditionOrigin {
+  RUNTIME_CONDITION_ORIGIN_UNSPECIFIED = 0;
+  RUNTIME_CONDITION_ORIGIN_RENDERER = 1;
+  RUNTIME_CONDITION_ORIGIN_DISPLAY = 2;
+  RUNTIME_CONDITION_ORIGIN_RELEASE = 3;
+}
+
+message RuntimeCondition {
+  RuntimeConditionKind kind = 1;
+  RuntimeConditionOrigin origin = 2;
+  string reason = 3;
+  string related_renderer_id = 4;
+  uint64 related_display_id = 5;
+}
+
 message RendererInstance {
   string renderer_id = 1;
   uint32 fps         = 2;
@@ -274,6 +297,7 @@ message RendererInstance {
   // `Init.extent_w/h` hint pre-bind. 0 ⇒ unknown.
   uint32 texture_width  = 8;
   uint32 texture_height = 9;
+  repeated RuntimeCondition conditions = 10;
 }
 
 message RendererPlayRequest  { string renderer_id = 1; }
@@ -664,6 +688,7 @@ message DisplayInfo {
   // this value so display settings remain independently editable.
   LayoutPrefs display_layout = 12;
   LayoutSource effective_layout_source = 13;
+  repeated RuntimeCondition conditions = 14;
 }
 
 message DisplayRenameRequest {

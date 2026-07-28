@@ -53,6 +53,13 @@ pub struct DrmSyncobjWait {
 pub const DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL: u32 = 1 << 0;
 pub const DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT: u32 = 1 << 1;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinarySyncobjState {
+    Unsubmitted,
+    Pending,
+    Signaled,
+}
+
 #[repr(C)]
 #[derive(Default, Copy, Clone, Debug)]
 pub struct DrmSyncobjArray {
@@ -257,6 +264,27 @@ impl DrmDevice {
         self.wait_handles_signaled(&[handle], timeout_nsec)
     }
 
+    /// Classify a binary syncobj without waiting for a fence submission.
+    /// The DRM wait ABI distinguishes an absent fence (`EINVAL`) from an
+    /// available but unsignaled fence (`ETIME`) when WAIT_FOR_SUBMIT is unset.
+    pub fn binary_syncobj_state(&self, handle: &SyncobjHandle) -> io::Result<BinarySyncobjState> {
+        let mut raw = [handle.handle];
+        let mut arg = DrmSyncobjWait {
+            handles: raw.as_mut_ptr() as u64,
+            timeout_nsec: 0,
+            count_handles: 1,
+            flags: DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL,
+            first_signaled: 0,
+            pad: 0,
+        };
+        match unsafe { drm_syncobj_wait_ioctl(self.fd.as_raw_fd(), &mut arg) } {
+            Ok(_) => Ok(BinarySyncobjState::Signaled),
+            Err(nix::errno::Errno::ETIME) => Ok(BinarySyncobjState::Pending),
+            Err(nix::errno::Errno::EINVAL) => Ok(BinarySyncobjState::Unsubmitted),
+            Err(error) => Err(errno_to_io(error)),
+        }
+    }
+
     /// Export the dma_fence currently held by `handle` (binary syncobj
     /// must be signaled or have a pending fence) as a sync_file fd.
     pub fn export_sync_file(&self, handle: &SyncobjHandle) -> io::Result<OwnedFd> {
@@ -418,6 +446,25 @@ mod tests {
         drop(handle);
         // fd close happens on its own drop.
         drop(fd);
+    }
+
+    #[test]
+    fn classify_unsubmitted_and_signaled_binary_syncobj() {
+        if !drm_available() {
+            eprintln!("skip: no /dev/dri/renderD* available");
+            return;
+        }
+        let dev = DrmDevice::open_first_render_node().unwrap();
+        let handle = dev.create_binary_syncobj().expect("create");
+        assert_eq!(
+            dev.binary_syncobj_state(&handle).expect("query empty"),
+            BinarySyncobjState::Unsubmitted
+        );
+        dev.signal(&handle).expect("signal");
+        assert_eq!(
+            dev.binary_syncobj_state(&handle).expect("query signaled"),
+            BinarySyncobjState::Signaled
+        );
     }
 
     #[test]

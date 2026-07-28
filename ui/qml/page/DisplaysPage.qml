@@ -290,6 +290,22 @@ MD.Page {
                             drmRenderMajor: rectItem.d.drmRenderMajor || 0
                             drmRenderMinor: rectItem.d.drmRenderMinor || 0
                         }
+
+                        Flow {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.bottom: parent.bottom
+                            anchors.margins: 6
+                            spacing: 4
+
+                            Repeater {
+                                model: rectItem.d.runtimeConditions || []
+                                delegate: W.RuntimeConditionTag {
+                                    required property var modelData
+                                    condition: modelData
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -347,6 +363,15 @@ MD.Page {
                             typescale: MD.Token.typescale.title_medium
                             color: MD.Token.color.on_surface
                             elide: Text.ElideRight
+                        }
+
+                        Repeater {
+                            model: root.selected ? (root.selected.runtimeConditions || []) : []
+                            delegate: W.RuntimeConditionTag {
+                                required property var modelData
+                                Layout.alignment: Qt.AlignVCenter
+                                condition: modelData
+                            }
                         }
 
                         MD.IconButton {

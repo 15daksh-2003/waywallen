@@ -11,6 +11,7 @@ entry_version = 2
 bin = "../../../../bin/waywallen-image-renderer"
 types = ["image"]
 priority = 100
+activity = "on_demand"
 spawn_version = 8
 
 [renderers.waywallen-image.settings]

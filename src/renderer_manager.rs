@@ -7,7 +7,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock as StdRwLock, Weak as StdWeak};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, watch, Mutex as TokioMutex};
 use uuid::Uuid;
@@ -18,7 +18,7 @@ use crate::ipc::uds::{recv_event, send_control};
 /// Renderer IPC compatibility version the daemon currently emits. Bump
 /// this when the daemon/renderer wire contract changes.
 pub const SPAWN_VERSION: u32 = 8;
-use crate::plugin::renderer_registry::{RendererDef, RendererRegistry};
+use crate::plugin::renderer_registry::{RendererActivityMode, RendererDef, RendererRegistry};
 use crate::routing::Router;
 use crate::wallpaper::types::WallpaperType;
 
@@ -549,6 +549,45 @@ pub struct FrameSnapshot {
     pub release_point: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RendererProgressSnapshot {
+    pub registered_at: Instant,
+    pub bind_at: Option<Instant>,
+    pub buffer_generation: Option<u64>,
+    pub first_frame_at: Option<Instant>,
+    pub last_frame_at: Option<Instant>,
+}
+
+struct RendererProgress {
+    registered_at: Instant,
+    bind_at: Option<Instant>,
+    buffer_generation: Option<u64>,
+    first_frame_at: Option<Instant>,
+    last_frame_at: Option<Instant>,
+}
+
+impl RendererProgress {
+    fn new() -> Self {
+        Self {
+            registered_at: Instant::now(),
+            bind_at: None,
+            buffer_generation: None,
+            first_frame_at: None,
+            last_frame_at: None,
+        }
+    }
+
+    fn snapshot(&self) -> RendererProgressSnapshot {
+        RendererProgressSnapshot {
+            registered_at: self.registered_at,
+            bind_at: self.bind_at,
+            buffer_generation: self.buffer_generation,
+            first_frame_at: self.first_frame_at,
+            last_frame_at: self.last_frame_at,
+        }
+    }
+}
+
 /// Renderer event plus the pool generation that owned it when it was received.
 /// `frame_ready` carries this relationship implicitly through event order, so
 /// consumers must not reconstruct it from the latest published pool later.
@@ -594,6 +633,7 @@ pub struct RendererHandle {
     pub name: String,
     /// Domain id of the installable plugin that supplied this renderer.
     pub plugin_id: String,
+    pub activity_mode: RendererActivityMode,
     /// OS pid of the renderer child captured right after `spawn()`.
     /// `None` only if Tokio could not return a child pid.
     pub pid: Option<u32>,
@@ -604,6 +644,7 @@ pub struct RendererHandle {
     /// DRM render-node id of the GPU the renderer's Vulkan instance
     /// picked. Reported in Ready and used by DMA-BUF negotiation.
     pub gpu: DrmNode,
+    spawn_request: SpawnRequest,
 
     /// Sole owner-facing path for daemon-to-renderer writes. A dedicated
     /// thread serializes reliable control traffic and latest-only audio.
@@ -612,6 +653,10 @@ pub struct RendererHandle {
     /// Broadcast of every event the host emits (besides the FDs on the
     /// initial BindBuffers, whose fds are stored in `published_pool`).
     events: broadcast::Sender<RendererEvent>,
+    _release_events_tx: tokio::sync::mpsc::UnboundedSender<crate::sync::ReleaseEvent>,
+    release_events_rx:
+        StdMutex<Option<tokio::sync::mpsc::UnboundedReceiver<crate::sync::ReleaseEvent>>>,
+    progress: Arc<StdMutex<RendererProgress>>,
 
     /// Latest immutable pool published by the renderer.
     published_pool: Arc<StdMutex<Option<Arc<PublishedPool>>>>,
@@ -653,6 +698,32 @@ pub struct RendererHandle {
 impl RendererHandle {
     pub fn events(&self) -> broadcast::Receiver<RendererEvent> {
         self.events.subscribe()
+    }
+
+    pub fn take_release_events(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<crate::sync::ReleaseEvent>> {
+        self.release_events_rx
+            .lock()
+            .ok()
+            .and_then(|mut receiver| receiver.take())
+    }
+
+    pub fn progress(&self) -> RendererProgressSnapshot {
+        self.progress
+            .lock()
+            .map(|progress| progress.snapshot())
+            .unwrap_or(RendererProgressSnapshot {
+                registered_at: Instant::now(),
+                bind_at: None,
+                buffer_generation: None,
+                first_frame_at: None,
+                last_frame_at: None,
+            })
+    }
+
+    pub fn spawn_request(&self) -> SpawnRequest {
+        self.spawn_request.clone()
     }
 
     pub fn frame_ready_seen(&self) -> bool {
@@ -755,12 +826,12 @@ impl RendererHandle {
     pub fn register_frame_consumers(
         &self,
         identity: crate::sync::FrameIdentity,
-        expected_members: u32,
+        consumers: Vec<crate::sync::FrameConsumerIdentity>,
     ) -> std::result::Result<Vec<crate::sync::FrameConsumerMember>, &'static str> {
         let Some(tx) = self.frame_record_tx.as_ref() else {
             return Err("no reaper wired (test stub or unconfigured renderer)");
         };
-        crate::sync::register_frame(tx, identity, expected_members)
+        crate::sync::register_frame(tx, identity, consumers)
     }
 
     /// Renderer-published clear color (RGBA, 0..=1). Defaults to
@@ -882,6 +953,7 @@ impl RendererManager {
                 bin: PathBuf::from(bin),
                 types: vec!["scene".to_string()],
                 priority: 100,
+                activity: RendererActivityMode::Continuous,
                 spawn_version: None,
                 extras: Vec::new(),
                 settings: Default::default(),
@@ -1030,6 +1102,8 @@ impl RendererManager {
 
         // Now wire up the permanent reader thread and store the handle.
         let (events_tx, _events_rx) = broadcast::channel::<RendererEvent>(256);
+        let (release_events_tx, release_events_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::sync::ReleaseEvent>();
         let published_pool: Arc<StdMutex<Option<Arc<PublishedPool>>>> =
             Arc::new(StdMutex::new(None));
         let sync_fds: Arc<StdMutex<std::collections::VecDeque<(u64, OwnedFd)>>> =
@@ -1040,6 +1114,7 @@ impl RendererManager {
             Arc::new(StdMutex::new(None));
         let pending_configure: Arc<StdMutex<Option<u32>>> = Arc::new(StdMutex::new(None));
         let clear_rgba: Arc<StdMutex<[f32; 4]>> = Arc::new(StdMutex::new([0.0, 0.0, 0.0, 1.0]));
+        let progress = Arc::new(StdMutex::new(RendererProgress::new()));
 
         let reader_stream = std_stream
             .try_clone()
@@ -1061,6 +1136,7 @@ impl RendererManager {
         let reader_format_caps = format_caps.clone();
         let reader_pending = pending_configure.clone();
         let reader_clear_rgba = clear_rgba.clone();
+        let reader_progress = Arc::clone(&progress);
         let reader_id = id.clone();
         let reader_reap_tx = self.reap_tx.clone();
 
@@ -1084,11 +1160,16 @@ impl RendererManager {
             extras: req.extras.clone(),
             name: renderer_def.name.clone(),
             plugin_id: renderer_def.plugin_id.clone(),
+            activity_mode: renderer_def.activity,
             pid: child_pid,
             process_group,
             gpu,
+            spawn_request: req.clone(),
             writer,
             events: events_tx,
+            _release_events_tx: release_events_tx.clone(),
+            release_events_rx: StdMutex::new(Some(release_events_rx)),
+            progress,
             published_pool,
             sync_fds,
             latest_frame,
@@ -1111,6 +1192,7 @@ impl RendererManager {
                 id.clone(),
                 Arc::clone(&handle.release_syncobj),
                 frame_rx,
+                release_events_tx,
             );
         }
 
@@ -1133,6 +1215,7 @@ impl RendererManager {
                 reader_format_caps,
                 reader_pending,
                 reader_clear_rgba,
+                reader_progress,
                 reader_reap_tx,
             );
         });
@@ -1665,6 +1748,7 @@ fn run_reader(
     format_caps: Arc<StdMutex<Option<crate::dma::negotiate::PeerCaps>>>,
     pending_configure: Arc<StdMutex<Option<u32>>>,
     clear_rgba: Arc<StdMutex<[f32; 4]>>,
+    progress: Arc<StdMutex<RendererProgress>>,
     reap_tx: tokio::sync::mpsc::UnboundedSender<RendererId>,
 ) {
     // Any reader exit enqueues renderer eviction so stale ids do not remain
@@ -1772,6 +1856,12 @@ fn run_reader(
                         "renderer {id}: BindBuffers cached (gen={generation}, flags=0x{flags:x})"
                     );
                 }
+                if let Ok(mut state) = progress.lock() {
+                    state.bind_at = Some(Instant::now());
+                    state.buffer_generation = Some(generation);
+                    state.first_frame_at = None;
+                    state.last_frame_at = None;
+                }
                 // A rebind retires acquire fences from the previous
                 // buffer_generation.
                 if let Ok(mut guard) = sync_fds.lock() {
@@ -1817,6 +1907,13 @@ fn run_reader(
                 .and_then(|g| g.as_ref().map(|s| s.generation));
             if let Some(buffer_generation) = gen {
                 event_pool_generation = Some(buffer_generation);
+                if let Ok(mut state) = progress.lock() {
+                    let now = Instant::now();
+                    if state.buffer_generation == Some(buffer_generation) {
+                        state.first_frame_at.get_or_insert(now);
+                        state.last_frame_at = Some(now);
+                    }
+                }
                 if let Ok(mut guard) = latest_frame.lock() {
                     *guard = Some(FrameSnapshot {
                         buffer_generation,
@@ -2130,17 +2227,28 @@ impl RendererHandle {
     ) -> (Arc<Self>, StdUnixStream) {
         let (a, b) = StdUnixStream::pair().expect("UnixStream pair");
         let (events_tx, _) = broadcast::channel::<RendererEvent>(8);
+        let (release_events_tx, release_events_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::sync::ReleaseEvent>();
         let handle = Arc::new(Self {
             id: id.into(),
             wp_type: wp_type.into(),
             extras: HashMap::new(),
             name: "test-stub".into(),
             plugin_id: "test.plugin".into(),
+            activity_mode: RendererActivityMode::OnDemand,
             pid: None,
             process_group: None,
             gpu: DrmNode::UNKNOWN,
+            spawn_request: SpawnRequest {
+                wp_type: wp_type.into(),
+                renderer_name: Some("test-stub".into()),
+                ..Default::default()
+            },
             writer: Self::test_writer(id, a),
             events: events_tx,
+            _release_events_tx: release_events_tx,
+            release_events_rx: StdMutex::new(Some(release_events_rx)),
+            progress: Arc::new(StdMutex::new(RendererProgress::new())),
             published_pool: Arc::new(StdMutex::new(None)),
             sync_fds: Arc::new(StdMutex::new(std::collections::VecDeque::new())),
             latest_frame: Arc::new(StdMutex::new(None)),
@@ -2351,6 +2459,7 @@ mod init_handshake_tests {
             bin: PathBuf::from("/dev/null"),
             types: vec!["scene".to_string()],
             priority: 100,
+            activity: RendererActivityMode::OnDemand,
             spawn_version: None,
             extras: Vec::new(),
             settings: Default::default(),
@@ -2367,6 +2476,7 @@ mod init_handshake_tests {
             bin: PathBuf::from("/dev/null"),
             types: vec!["scene".into()],
             priority: 100,
+            activity: RendererActivityMode::Continuous,
             spawn_version: Some(1),
             extras: vec!["assets".into(), "external_id".into()],
             settings: Default::default(),
@@ -2392,6 +2502,7 @@ mod init_handshake_tests {
             bin: PathBuf::from("/dev/null"),
             types: vec!["video".into()],
             priority: 100,
+            activity: RendererActivityMode::Continuous,
             spawn_version: Some(1),
             extras: Vec::new(),
             settings: ps,
@@ -2522,6 +2633,7 @@ mod reuse_tests {
             bin: PathBuf::from("/dev/null"),
             types: vec!["video".into()],
             priority: 100,
+            activity: RendererActivityMode::Continuous,
             spawn_version: Some(1),
             extras: Vec::new(),
             settings: ps,
@@ -2534,17 +2646,24 @@ mod reuse_tests {
     fn live_mpv_handle(id: &str, extras: HashMap<String, String>) -> Arc<RendererHandle> {
         let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
         let (events_tx, _) = tokio::sync::broadcast::channel::<RendererEvent>(8);
+        let (release_events_tx, release_events_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::sync::ReleaseEvent>();
         Arc::new(RendererHandle {
             id: id.into(),
             wp_type: "video".into(),
-            extras,
+            extras: extras.clone(),
             name: "waywallen-mpv".into(),
             plugin_id: "test.plugin".into(),
+            activity_mode: RendererActivityMode::Continuous,
             pid: None,
             process_group: None,
             gpu: DrmNode::UNKNOWN,
+            spawn_request: req_with_extras(extras.clone()),
             writer: RendererHandle::test_writer(id, a),
             events: events_tx,
+            _release_events_tx: release_events_tx,
+            release_events_rx: StdMutex::new(Some(release_events_rx)),
+            progress: Arc::new(StdMutex::new(RendererProgress::new())),
             published_pool: Arc::new(StdMutex::new(None)),
             sync_fds: Arc::new(StdMutex::new(std::collections::VecDeque::new())),
             latest_frame: Arc::new(StdMutex::new(None)),
@@ -2635,17 +2754,28 @@ mod reuse_tests {
         renderer_side.set_nonblocking(false).unwrap();
 
         let (events_tx, _) = tokio::sync::broadcast::channel::<RendererEvent>(8);
+        let (release_events_tx, release_events_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::sync::ReleaseEvent>();
         let h = Arc::new(RendererHandle {
             id: "h1".into(),
             wp_type: "video".into(),
             extras: HashMap::new(),
             name: "waywallen-mpv".into(),
             plugin_id: "test.plugin".into(),
+            activity_mode: RendererActivityMode::Continuous,
             pid: None,
             process_group: None,
             gpu: DrmNode::UNKNOWN,
+            spawn_request: SpawnRequest {
+                wp_type: "video".into(),
+                renderer_name: Some("waywallen-mpv".into()),
+                ..Default::default()
+            },
             writer: RendererHandle::test_writer("h1", daemon_side),
             events: events_tx,
+            _release_events_tx: release_events_tx,
+            release_events_rx: StdMutex::new(Some(release_events_rx)),
+            progress: Arc::new(StdMutex::new(RendererProgress::new())),
             published_pool: Arc::new(StdMutex::new(None)),
             sync_fds: Arc::new(StdMutex::new(std::collections::VecDeque::new())),
             latest_frame: Arc::new(StdMutex::new(None)),
