@@ -15,17 +15,24 @@ mod handshake {
     use waywallen::display::proto::{
         codec, error_code, Event, Request, PROTOCOL_NAME, PROTOCOL_VERSION,
     };
+    use waywallen::events::GlobalEvent;
     use waywallen::renderer_manager::RendererManager;
     use waywallen::routing::Router;
 
-    async fn start_display_endpoint(sock_name: &str) -> (PathBuf, tokio::task::JoinHandle<()>) {
+    async fn start_display_endpoint(
+        sock_name: &str,
+    ) -> (
+        PathBuf,
+        tokio::task::JoinHandle<()>,
+        tokio::sync::broadcast::Receiver<GlobalEvent>,
+    ) {
         let sock = common::tmp_sock(sock_name);
         let _ = std::fs::remove_file(&sock);
 
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(Arc::clone(&mgr));
         let sock_for_task = sock.clone();
-        let (events_tx, _) = tokio::sync::broadcast::channel(8);
+        let (events_tx, events_rx) = tokio::sync::broadcast::channel(8);
         let server_task = tokio::spawn({
             let router = Arc::clone(&router);
             async move {
@@ -39,7 +46,7 @@ mod handshake {
             sock.display()
         );
 
-        (sock, server_task)
+        (sock, server_task, events_rx)
     }
 
     fn drive_display_registration(
@@ -137,7 +144,7 @@ mod handshake {
 
     #[tokio::test]
     async fn handshake_up_to_display_accepted() {
-        let (sock, server_task) = start_display_endpoint("display-handshake").await;
+        let (sock, server_task, _events_rx) = start_display_endpoint("display-handshake").await;
 
         let sock_for_client = sock.clone();
         let client_handle = tokio::task::spawn_blocking(move || {
@@ -158,7 +165,8 @@ mod handshake {
 
     #[tokio::test]
     async fn accepts_legacy_protocol_versions() {
-        let (sock, server_task) = start_display_endpoint("display-legacy-versions").await;
+        let (sock, server_task, _events_rx) =
+            start_display_endpoint("display-legacy-versions").await;
 
         for version in 6..PROTOCOL_VERSION {
             let sock_for_client = sock.clone();
@@ -178,7 +186,7 @@ mod handshake {
 
     #[tokio::test]
     async fn rejects_wrong_protocol_string() {
-        let (sock, server_task) = start_display_endpoint("display-bad-proto").await;
+        let (sock, server_task, _events_rx) = start_display_endpoint("display-bad-proto").await;
 
         let sock_for_client = sock.clone();
         let got_error = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
@@ -215,7 +223,8 @@ mod handshake {
     /// must produce `error{code = VERSION_UNSUPPORTED}` followed by close.
     #[tokio::test]
     async fn rejects_unsupported_client_protocol_version() {
-        let (sock, server_task) = start_display_endpoint("display-bad-version").await;
+        let (sock, server_task, mut events_rx) =
+            start_display_endpoint("display-bad-version").await;
 
         let mut probes = vec![PROTOCOL_VERSION.saturating_add(99)];
         if let Some(low_probe) = endpoint::MIN_SUPPORTED_CLIENT_VERSION.checked_sub(1) {
@@ -228,6 +237,25 @@ mod handshake {
                 .await
                 .expect("client join")
                 .expect("client flow");
+
+            let event = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
+                .await
+                .expect("display failure event timeout")
+                .expect("display failure event channel closed");
+            match event {
+                GlobalEvent::DisplayConnectionFailed {
+                    client_name,
+                    client_protocol_version,
+                    error_code: code,
+                    reason,
+                } => {
+                    assert_eq!(client_name, "version-probe");
+                    assert_eq!(client_protocol_version, probe);
+                    assert_eq!(code, error_code::VERSION_UNSUPPORTED);
+                    assert!(reason.contains("not supported"), "reason={reason:?}");
+                }
+                other => panic!("unexpected global event: {other:?}"),
+            }
         }
 
         server_task.abort();

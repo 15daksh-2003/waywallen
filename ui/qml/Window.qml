@@ -106,8 +106,7 @@ MD.ApplicationWindow {
         }
         function onDisplayConnectionFailed(clientName, clientProtocolVersion, errorCode, reason) {
             const who = clientName.length > 0 ? clientName : qsTr("Display client");
-            // flag=1 → close button; 6s gives the user time to read.
-            W.Action.toast(qsTr("%1 connection failed: %2").arg(who).arg(reason), 6000, 1, null);
+            W.Global.toastError(qsTr("%1 connection failed: %2").arg(who).arg(reason));
         }
         function onPluginRestartFailed(pluginId, error) {
             const who = pluginId.length > 0 ? pluginId : qsTr("Plugin");

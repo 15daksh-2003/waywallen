@@ -8,17 +8,20 @@ use crate::scheduler;
 use crate::tasks;
 use crate::AppState;
 
+const DISPLAY_CONNECTION_NOTIFICATION_ID: &str =
+    "org.waywallen.waywallen.display-connection-failed";
+
 /// Spawn the dispatcher. `restore_last` mirrors `cli.restore_last` —
 /// when false the wallpaper-recall watcher is never started even
 pub fn spawn(state: Arc<AppState>, restore_last: bool) {
+    // Subscribe before submitting the task so publishers cannot win the
+    // scheduler race and lose a transient event during startup.
+    let mut bus = state.events.subscribe();
     let tasks_h = state.tasks.clone();
     tasks_h.spawn_async(
         tasks::TaskKind::Service,
         "service/event-process",
         async move {
-            // Subscribe BEFORE re-reading the latches so an event that
-            // fired between AppState construction and the first poll
-            let mut bus = state.events.subscribe();
             let mut recall_started = !restore_last;
 
             if !recall_started && state.events.is_sources_ready() {
@@ -32,6 +35,22 @@ pub fn spawn(state: Arc<AppState>, restore_last: bool) {
                         if !recall_started {
                             spawn_wallpaper_recall(state.clone());
                             recall_started = true;
+                        }
+                    }
+                    Ok(GlobalEvent::DisplayConnectionFailed {
+                        client_name,
+                        reason,
+                        ..
+                    }) => {
+                        let body = display_connection_notification_body(&client_name, &reason);
+                        if let Err(e) = crate::notifications::notify(
+                            DISPLAY_CONNECTION_NOTIFICATION_ID,
+                            "Display connection failed",
+                            &body,
+                        )
+                        .await
+                        {
+                            log::warn!("display connection notification failed: {e}");
                         }
                     }
                     Ok(_) => {}
@@ -48,6 +67,14 @@ pub fn spawn(state: Arc<AppState>, restore_last: bool) {
             }
         },
     );
+}
+
+fn display_connection_notification_body(client_name: &str, reason: &str) -> String {
+    if client_name.is_empty() {
+        reason.to_string()
+    } else {
+        format!("{client_name}: {reason}")
+    }
 }
 
 /// Long-lived watcher: re-apply each display's persisted wallpaper as

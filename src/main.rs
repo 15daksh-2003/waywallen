@@ -492,6 +492,10 @@ async fn async_main() -> anyhow::Result<()> {
         backend
     };
 
+    // Subscribe the process-wide handler before display clients can publish
+    // transient handshake failures.
+    event_process::spawn(state.clone(), cli.restore_last);
+
     let display_sock_path = display::endpoint::default_socket_path();
     {
         let router = router.clone();
@@ -520,10 +524,6 @@ async fn async_main() -> anyhow::Result<()> {
             },
         );
     }
-
-    // Single in-process consumer of the global event bus. Spawn before
-    // source/display publishers so no boot marker is missed.
-    event_process::spawn(state.clone(), cli.restore_last);
 
     // Off-load source loading, scanning, DB sync, and playlist seeding so
     // async_main can continue bringing up services.
