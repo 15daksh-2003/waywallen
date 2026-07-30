@@ -144,10 +144,8 @@ ColumnLayout {
             HoverHandler {
                 id: hovered
             }
-            MD.ToolTip {
-                visible: hovered.hovered
-                text: "Requires renderer restart"
-            }
+            MD.ToolTip.visible: hovered.hovered
+            MD.ToolTip.text: "Requires renderer restart"
         }
     }
 

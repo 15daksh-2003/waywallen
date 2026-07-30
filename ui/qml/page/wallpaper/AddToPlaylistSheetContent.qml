@@ -75,11 +75,8 @@ ColumnLayout {
                     busy: control.sheetState.mutationQuerying
                     icon.name: MD.Token.icon.add
                     onClicked: control.sheetState.addToPlaylist(selectPlaylistItem.modelData)
-
-                    MD.ToolTip {
-                        visible: parent.hovered
-                        text: qsTr("Add selection")
-                    }
+                    MD.ToolTip.visible: hovered
+                    MD.ToolTip.text: qsTr("Add selection")
                 }
             }
         }

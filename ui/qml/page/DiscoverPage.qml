@@ -9,6 +9,7 @@ MD.Page {
     id: root
     showBackground: false
     padding: MD.MProp.size.isCompact ? 0 : 12
+    rightPadding: 0
 
     property bool detailOpen: false
     readonly property var detailRow: detailOpen ? detailStore.item : null

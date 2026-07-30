@@ -22,7 +22,14 @@ Item {
         anchors.fill: parent
         actions: root.actions
         iconDelegate: MD.SmallIconButton {
+            id: button
+
+            readonly property string toolTipText: button.action?.text || ""
+
             action: MD.ToolBarLayout.action
+            hoverEnabled: true
+            MD.ToolTip.text: button.toolTipText
+            MD.ToolTip.visible: button.hovered && button.toolTipText.length > 0 && !button.pressed
         }
     }
 }

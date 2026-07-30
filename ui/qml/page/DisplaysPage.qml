@@ -378,10 +378,8 @@ MD.Page {
                             visible: parent.canRename && !!root.selected
                             enabled: !renameQuery.querying
                             icon.name: MD.Token.icon.edit
-                            MD.ToolTip {
-                                visible: parent.hovered
-                                text: qsTr("Edit display")
-                            }
+                            MD.ToolTip.visible: hovered
+                            MD.ToolTip.text: qsTr("Edit display")
                             onClicked: displayEditDialog.openFor(root.selected)
                         }
 
@@ -624,10 +622,8 @@ MD.Page {
                                     return ovr.fillmodeSet === true || ovr.locationSet === true || ovr.alignSet === true || ovr.rotationSet === true;
                                 }
                                 icon.name: MD.Token.icon.refresh
-                                MD.ToolTip {
-                                    visible: parent.hovered
-                                    text: "Revert to global default"
-                                }
+                                MD.ToolTip.visible: hovered
+                                MD.ToolTip.text: "Revert to global default"
                                 onClicked: {
                                     if (!root.selected)
                                         return;

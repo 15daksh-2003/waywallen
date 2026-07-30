@@ -166,33 +166,24 @@ MD.BottomSheet {
                             ? MD.Token.icon.pause
                             : MD.Token.icon.play_arrow
                         onClicked: control.sheetState.togglePlayback(playlistSheetItem.modelData)
-
-                        MD.ToolTip {
-                            visible: parent.hovered && !parent.enabled
-                            text: qsTr("No displays")
-                        }
+                        MD.ToolTip.visible: hovered && !enabled
+                        MD.ToolTip.text: qsTr("No displays")
                     }
 
                     MD.IconButton {
                         enabled: !control.sheetState.playlistMutation.querying
                         icon.name: MD.Token.icon.edit
                         onClicked: control.sheetState.editSelection(playlistSheetItem.modelData)
-
-                        MD.ToolTip {
-                            visible: parent.hovered
-                            text: qsTr("Edit selection")
-                        }
+                        MD.ToolTip.visible: hovered
+                        MD.ToolTip.text: qsTr("Edit selection")
                     }
 
                     MD.IconButton {
                         enabled: !control.sheetState.playlistMutation.querying
                         icon.name: MD.Token.icon.delete
                         onClicked: control.sheetState.deletePlaylist(playlistSheetItem.modelData)
-
-                        MD.ToolTip {
-                            visible: parent.hovered
-                            text: qsTr("Delete playlist")
-                        }
+                        MD.ToolTip.visible: hovered
+                        MD.ToolTip.text: qsTr("Delete playlist")
                     }
                 }
             }

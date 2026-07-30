@@ -68,9 +68,7 @@ Rectangle {
         id: hover
     }
 
-    MD.ToolTip {
-        visible: hover.hovered
-        delay: 300
-        text: root.tooltipText
-    }
+    MD.ToolTip.visible: hover.hovered
+    MD.ToolTip.delay: 300
+    MD.ToolTip.text: root.tooltipText
 }

@@ -593,11 +593,8 @@ Item {
                             mdState.size: MD.Enum.XS
                             enabled: root.wallpaperLayoutOverrideSet
                             onClicked: root.resetWallpaperLayout()
-
-                            MD.ToolTip {
-                                visible: parent.hovered
-                                text: "Reset to display layout"
-                            }
+                            MD.ToolTip.visible: hovered
+                            MD.ToolTip.text: "Reset to display layout"
                         }
                     }
 
@@ -785,11 +782,8 @@ Item {
                             else
                                 propertyModel.resetUserProperties();
                         }
-
-                        MD.ToolTip {
-                            visible: parent.hovered
-                            text: "Reset to defaults"
-                        }
+                        MD.ToolTip.visible: hovered
+                        MD.ToolTip.text: "Reset to defaults"
                     }
                 }
             }
@@ -923,11 +917,8 @@ Item {
                         icon.name: MD.Token.icon.check
                         enabled: m_text_input.text !== m_prop_delegate.currentValue
                         onClicked: m_text_input.submit()
-
-                        MD.ToolTip {
-                            visible: parent.hovered
-                            text: "Apply"
-                        }
+                        MD.ToolTip.visible: hovered
+                        MD.ToolTip.text: "Apply"
                     }
                 }
 
@@ -1015,11 +1006,8 @@ Item {
                 Layout.fillWidth: true
                 action: root.activeApplyAction
                 mdState.type: MD.Enum.BtFilled
-
-                MD.ToolTip {
-                    visible: applyBtn.hovered && !applyBtn.enabled
-                    text: "No display connected"
-                }
+                MD.ToolTip.visible: applyBtn.hovered && !applyBtn.enabled
+                MD.ToolTip.text: "No display connected"
             }
         }
     }
