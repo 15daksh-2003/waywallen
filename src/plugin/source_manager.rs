@@ -323,6 +323,7 @@ pub struct DiscoverItem {
 /// Detail blob returned by a plugin's `discover.details(ctx, id)`.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct DiscoverDetails {
+    pub author: String,
     pub description: String,
     pub size: String,
     pub width: Option<u32>,
@@ -2710,6 +2711,7 @@ impl LuaPluginRuntime {
             })?;
 
         let details = DiscoverDetails {
+            author: Self::optional_string(&result, "author", "module.discover.details result")?,
             description: Self::require_string(
                 &result,
                 "description",
@@ -4610,6 +4612,7 @@ function M.discover.search(ctx, params)
 end
 function M.discover.details(ctx, id)
     return {
+        author = "Imported Author",
         description = names.name(),
         size = "42",
         width = 10,
@@ -4660,6 +4663,7 @@ return M
         assert_eq!(detail.width, Some(10));
         assert_eq!(detail.height, Some(20));
         assert_eq!(detail.web_url, "https://example.invalid/item/abc");
+        assert_eq!(detail.author, "Imported Author");
     }
 
     #[test]
@@ -4879,11 +4883,20 @@ return M
         let details: LuaFunction = map.get("details").unwrap();
         let detail = runtime.lua.create_table().unwrap();
         detail.set("url", "https://wallhaven.cc/w/abc123").unwrap();
-        let mapped: LuaTable = details.call(detail).unwrap();
+        let mapped: LuaTable = details.call(detail.clone()).unwrap();
         assert_eq!(
             mapped.get::<String>("web_url").unwrap(),
             "https://wallhaven.cc/w/abc123"
         );
+        // A wallpaper Wallhaven reports no uploader for keeps the empty author
+        // the listing has always produced.
+        assert_eq!(mapped.get::<String>("author").unwrap(), "");
+
+        let uploader = runtime.lua.create_table().unwrap();
+        uploader.set("username", "Qtn").unwrap();
+        detail.set("uploader", uploader).unwrap();
+        let mapped: LuaTable = details.call(detail).unwrap();
+        assert_eq!(mapped.get::<String>("author").unwrap(), "Qtn");
     }
 
     #[test]

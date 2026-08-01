@@ -15,6 +15,13 @@ MD.Page {
     property int remoteCapability: 0
     property string remoteHint: ""
 
+    // A source that cannot name an item while listing it may still name it once
+    // the item is opened, so let a detail lookup fill in what the row lacks.
+    readonly property string authorName: {
+        const own = String(root.item?.author ?? "");
+        return own.length > 0 ? own : String(root.details?.author ?? "");
+    }
+
     readonly property string formattedSize: formatSize(details?.size)
     readonly property string tagsText: formatList(details?.tags)
 
@@ -139,12 +146,12 @@ MD.Page {
             }
 
             InfoLabel {
-                visible: root.hasText(root.item?.author)
+                visible: root.authorName.length > 0
                 label: "Author"
             }
             InfoValue {
-                visible: root.hasText(root.item?.author)
-                text: root.value(root.item?.author)
+                visible: root.authorName.length > 0
+                text: root.authorName
             }
 
             InfoLabel {

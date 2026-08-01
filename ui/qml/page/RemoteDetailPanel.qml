@@ -9,6 +9,13 @@ Item {
 
     property var item: null
     property var details: null
+
+    // A source that cannot name an item while listing it may still name it once
+    // the item is opened, so let a detail lookup fill in what the row lacks.
+    readonly property string authorName: {
+        const own = String(root.item?.author ?? "");
+        return own.length > 0 ? own : String(root.details?.author ?? "");
+    }
     property int remoteCapability: 0
     property string remoteHint: ""
     property int downloadState: 0
@@ -135,8 +142,8 @@ Item {
 
                 MD.Text {
                     Layout.fillWidth: true
-                    visible: String(root.item?.author ?? "").length > 0
-                    text: qsTr("by %1").arg(root.item?.author ?? "")
+                    visible: root.authorName.length > 0
+                    text: qsTr("by %1").arg(root.authorName)
                     typescale: MD.Token.typescale.body_medium
                     color: MD.Token.color.on_surface_variant
                     wrapMode: Text.WordWrap
