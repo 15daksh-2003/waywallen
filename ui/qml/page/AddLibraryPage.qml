@@ -6,7 +6,7 @@ import waywallen.ui as W
 
 MD.Page {
     id: root
-    title: "Add Library"
+    title: qsTr("Add Library")
 
     W.SourceListQuery {
         id: sourceQuery
@@ -55,7 +55,7 @@ MD.Page {
 
     MD.FolderDialog {
         id: folderDialog
-        title: "Choose Library Folder"
+        title: qsTr("Choose Library Folder")
         onAccepted: {
             pathInput.text = selectedFolder.toString().replace(/^file:\/\//, "");
         }
@@ -74,7 +74,7 @@ MD.Page {
             Layout.margins: 16
 
             MD.Text {
-                text: "Select Source Plugin"
+                text: qsTr("Select Source Plugin")
                 typescale: MD.Token.typescale.title_small
             }
 
@@ -106,7 +106,7 @@ MD.Page {
                     Layout.fillWidth: true
                     placeholderText: (root.selectedSource && root.selectedSource.libraryLabel)
                                      ? root.selectedSource.libraryLabel
-                                     : "Library Path"
+                                     : qsTr("Library Path")
                 }
 
                 MD.IconButton {
@@ -132,7 +132,7 @@ MD.Page {
 
             MD.BusyButton {
                 Layout.fillWidth: true
-                text: "Add Library"
+                text: qsTr("Add Library")
                 busy: addQuery.querying
                 enabled: pluginGroup.selectedPlugin !== "" && pathInput.text !== ""
                 mdState.type: MD.Enum.BtFilled

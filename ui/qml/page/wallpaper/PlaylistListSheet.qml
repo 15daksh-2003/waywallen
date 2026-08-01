@@ -118,7 +118,7 @@ MD.BottomSheet {
                 width: ListView.view.contentWidth
                 radius: 12
                 text: modelData.name || qsTr("Untitled")
-                supportText: qsTr("%1 wallpapers").arg((modelData.entryIds || []).length)
+                supportText: qsTr("%n wallpaper(s)", "", (modelData.entryIds || []).length)
                 heightMode: playingDisplayLabels.length > 0
                     ? MD.Enum.ListItemThreeLine
                     : MD.Enum.ListItemTwoLine

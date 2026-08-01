@@ -5,7 +5,7 @@ import Qcm.Material as MD
 
 MD.Page {
     id: root
-    title: "Wallpaper info"
+    title: qsTr("Wallpaper info")
     scrolling: !infoFlick.atYBeginning
 
     property var wallpaper: null
@@ -109,30 +109,30 @@ MD.Page {
             columnSpacing: 12
             rowSpacing: 10
 
-            InfoLabel { label: "ID" }
+            InfoLabel { label: qsTr("ID") }
             InfoValue { text: root.value(root.wallpaper?.id_proto) }
 
             InfoLabel {
                 visible: root.hasText(root.wallpaper?.externalId)
-                label: "External ID"
+                label: qsTr("External ID")
             }
             InfoValue {
                 visible: root.hasText(root.wallpaper?.externalId)
                 text: root.value(root.wallpaper?.externalId)
             }
 
-            InfoLabel { label: "Name" }
+            InfoLabel { label: qsTr("Name") }
             InfoValue { text: root.value(root.wallpaper?.name) }
 
-            InfoLabel { label: "Type" }
+            InfoLabel { label: qsTr("Type") }
             InfoValue { text: root.value(root.wallpaper?.wpType) }
 
-            InfoLabel { label: "Resource" }
+            InfoLabel { label: qsTr("Resource") }
             InfoValue { text: root.value(root.wallpaper?.resource) }
 
             InfoLabel {
                 visible: root.hasText(root.wallpaper?.preview)
-                label: "Preview"
+                label: qsTr("Preview")
             }
             InfoValue {
                 visible: root.hasText(root.wallpaper?.preview)
@@ -141,7 +141,7 @@ MD.Page {
 
             InfoLabel {
                 visible: root.sizeBytes > 0
-                label: "Size"
+                label: qsTr("Size")
             }
             InfoValue {
                 visible: root.sizeBytes > 0
@@ -150,7 +150,7 @@ MD.Page {
 
             InfoLabel {
                 visible: Number(root.wallpaper?.width ?? 0) > 0
-                label: "Width"
+                label: qsTr("Width")
             }
             InfoValue {
                 visible: Number(root.wallpaper?.width ?? 0) > 0
@@ -159,7 +159,7 @@ MD.Page {
 
             InfoLabel {
                 visible: Number(root.wallpaper?.height ?? 0) > 0
-                label: "Height"
+                label: qsTr("Height")
             }
             InfoValue {
                 visible: Number(root.wallpaper?.height ?? 0) > 0
@@ -168,7 +168,7 @@ MD.Page {
 
             InfoLabel {
                 visible: root.hasText(root.formatText)
-                label: "Format"
+                label: qsTr("Format")
             }
             InfoValue {
                 visible: root.hasText(root.formatText)
@@ -177,7 +177,7 @@ MD.Page {
 
             InfoLabel {
                 visible: root.hasText(root.wallpaper?.contentRating)
-                label: "Rating"
+                label: qsTr("Rating")
             }
             InfoValue {
                 visible: root.hasText(root.wallpaper?.contentRating)
@@ -186,7 +186,7 @@ MD.Page {
 
             InfoLabel {
                 visible: root.hasText(root.tagsText)
-                label: "Tags"
+                label: qsTr("Tags")
             }
             InfoValue {
                 visible: root.hasText(root.tagsText)
@@ -195,7 +195,7 @@ MD.Page {
 
             InfoLabel {
                 visible: root.hasText(root.wallpaper?.description)
-                label: "Description"
+                label: qsTr("Description")
             }
             InfoValue {
                 visible: root.hasText(root.wallpaper?.description)
@@ -204,7 +204,7 @@ MD.Page {
 
             InfoLabel {
                 visible: root.hasText(root.metadataText)
-                label: "Metadata"
+                label: qsTr("Metadata")
             }
             InfoValue {
                 visible: root.hasText(root.metadataText)
@@ -213,7 +213,7 @@ MD.Page {
 
             InfoLabel {
                 visible: root.hasText(root.overridesText)
-                label: "Overrides"
+                label: qsTr("Overrides")
             }
             InfoValue {
                 visible: root.hasText(root.overridesText)

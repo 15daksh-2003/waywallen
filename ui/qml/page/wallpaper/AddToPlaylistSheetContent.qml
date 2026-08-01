@@ -67,7 +67,7 @@ ColumnLayout {
                 width: ListView.view.contentWidth
                 radius: 12
                 text: modelData.name || qsTr("Untitled")
-                supportText: qsTr("%1 wallpapers").arg((modelData.entryIds || []).length)
+                supportText: qsTr("%n wallpaper(s)", "", (modelData.entryIds || []).length)
 
                 trailing: MD.BusyIconButton {
                     enabled: control.sheetState.selectedWallpaperCount > 0

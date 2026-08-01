@@ -11,7 +11,7 @@ import waywallen.ui as W
 // open-time snapshot; edits stay pending until Apply.
 MD.Page {
     id: root
-    title: "Configure " + (displayName.length > 0 ? displayName : pluginName)
+    title: qsTr("Configure %1").arg(displayName.length > 0 ? displayName : pluginName)
     scrolling: !settingsList.atYBeginning
 
     property string pluginName: ""
@@ -140,7 +140,7 @@ MD.Page {
         const buckets = {};
         for (let i = 0; i < schemaList.length; ++i) {
             const s = schemaList[i];
-            const g = (s.group && s.group.length > 0) ? s.group : "General";
+            const g = (s.group && s.group.length > 0) ? s.group : qsTr("General");
             if (!buckets[g])
                 buckets[g] = [];
             buckets[g].push(s);
@@ -179,14 +179,14 @@ MD.Page {
         bottomPadding: 16
 
         MD.Button {
-            text: "Reset"
+            text: qsTr("Reset")
             mdState.type: MD.Enum.BtText
             enabled: root.isDirty
             T.DialogButtonBox.buttonRole: T.DialogButtonBox.ResetRole
             onClicked: root.reset()
         }
         MD.Button {
-            text: "Apply"
+            text: qsTr("Apply")
             mdState.type: MD.Enum.BtText
             enabled: root.isDirty
             T.DialogButtonBox.buttonRole: T.DialogButtonBox.ApplyRole

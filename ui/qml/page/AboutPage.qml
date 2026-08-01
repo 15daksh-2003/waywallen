@@ -30,7 +30,7 @@ MD.Page {
 
         MD.Text {
             Layout.alignment: Qt.AlignHCenter
-            text: "Version " + Qt.application.version
+            text: qsTr("Version %1").arg(Qt.application.version)
             typescale: MD.Token.typescale.body_medium
             color: MD.Token.color.on_surface_variant
         }
@@ -51,7 +51,7 @@ MD.Page {
 
         MD.Text {
             Layout.alignment: Qt.AlignHCenter
-            text: "Wallpaper Manager for Linux"
+            text: qsTr("Wallpaper Manager for Linux")
             typescale: MD.Token.typescale.body_large
             color: MD.Token.color.on_surface
             horizontalAlignment: Text.AlignHCenter
@@ -61,7 +61,7 @@ MD.Page {
 
         MD.Text {
             Layout.alignment: Qt.AlignHCenter
-            text: "Waywallen is a dynamic wallpaper solution for Linux desktops."
+            text: qsTr("Waywallen is a dynamic wallpaper solution for Linux desktops.")
             typescale: MD.Token.typescale.body_medium
             color: MD.Token.color.on_surface_variant
             horizontalAlignment: Text.AlignHCenter
@@ -80,19 +80,19 @@ MD.Page {
             spacing: 24
 
             MD.Button {
-                text: "GitHub"
+                text: qsTr("GitHub")
                 mdState.type: MD.Enum.BtText
                 onClicked: MD.Util.openUrlExternally("https://github.com/waywallen")
             }
 
             MD.Button {
-                text: "Issues"
+                text: qsTr("Issues")
                 mdState.type: MD.Enum.BtText
                 onClicked: MD.Util.openUrlExternally("https://github.com/waywallen/waywallen/issues")
             }
 
             MD.Button {
-                text: "Donate"
+                text: qsTr("Donate")
                 mdState.type: MD.Enum.BtText
                 onClicked: MD.Util.openUrlExternally("https://ko-fi.com/hypengw")
             }

@@ -76,7 +76,7 @@ Item {
                 anchors.right : parent.right
                 anchors.bottom: parent.bottom
                 anchors.bottomMargin: 6
-                text: root.wallpaper?.name || "Untitled"
+                text: root.wallpaper?.name || qsTr("Untitled")
                 typescale: MD.Token.typescale.title_small
                 color: "white"
                 horizontalAlignment: Text.AlignHCenter

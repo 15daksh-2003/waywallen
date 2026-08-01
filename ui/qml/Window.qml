@@ -48,10 +48,10 @@ MD.ApplicationWindow {
     readonly property bool isCompact: MD.MProp.size.isCompact
 
     readonly property var pageModel: [
-        { icon: MD.Token.icon.wallpaper, name: "Wallpapers" },
-        { icon: MD.Token.icon.explore, name: "Discover" },
-        { icon: MD.Token.icon.monitor, name: "Displays" },
-        { icon: MD.Token.icon.monitor_heart, name: "Status" }
+        { icon: MD.Token.icon.wallpaper, name: qsTr("Wallpapers") },
+        { icon: MD.Token.icon.explore, name: qsTr("Discover") },
+        { icon: MD.Token.icon.monitor, name: qsTr("Displays") },
+        { icon: MD.Token.icon.monitor_heart, name: qsTr("Status") }
     ]
 
 
@@ -102,7 +102,7 @@ MD.ApplicationWindow {
         target: W.Notify
         function onLibrariesAdded(paths) {
             const n = paths.length;
-            W.Action.toast(n === 1 ? "Library added" : (n + " libraries added"));
+            W.Action.toast(qsTr("%n library(s) added", "", n));
         }
         function onDisplayConnectionFailed(clientName, clientProtocolVersion, errorCode, reason) {
             const who = clientName.length > 0 ? clientName : qsTr("Display client");
@@ -210,7 +210,7 @@ MD.ApplicationWindow {
                                 expand: m_rail.useLarge
                                 checked: false
                                 icon.name: MD.Token.icon.extension
-                                text: "Plugins"
+                                text: qsTr("Plugins")
                                 onClicked: MD.Util.showPopup('waywallen.ui/PagePopup', {
                                     source: 'waywallen.ui/PluginManagePage'
                                 }, win)
@@ -221,7 +221,7 @@ MD.ApplicationWindow {
                                 expand: m_rail.useLarge
                                 checked: false
                                 icon.name: MD.Token.icon.settings
-                                text: "Settings"
+                                text: qsTr("Settings")
                                 onClicked: MD.Util.showPopup('waywallen.ui/PagePopup', {
                                     source: 'waywallen.ui/SettingsPage'
                                 }, win)
@@ -233,7 +233,7 @@ MD.ApplicationWindow {
                                 expand: true
                                 checked: false
                                 icon.name: MD.Token.icon.info
-                                text: "About"
+                                text: qsTr("About")
                                 onClicked: MD.Util.showPopup('waywallen.ui/PagePopup', {
                                     source: 'waywallen.ui/AboutPage'
                                 }, win)
