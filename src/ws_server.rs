@@ -2376,6 +2376,7 @@ async fn dispatch_inner(
                         width: 0,
                         height: 0,
                         web_url: String::new(),
+                        author: String::new(),
                     }));
                 }
             };
@@ -2389,6 +2390,7 @@ async fn dispatch_inner(
                     width: details.width.unwrap_or(0),
                     height: details.height.unwrap_or(0),
                     web_url: details.web_url,
+                    author: details.author,
                 }),
                 Err(e) => Res::RemoteDetails(pb::RemoteDetailsResponse {
                     description: String::new(),
@@ -2398,6 +2400,7 @@ async fn dispatch_inner(
                     width: 0,
                     height: 0,
                     web_url: String::new(),
+                    author: String::new(),
                 }),
             }
         }

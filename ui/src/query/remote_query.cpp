@@ -320,6 +320,7 @@ void RemoteDetailsQuery::setItemId(const QString& v) {
         Q_EMIT itemIdChanged();
     }
 }
+auto RemoteDetailsQuery::author() const -> const QString& { return m_author; }
 auto RemoteDetailsQuery::description() const -> const QString& { return m_description; }
 auto RemoteDetailsQuery::size() const -> const QString& { return m_size; }
 auto RemoteDetailsQuery::width() const -> int { return m_width; }
@@ -328,6 +329,7 @@ auto RemoteDetailsQuery::tags() const -> const QStringList& { return m_tags; }
 auto RemoteDetailsQuery::webUrl() const -> const QString& { return m_web_url; }
 
 void RemoteDetailsQuery::reload() {
+    m_author.clear();
     m_description.clear();
     m_size.clear();
     m_width  = 0;
@@ -353,6 +355,7 @@ void RemoteDetailsQuery::reload() {
 
         self->inspect_set(result, [self](const proto::Response& rsp) {
             const auto& dr      = rsp.remoteDetails();
+            self->m_author      = dr.author();
             self->m_description = dr.description();
             self->m_size        = dr.size();
             self->m_width       = static_cast<int>(dr.width());

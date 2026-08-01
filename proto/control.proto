@@ -875,6 +875,9 @@ message RemoteDetailsResponse {
   uint32 width = 5;
   uint32 height = 6;
   string web_url = 7;
+  // Empty unless the source knows an author it could not already put on the
+  // RemoteItem, e.g. one only its per-item endpoint reports.
+  string author = 8;
 }
 
 enum RemoteDownloadState {

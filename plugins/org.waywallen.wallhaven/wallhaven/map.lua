@@ -24,6 +24,16 @@ local function rating(purity)
     return "Everyone"
 end
 
+-- Only /w/<id> carries an uploader; the search listing has no such field, so a
+-- name can be had for a wallpaper that has been opened and for no other.
+local function uploader_name(detail)
+    local uploader = detail.uploader
+    if type(uploader) ~= "table" then
+        return ""
+    end
+    return uploader.username or ""
+end
+
 local function title(item)
     if item.id and item.id ~= "" then
         return "Wallhaven " .. item.id
@@ -49,6 +59,7 @@ end
 function M.details(detail)
     local description = detail.source or detail.url or ""
     return {
+        author = uploader_name(detail),
         description = description,
         size = tostring(detail.file_size or ""),
         width = detail.dimension_x,
