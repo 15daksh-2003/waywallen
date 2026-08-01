@@ -8,6 +8,7 @@ struct Args {
     input: PathBuf,
     out_rust: Option<PathBuf>,
     out_c_header: Option<PathBuf>,
+    out_c_types_header: Option<PathBuf>,
     out_c_source: Option<PathBuf>,
 }
 
@@ -15,6 +16,7 @@ fn parse_args() -> Result<Args, String> {
     let mut input = None;
     let mut out_rust = None;
     let mut out_c_header = None;
+    let mut out_c_types_header = None;
     let mut out_c_source = None;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -22,11 +24,13 @@ fn parse_args() -> Result<Args, String> {
             "--in" => input = it.next().map(PathBuf::from),
             "--out-rust" => out_rust = it.next().map(PathBuf::from),
             "--out-c-header" => out_c_header = it.next().map(PathBuf::from),
+            "--out-c-types-header" => out_c_types_header = it.next().map(PathBuf::from),
             "--out-c-source" => out_c_source = it.next().map(PathBuf::from),
             "-h" | "--help" => {
                 eprintln!(
                     "usage: wayproto-gen --in <xml> \
-                    [--out-rust <file>] [--out-c-header <file>] [--out-c-source <file>]"
+                    [--out-rust <file>] [--out-c-header <file>] \
+                    [--out-c-types-header <file>] [--out-c-source <file>]"
                 );
                 std::process::exit(0);
             }
@@ -38,6 +42,7 @@ fn parse_args() -> Result<Args, String> {
         input,
         out_rust,
         out_c_header,
+        out_c_types_header,
         out_c_source,
     })
 }
@@ -70,6 +75,12 @@ fn run() -> Result<(), String> {
         let code = codegen_c::emit_header(&proto);
         write_out(path, &code)?;
         eprintln!("wayproto-gen: wrote c header {}", path.display());
+    }
+
+    if let Some(path) = &args.out_c_types_header {
+        let code = codegen_c::emit_types_header(&proto);
+        write_out(path, &code)?;
+        eprintln!("wayproto-gen: wrote c types header {}", path.display());
     }
 
     if let Some(path) = &args.out_c_source {

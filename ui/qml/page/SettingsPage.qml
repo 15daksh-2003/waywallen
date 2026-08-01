@@ -169,6 +169,7 @@ MD.Page {
     }
 
     property int autoReplayRevision: 0
+    property int pauseEffectRevision: 0
 
     readonly property var kAutoReplayRows: [
         { key: "anyWindow",       label: qsTr("Any window") },
@@ -214,6 +215,7 @@ MD.Page {
     function _defaultGlobalPageSettings() {
         return {
             autoReplay: root._defaultAutoReplay(),
+            pauseEffect: root._defaultPauseEffect(),
             queueMode: "sequential",
             rotationSecs: 0,
             audioFadeMs: 500,
@@ -238,6 +240,7 @@ MD.Page {
         W.Global.networkCacheMaximumMiB = 1024;
         W.Global.setThemeMode("system");
         root.autoReplayRevision += 1;
+        root.pauseEffectRevision += 1;
         setQ.global = nextGlobal;
         setQ.plugins = getQ.plugins;
         setQ.reload();
@@ -248,6 +251,7 @@ MD.Page {
             return "";
         return JSON.stringify({
             autoReplay: root._normalizedAutoReplay(g.autoReplay || ({})),
+            pauseEffect: root._normalizedPauseEffect(g.pauseEffect || ({})),
             queueMode: g.queueMode ?? "sequential",
             rotationSecs: Number(g.rotationSecs ?? 0),
             audioFadeMs: Number(g.audioFadeMs ?? 500),
@@ -262,6 +266,34 @@ MD.Page {
 
     function _normalizedAutoReplay(policy) {
         return Object.assign(root._defaultAutoReplay(), policy || ({}));
+    }
+
+    function _defaultPauseEffect() {
+        return {
+            kind: WC.PauseEffectKind.PAUSE_EFFECT_KIND_NONE,
+            blur: { radius: 30 }
+        };
+    }
+
+    function _normalizedPauseEffect(config) {
+        const normalized = Object.assign(root._defaultPauseEffect(), config || ({}));
+        normalized.blur = Object.assign({ radius: 30 }, config?.blur || ({}));
+        return normalized;
+    }
+
+    function _pauseEffect() {
+        root.pauseEffectRevision;
+        const g = root._currentGlobal();
+        return root._normalizedPauseEffect(g?.pauseEffect || ({}));
+    }
+
+    function _mutPauseEffect(fn) {
+        root._mut(g => {
+            const config = root._normalizedPauseEffect(g.pauseEffect || ({}));
+            fn(config);
+            g.pauseEffect = config;
+        });
+        root.pauseEffectRevision += 1;
     }
 
     function _rendererAudioEnabled(globalSettings) {
@@ -516,6 +548,81 @@ MD.Page {
                                 root.kAutoActions,
                                 root._autoReplay()[autoReplayItem.modelData.key] ?? 0)
                         }
+                    }
+                }
+            }
+
+            SettingHeader { text: qsTr("Effect") }
+
+            SettingItem {
+                first: true
+                last: false
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Blur while paused")
+                    }
+
+                    MD.Switch {
+                        id: m_pause_effect_enabled
+                        onToggled: root._mutPauseEffect(config => {
+                            config.kind = checked
+                                ? WC.PauseEffectKind.PAUSE_EFFECT_KIND_BLUR
+                                : WC.PauseEffectKind.PAUSE_EFFECT_KIND_NONE;
+                        })
+                    }
+                    Binding {
+                        target: m_pause_effect_enabled
+                        property: "checked"
+                        value: root._pauseEffect().kind
+                            === WC.PauseEffectKind.PAUSE_EFFECT_KIND_BLUR
+                    }
+                }
+            }
+
+            SettingItem {
+                first: false
+                last: true
+                enabled: root._pauseEffect().kind
+                    === WC.PauseEffectKind.PAUSE_EFFECT_KIND_BLUR
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Blur radius")
+                    }
+
+                    W.ValueSlider {
+                        id: m_pause_effect_blur_radius
+                        Layout.preferredWidth: 220
+                        from: 1
+                        to: 64
+                        stepSize: 1
+                        snapMode: T.Slider.SnapAlways
+                        maxVisibleStops: 8
+                        valueText: Math.round(value).toString()
+                        valueMaxText: "64"
+                        onMoved: root._mutPauseEffect(config => {
+                            config.blur.radius = Math.round(value);
+                        })
+                    }
+                    Binding {
+                        target: m_pause_effect_blur_radius
+                        property: "value"
+                        value: root._pauseEffect().blur.radius
+                    }
+
+                    MD.Text {
+                        text: qsTr("px")
+                        typescale: MD.Token.typescale.body_medium
+                        color: MD.Token.color.on_surface_variant
                     }
                 }
             }

@@ -89,6 +89,7 @@ message Request {
     QrLoginCancelRequest      qr_login_cancel = 72;
     RemoteSettingsPatchRequest remote_settings_patch = 73;
     WallpaperUnsubscribeRequest wallpaper_unsubscribe = 74;
+    GlobalPauseToggleRequest    global_pause_toggle = 75;
   }
 }
 
@@ -165,6 +166,7 @@ message Response {
     QrLoginCancelResponse      qr_login_cancel = 72;
     Empty                      remote_settings_patch = 73;
     WallpaperUnsubscribeResponse wallpaper_unsubscribe = 74;
+    GlobalPauseToggleResponse  global_pause_toggle = 75;
   }
 }
 
@@ -302,6 +304,8 @@ message RendererInstance {
 
 message RendererPlayRequest  { string renderer_id = 1; }
 message RendererPauseRequest { string renderer_id = 1; }
+message GlobalPauseToggleRequest {}
+message GlobalPauseToggleResponse { bool paused = 1; }
 
 message RendererMouseRequest {
   string renderer_id = 1;
@@ -1215,6 +1219,8 @@ message GlobalRendererSettings {
 }
 
 message GlobalSettings {
+  reserved 23;
+  reserved "background_blur";
   // Tag 1 / 2 used to be `default_width`/`default_height`; replaced by
   // `target_extent` + `render_size_policy` in v7. Both were dropped in
   // the post-extent refactor — render size is now a per-renderer
@@ -1280,6 +1286,9 @@ message GlobalSettings {
 
   // Allow audio-response wallpapers to capture the system output spectrum.
   bool audio_capture_enabled = 22;
+
+  // Presentation effect applied while a display's bound renderer is paused.
+  PauseEffectConfig pause_effect = 24;
 }
 
 enum AutoAction {
@@ -1297,6 +1306,20 @@ message AutoReplayPolicy {
   AutoAction fullscreen = 13;
   AutoAction session_locked = 14;
   AutoAction session_inactive = 15;
+}
+
+enum PauseEffectKind {
+  PAUSE_EFFECT_KIND_NONE = 0;
+  PAUSE_EFFECT_KIND_BLUR = 1;
+}
+
+message BlurEffectConfig {
+  uint32 radius = 1;
+}
+
+message PauseEffectConfig {
+  PauseEffectKind kind = 1;
+  BlurEffectConfig blur = 2;
 }
 
 // One plugin's settings table. Wire format is string→string for

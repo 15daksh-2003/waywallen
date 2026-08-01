@@ -99,6 +99,7 @@ set(SOURCES_NO_MOC
   src/query/playlist_query.cpp
   src/query/qr_login_query.cpp
   src/query/plugin_action_query.cpp
+  src/query/global_pause_query.cpp
   src/thumb/service.cpp
 )
 
@@ -140,6 +141,7 @@ set(MOC_SOURCE_FILES
   src/query/playlist_query.cppm
   src/query/qr_login_query.cppm
   src/query/plugin_action_query.cppm
+  src/query/global_pause_query.cppm
   src/thumb/service.cppm
 )
 set(MODULES

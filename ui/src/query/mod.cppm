@@ -16,3 +16,4 @@ export import :query.remote;
 export import :query.playlist;
 export import :query.qr_login;
 export import :query.plugin_action;
+export import :query.global_pause;

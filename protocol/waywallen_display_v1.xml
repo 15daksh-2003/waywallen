@@ -20,6 +20,7 @@
 
     body: positional args, 4-byte aligned
 
+      bool        = canonical u32 LE (0=false, 1=true; other values invalid)
       u32/i32/f32 = 4 bytes LE
       u64/i64/f64 = 8 bytes LE
       string      = [u32 len_including_NUL] [utf8...] [NUL] [pad to 4]
@@ -133,7 +134,7 @@
       that never send `window_state` keep working (daemon defaults
       that display to "no window-state condition met").
 
-  v8 (release fence arm acknowledgement):
+  v8 (release fence arm acknowledgement + presentation configuration):
     - New request `frame_armed` (opcode 13): consumer→daemon confirmation
       that the release syncobj for one frame now contains either a real
       pending GPU fence or a signaled fence.
@@ -141,7 +142,14 @@
       submission that attaches the fence succeeds. On disconnect the daemon
       may safely skip an unacknowledged syncobj only when the public DRM wait
       API confirms that it still has no fence.
-    - v6/v7 clients remain accepted through the conservative legacy path.
+    - The daemon and client support range is exactly v8. Older clients are
+      rejected during `hello`, before display registration or GPU resources.
+    - `register_display` carries presentation capabilities. The daemon
+      returns the complete persistent/dynamic presentation snapshot in
+      `display_accepted`, before the connection becomes ready.
+    - `set_presentation_config` replaces the persistent snapshot atomically;
+      `set_presentation_dynamic_config` updates only high-frequency state.
+      Both events reuse the named config structures defined below.
 
   Informational features (welcome.features, advisory only in v3+):
     "explicit_sync_fd"           — acquire fence as dma_fence sync_file.
@@ -150,6 +158,48 @@
   Optional features (reserved): "color_management", "hdr"
 -->
 <protocol name="waywallen_display" version="8">
+
+  <!-- ==================================================================
+       SHARED PRESENTATION CONFIGURATION
+       ================================================================== -->
+
+  <struct name="presentation_capabilities">
+    <field name="flags" type="u32"/>
+  </struct>
+
+  <enum name="pause_effect_kind">
+    <entry name="none" value="0"/>
+    <entry name="blur" value="1"/>
+  </enum>
+
+  <struct name="blur_effect_config">
+    <field name="radius" type="u32"/>
+  </struct>
+
+  <struct name="pause_effect_config">
+    <field name="kind" type="pause_effect_kind"/>
+    <field name="blur" type="blur_effect_config"/>
+  </struct>
+
+  <struct name="pause_effect_dynamic_config">
+    <field name="active" type="bool"/>
+  </struct>
+
+  <struct name="presentation_config">
+    <field name="generation" type="u64"/>
+    <field name="pause_effect" type="pause_effect_config"/>
+  </struct>
+
+  <struct name="presentation_dynamic_config">
+    <field name="generation" type="u64"/>
+    <field name="config_generation" type="u64"/>
+    <field name="pause_effect" type="pause_effect_dynamic_config"/>
+  </struct>
+
+  <struct name="presentation_snapshot">
+    <field name="config" type="presentation_config"/>
+    <field name="dynamic_config" type="presentation_dynamic_config"/>
+  </struct>
 
   <!-- ==================================================================
        REQUESTS  (display -> manager)
@@ -216,6 +266,7 @@
     <arg name="drm_render_major" type="u32"/>
     <arg name="drm_render_minor" type="u32"/>
     <arg name="properties" type="kv_list"/>
+    <arg name="presentation_caps" type="presentation_capabilities"/>
   </request>
 
   <!--
@@ -444,6 +495,7 @@
   -->
   <event name="display_accepted" opcode="2">
     <arg name="display_id" type="u64"/>
+    <arg name="presentation" type="presentation_snapshot"/>
   </event>
 
   <!--
@@ -573,6 +625,22 @@
   <event name="error" opcode="7">
     <arg name="code" type="u32"/>
     <arg name="message" type="string"/>
+  </event>
+
+  <!--
+    Replace persistent presentation configuration and its current dynamic
+    result as one atomic snapshot. Independent of buffer/layout set_config.
+  -->
+  <event name="set_presentation_config" opcode="8">
+    <arg name="presentation" type="presentation_snapshot"/>
+  </event>
+
+  <!--
+    High-frequency presentation update. `config_generation` must match the
+    currently installed presentation_config generation.
+  -->
+  <event name="set_presentation_dynamic_config" opcode="9">
+    <arg name="dynamic_config" type="presentation_dynamic_config"/>
   </event>
 
 </protocol>

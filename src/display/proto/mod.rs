@@ -9,7 +9,11 @@ pub use codec::{
     recv_event, recv_request, send_event, send_request, CodecError, CodecResult, MAX_BODY_BYTES,
     MAX_FDS_PER_MSG,
 };
-pub use generated::{opcode, DecodeError, Event, Rect, Request, PROTOCOL_NAME, PROTOCOL_VERSION};
+pub use generated::{
+    opcode, BlurEffectConfig, DecodeError, Event, PauseEffectConfig, PauseEffectDynamicConfig,
+    PauseEffectKind, PresentationCapabilities, PresentationConfig, PresentationDynamicConfig,
+    PresentationSnapshot, Rect, Request, PROTOCOL_NAME, PROTOCOL_VERSION,
+};
 
 /// Wire-level `error.code` values. Kept in lockstep with the table in
 /// `protocol/waywallen_display_v1.xml`'s header comment.
@@ -52,6 +56,7 @@ mod tests {
                 ("scale".to_string(), "1.0".to_string()),
                 ("hdr".to_string(), "false".to_string()),
             ],
+            presentation_caps: PresentationCapabilities { flags: 1 },
         });
     }
 
@@ -99,6 +104,49 @@ mod tests {
     }
 
     #[test]
+    fn presentation_snapshot_roundtrip_and_noncanonical_bool_rejected() {
+        let dynamic_config = PresentationDynamicConfig {
+            generation: 5,
+            config_generation: 3,
+            pause_effect: PauseEffectDynamicConfig { active: true },
+        };
+        let accepted = Event::DisplayAccepted {
+            display_id: 9,
+            presentation: PresentationSnapshot {
+                config: PresentationConfig {
+                    generation: 3,
+                    pause_effect: PauseEffectConfig {
+                        kind: PauseEffectKind::Blur,
+                        blur: BlurEffectConfig { radius: 40 },
+                    },
+                },
+                dynamic_config,
+            },
+        };
+        roundtrip_evt(accepted.clone());
+
+        let mut accepted_buf = Vec::new();
+        accepted.encode(&mut accepted_buf);
+        accepted_buf[16..20].copy_from_slice(&7_u32.to_le_bytes());
+        assert!(matches!(
+            Event::decode(accepted.opcode(), &accepted_buf),
+            Err(DecodeError::UnknownEnumValue {
+                enum_name: "pause_effect_kind",
+                value: 7
+            })
+        ));
+
+        let event = Event::SetPresentationDynamicConfig { dynamic_config };
+        let mut buf = Vec::new();
+        event.encode(&mut buf);
+        buf[16..20].copy_from_slice(&2_u32.to_le_bytes());
+        assert!(matches!(
+            Event::decode(event.opcode(), &buf),
+            Err(DecodeError::BadBool)
+        ));
+    }
+
+    #[test]
     fn event_frame_ready_fds() {
         let evt = Event::FrameReady {
             buffer_generation: 1,
@@ -130,6 +178,8 @@ mod tests {
         assert_eq!(opcode::event::BIND_BUFFERS, 3);
         assert_eq!(opcode::event::FRAME_READY, 5);
         assert_eq!(opcode::event::ERROR, 7);
+        assert_eq!(opcode::event::SET_PRESENTATION_CONFIG, 8);
+        assert_eq!(opcode::event::SET_PRESENTATION_DYNAMIC_CONFIG, 9);
     }
 
     #[test]

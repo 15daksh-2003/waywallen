@@ -671,6 +671,47 @@ fn auto_replay_from_pb(p: &pb::AutoReplayPolicy) -> crate::settings::AutoReplayP
     }
 }
 
+fn pause_effect_kind_to_pb(kind: crate::settings::PauseEffectKind) -> pb::PauseEffectKind {
+    match kind {
+        crate::settings::PauseEffectKind::None => pb::PauseEffectKind::None,
+        crate::settings::PauseEffectKind::Blur => pb::PauseEffectKind::Blur,
+    }
+}
+
+fn pause_effect_kind_from_pb(value: i32) -> crate::settings::PauseEffectKind {
+    match pb::PauseEffectKind::try_from(value).unwrap_or_default() {
+        pb::PauseEffectKind::None => crate::settings::PauseEffectKind::None,
+        pb::PauseEffectKind::Blur => crate::settings::PauseEffectKind::Blur,
+    }
+}
+
+fn pause_effect_to_pb(config: crate::settings::PauseEffectConfig) -> pb::PauseEffectConfig {
+    let config = config.effective();
+    pb::PauseEffectConfig {
+        kind: pause_effect_kind_to_pb(config.kind) as i32,
+        blur: Some(pb::BlurEffectConfig {
+            radius: config.blur.radius,
+        }),
+    }
+}
+
+fn pause_effect_from_pb(p: &pb::PauseEffectConfig) -> crate::settings::PauseEffectConfig {
+    let radius = p
+        .blur
+        .as_ref()
+        .map(|blur| blur.radius)
+        .unwrap_or(crate::settings::DEFAULT_BLUR_EFFECT_RADIUS);
+    crate::settings::PauseEffectConfig {
+        kind: pause_effect_kind_from_pb(p.kind),
+        blur: crate::settings::BlurEffectConfig {
+            radius: radius.clamp(
+                crate::settings::MIN_BLUR_EFFECT_RADIUS,
+                crate::settings::MAX_BLUR_EFFECT_RADIUS,
+            ),
+        },
+    }
+}
+
 fn global_to_pb(g: &crate::settings::GlobalSettings) -> pb::GlobalSettings {
     let (wallpaper_filters, wallpaper_filter_logics) = g.wallpaper_filter.clone().to_pb();
     let wallpaper_sorts = WallpaperSortRuleState::vec_to_pb(&g.wallpaper_sorts);
@@ -704,6 +745,7 @@ fn global_to_pb(g: &crate::settings::GlobalSettings) -> pb::GlobalSettings {
             location_set: true,
         }),
         auto_replay: Some(auto_replay_to_pb(&g.effective_auto_replay())),
+        pause_effect: Some(pause_effect_to_pb(g.pause_effect)),
         queue_mode: g.queue_mode.clone(),
         rotation_secs: g.rotation_secs,
         audio_fade_ms: g.effective_audio_fade_ms(),
@@ -1375,6 +1417,11 @@ async fn dispatch_inner(
                 .send_control(&r.renderer_id, ControlMsg::Pause { fade_ms })
                 .await?;
             Res::RendererPause(pb::Empty {})
+        }
+
+        Req::GlobalPauseToggle(_) => {
+            let paused = control::toggle_pause_all(state).await?;
+            Res::GlobalPauseToggle(pb::GlobalPauseToggleResponse { paused })
         }
 
         Req::RendererMouse(r) => {
@@ -2656,6 +2703,8 @@ async fn dispatch_inner(
             let previous_settings = state.settings.snapshot();
             let previous_filter = previous_settings.global.wallpaper_filter.clone();
             let prev_layout = previous_settings.global.layout.clone();
+            let prev_auto_replay = previous_settings.global.auto_replay;
+            let prev_pause_effect = previous_settings.global.pause_effect;
             let prev_queue_mode = previous_settings.global.queue_mode.clone();
             let prev_rotation_secs = previous_settings.global.rotation_secs;
             state.settings.update(|s| {
@@ -2687,6 +2736,9 @@ async fn dispatch_inner(
                     }
                     if let Some(policy) = g.auto_replay.as_ref() {
                         s.global.auto_replay = Some(auto_replay_from_pb(policy));
+                    }
+                    if let Some(config) = g.pause_effect.as_ref() {
+                        s.global.pause_effect = pause_effect_from_pb(config);
                     }
                     if !g.queue_mode.is_empty() {
                         s.global.queue_mode = g.queue_mode.clone();
@@ -2732,6 +2784,12 @@ async fn dispatch_inner(
                 // effective_layout values.
                 let snap = state.router.snapshot_displays().await;
                 state.router.emit_displays_replace_for_settings_change(snap);
+            }
+            if current_settings.global.auto_replay != prev_auto_replay {
+                state.router.resync_auto_replay().await;
+            }
+            if current_settings.global.pause_effect != prev_pause_effect {
+                state.router.resync_presentation_configs().await;
             }
             // Hot-apply queue mode and rotation interval; auto replay re-reads
             // settings on every display state event.
@@ -3090,6 +3148,40 @@ fn entry_to_pb(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pause_effect_settings_round_trip_and_clamp() {
+        use crate::settings::{BlurEffectConfig, PauseEffectConfig, PauseEffectKind};
+
+        for kind in [PauseEffectKind::None, PauseEffectKind::Blur] {
+            let config = PauseEffectConfig {
+                kind,
+                blur: BlurEffectConfig { radius: 48 },
+            };
+            assert_eq!(pause_effect_from_pb(&pause_effect_to_pb(config)), config);
+        }
+
+        let clamped = pause_effect_from_pb(&pb::PauseEffectConfig {
+            kind: pb::PauseEffectKind::Blur as i32,
+            blur: Some(pb::BlurEffectConfig { radius: u32::MAX }),
+        });
+        assert_eq!(clamped.blur.radius, crate::settings::MAX_BLUR_EFFECT_RADIUS);
+
+        let defaulted = pause_effect_from_pb(&pb::PauseEffectConfig {
+            kind: pb::PauseEffectKind::Blur as i32,
+            blur: None,
+        });
+        assert_eq!(
+            defaulted.blur.radius,
+            crate::settings::DEFAULT_BLUR_EFFECT_RADIUS
+        );
+
+        let minimum = pause_effect_from_pb(&pb::PauseEffectConfig {
+            kind: pb::PauseEffectKind::Blur as i32,
+            blur: Some(pb::BlurEffectConfig { radius: 0 }),
+        });
+        assert_eq!(minimum.blur.radius, crate::settings::MIN_BLUR_EFFECT_RADIUS);
+    }
 
     fn health_response(request_id: u64) -> pb::Response {
         ok_response(

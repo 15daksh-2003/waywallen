@@ -13,7 +13,8 @@ mod handshake {
 
     use waywallen::display::endpoint;
     use waywallen::display::proto::{
-        codec, error_code, Event, Request, PROTOCOL_NAME, PROTOCOL_VERSION,
+        codec, error_code, Event, PauseEffectKind, PresentationCapabilities, Request,
+        PROTOCOL_NAME, PROTOCOL_VERSION,
     };
     use waywallen::events::GlobalEvent;
     use waywallen::renderer_manager::RendererManager;
@@ -98,6 +99,7 @@ mod handshake {
                 drm_render_major: 0,
                 drm_render_minor: 0,
                 properties: Vec::new(),
+                presentation_caps: PresentationCapabilities { flags: 0 },
             },
             &[],
         )
@@ -106,7 +108,15 @@ mod handshake {
         let (accepted, _fds) = codec::recv_event(&stream)
             .map_err(|e| anyhow::anyhow!("recv display_accepted: {e}"))?;
         match accepted {
-            Event::DisplayAccepted { display_id } => Ok(display_id),
+            Event::DisplayAccepted {
+                display_id,
+                presentation,
+            } => {
+                assert_eq!(presentation.config.generation, 1);
+                assert_eq!(presentation.config.pause_effect.kind, PauseEffectKind::None);
+                assert!(!presentation.dynamic_config.pause_effect.active);
+                Ok(display_id)
+            }
             other => panic!("expected display_accepted, got opcode {}", other.opcode()),
         }
     }
@@ -163,25 +173,10 @@ mod handshake {
         let _ = std::fs::remove_file(&sock);
     }
 
-    #[tokio::test]
-    async fn accepts_legacy_protocol_versions() {
-        let (sock, server_task, _events_rx) =
-            start_display_endpoint("display-legacy-versions").await;
-
-        for version in 6..PROTOCOL_VERSION {
-            let sock_for_client = sock.clone();
-            let display_id = tokio::task::spawn_blocking(move || {
-                drive_display_registration(&sock_for_client, version)
-            })
-            .await
-            .expect("client join")
-            .expect("legacy client flow");
-            assert!(display_id >= 1, "display_id={display_id}");
-        }
-
-        assert!(!server_task.is_finished(), "server task exited prematurely");
-        server_task.abort();
-        let _ = std::fs::remove_file(&sock);
+    #[test]
+    fn supports_only_current_protocol_version() {
+        assert_eq!(endpoint::MIN_SUPPORTED_CLIENT_VERSION, PROTOCOL_VERSION);
+        assert_eq!(endpoint::MAX_SUPPORTED_CLIENT_VERSION, PROTOCOL_VERSION);
     }
 
     #[tokio::test]
@@ -226,10 +221,12 @@ mod handshake {
         let (sock, server_task, mut events_rx) =
             start_display_endpoint("display-bad-version").await;
 
-        let mut probes = vec![PROTOCOL_VERSION.saturating_add(99)];
+        let mut probes = vec![6, 7, PROTOCOL_VERSION.saturating_add(99)];
         if let Some(low_probe) = endpoint::MIN_SUPPORTED_CLIENT_VERSION.checked_sub(1) {
             probes.push(low_probe);
         }
+        probes.sort_unstable();
+        probes.dedup();
 
         for probe in probes {
             let sock_for_client = sock.clone();
@@ -276,7 +273,9 @@ mod sync_fd_fanout {
     use std::time::Duration;
 
     use waywallen::display::endpoint;
-    use waywallen::display::proto::{codec, Event, Request, PROTOCOL_NAME, PROTOCOL_VERSION};
+    use waywallen::display::proto::{
+        codec, Event, PresentationCapabilities, Request, PROTOCOL_NAME, PROTOCOL_VERSION,
+    };
     use waywallen::renderer_manager::{RendererManager, SpawnRequest};
     use waywallen::routing::Router;
 
@@ -312,6 +311,7 @@ mod sync_fd_fanout {
                 drm_render_major: 0,
                 drm_render_minor: 0,
                 properties: Vec::new(),
+                presentation_caps: PresentationCapabilities { flags: 0 },
             },
             &[],
         )?;
@@ -463,7 +463,9 @@ mod sync_fd_single {
     use std::time::Duration;
 
     use waywallen::display::endpoint;
-    use waywallen::display::proto::{codec, Event, Request, PROTOCOL_NAME, PROTOCOL_VERSION};
+    use waywallen::display::proto::{
+        codec, Event, PresentationCapabilities, Request, PROTOCOL_NAME, PROTOCOL_VERSION,
+    };
     use waywallen::renderer_manager::{RendererManager, SpawnRequest};
     use waywallen::routing::Router;
 
@@ -563,6 +565,7 @@ mod sync_fd_single {
                     drm_render_major: 0,
                     drm_render_minor: 0,
                     properties: Vec::new(),
+                    presentation_caps: PresentationCapabilities { flags: 0 },
                 },
                 &[],
             )?;

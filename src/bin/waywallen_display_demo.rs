@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use waywallen::display::proto::{codec, Event, Request, PROTOCOL_NAME, PROTOCOL_VERSION};
+use waywallen::display::proto::{
+    codec, Event, PresentationCapabilities, Request, PROTOCOL_NAME, PROTOCOL_VERSION,
+};
 
 #[derive(Debug)]
 struct Args {
@@ -162,6 +164,7 @@ fn run_session(sock_path: &Path, args: &Args) -> Result<()> {
             drm_render_major: 0,
             drm_render_minor: 0,
             properties: Vec::new(),
+            presentation_caps: PresentationCapabilities { flags: 0 },
         },
         &[],
     )
@@ -169,7 +172,7 @@ fn run_session(sock_path: &Path, args: &Args) -> Result<()> {
 
     let display_id =
         match codec::recv_event(&stream).map_err(|e| anyhow!("recv display_accepted: {e}"))? {
-            (Event::DisplayAccepted { display_id }, _) => display_id,
+            (Event::DisplayAccepted { display_id, .. }, _) => display_id,
             (other, _) => {
                 return Err(anyhow!(
                     "expected display_accepted, got opcode {}",

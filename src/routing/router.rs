@@ -26,7 +26,10 @@ use crate::renderer_manager::{
     DrmNode, PublishedPool, RendererHandle, RendererId, RendererManager,
 };
 use crate::scheduler::{DisplayId, DisplayInfo, ProjectedConfig};
-use crate::settings::{AutoAction, AutoReplayPolicy, ResolvedLayout, SettingsStore};
+use crate::settings::{
+    AutoAction, AutoReplayPolicy, PauseEffectConfig as StoredPauseEffectConfig, PauseEffectKind,
+    ResolvedLayout, SettingsStore,
+};
 use crate::wallpaper::properties::WallpaperLayoutOverride;
 
 use super::auto_replay;
@@ -45,6 +48,10 @@ pub enum DisplayOutEvent {
     Unbind { buffer_generation: u64 },
     /// Update composition geometry / clear color.
     SetConfig(ProjectedConfig),
+    /// Replace persistent presentation config and its current dynamic result.
+    SetPresentationConfig(PresentationSnapshot),
+    /// Update high-frequency presentation state for the current config.
+    SetPresentationDynamicConfig(PresentationDynamicConfig),
     /// A frame is ready on `renderer` at `buffer_index` for the named
     /// generation. The endpoint pulls the matching sync_fd from the handle.
     Frame {
@@ -55,6 +62,43 @@ pub enum DisplayOutEvent {
         consumption: DisplayConsumptionPermit,
         member: Option<crate::sync::FrameConsumerMember>,
     },
+}
+
+pub const PRESENTATION_CAP_BLUR: u32 = 1 << 0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlurEffectConfig {
+    pub radius: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PauseEffectConfig {
+    pub kind: PauseEffectKind,
+    pub blur: BlurEffectConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PauseEffectDynamicConfig {
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentationConfig {
+    pub generation: u64,
+    pub pause_effect: PauseEffectConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentationDynamicConfig {
+    pub generation: u64,
+    pub config_generation: u64,
+    pub pause_effect: PauseEffectDynamicConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentationSnapshot {
+    pub config: PresentationConfig,
+    pub dynamic_config: PresentationDynamicConfig,
 }
 
 #[derive(Clone)]
@@ -139,10 +183,10 @@ pub struct DisplayRegistration {
     /// on (i.e. the GPU backing the consumer's EGL/Vulkan context).
     pub gpu: DrmNode,
     pub properties: Vec<(String, String)>,
+    pub presentation_caps: u32,
     /// Modifier-negotiation capabilities the consumer declared in
     /// its `consumer_caps` request.
     pub consumer_caps: Option<crate::dma::negotiate::PeerCaps>,
-    pub protocol_version: u32,
 }
 
 /// Returned from `register_display` — the assigned id plus the rx end
@@ -150,6 +194,7 @@ pub struct DisplayRegistration {
 pub struct DisplayHandle {
     pub id: DisplayId,
     pub session_id: crate::sync::DisplaySessionId,
+    pub presentation: PresentationSnapshot,
     pub rx: mpsc::UnboundedReceiver<DisplayOutEvent>,
 }
 
@@ -320,6 +365,8 @@ struct DisplayState {
     /// Consumer's modifier-negotiation caps. `None` until the
     /// consumer_caps request is received.
     consumer_caps: Option<crate::dma::negotiate::PeerCaps>,
+    presentation_caps: u32,
+    presentation: PresentationSnapshot,
     /// Per-display auto replay machine driven by display facts and
     /// the resolved rule policy.
     auto_replay: auto_replay::State,
@@ -601,6 +648,45 @@ impl Router {
             }
         }
         s.resolved_auto_replay(&info.name)
+    }
+
+    fn resolved_pause_effect(&self, presentation_caps: u32) -> PauseEffectConfig {
+        let stored = self
+            .settings
+            .get()
+            .map(|settings| settings.global().pause_effect)
+            .unwrap_or_else(StoredPauseEffectConfig::default)
+            .effective();
+        let kind = if stored.kind == PauseEffectKind::Blur
+            && presentation_caps & PRESENTATION_CAP_BLUR != 0
+        {
+            PauseEffectKind::Blur
+        } else {
+            PauseEffectKind::None
+        };
+        PauseEffectConfig {
+            kind,
+            blur: BlurEffectConfig {
+                radius: if kind == PauseEffectKind::Blur {
+                    stored.blur.radius
+                } else {
+                    crate::settings::DEFAULT_BLUR_EFFECT_RADIUS
+                },
+            },
+        }
+    }
+
+    fn pause_effect_active(inner: &Inner, display: &DisplayState, kind: PauseEffectKind) -> bool {
+        if kind == PauseEffectKind::None {
+            return false;
+        }
+        let Some(binding) = display.binding.as_ref() else {
+            return false;
+        };
+        inner
+            .renderer_states
+            .get(&binding.renderer.id)
+            .is_some_and(|status| *status == PausedRendererStatus::Paused)
     }
 
     fn resolved_audio_fade_ms(&self) -> u32 {
@@ -1040,7 +1126,7 @@ impl Router {
             }
         }
         let (tx, rx) = mpsc::unbounded_channel();
-        let (display_id, display_session_id, auto_linked) = {
+        let (display_id, display_session_id, auto_linked, initial_presentation) = {
             let mut inner = self.inner.lock().await;
             inner.next_display_id += 1;
             inner.next_display_session_id = inner
@@ -1059,6 +1145,18 @@ impl Router {
                 properties: reg.properties,
                 bound: false,
             };
+            let pause_effect = self.resolved_pause_effect(reg.presentation_caps);
+            let presentation = PresentationSnapshot {
+                config: PresentationConfig {
+                    generation: 1,
+                    pause_effect,
+                },
+                dynamic_config: PresentationDynamicConfig {
+                    generation: 1,
+                    config_generation: 1,
+                    pause_effect: PauseEffectDynamicConfig { active: false },
+                },
+            };
             inner.displays.insert(
                 id,
                 DisplayState {
@@ -1069,6 +1167,8 @@ impl Router {
                     binding: None,
                     next_wire_buffer_generation: 0,
                     consumer_caps: reg.consumer_caps,
+                    presentation_caps: reg.presentation_caps,
+                    presentation,
                     auto_replay: auto_replay::State::new(),
                     consumption_epoch: Arc::new(AtomicU64::new(1)),
                 },
@@ -1078,7 +1178,7 @@ impl Router {
             if let Some(rid) = auto.clone() {
                 inner.table.add_link(rid, id);
             }
-            (id, session_id, auto)
+            (id, session_id, auto, presentation)
         };
         // A freshly auto-linked renderer just gained an audience —
         // cancel any pending orphan timer so it survives.
@@ -1095,6 +1195,7 @@ impl Router {
         DisplayHandle {
             id: display_id,
             session_id: display_session_id,
+            presentation: initial_presentation,
             rx,
         }
     }
@@ -1257,6 +1358,92 @@ impl Router {
     pub async fn update_display_window_state(self: &Arc<Self>, display_id: DisplayId, flags: u32) {
         let action = self.update_auto_state(display_id, Some(flags)).await;
         self.run_auto_state_action(action).await;
+    }
+
+    async fn reconcile_presentation_config(self: &Arc<Self>, display_id: DisplayId) {
+        let mut inner = self.inner.lock().await;
+        let Some(current) = inner.displays.get(&display_id) else {
+            return;
+        };
+        let desired_config = self.resolved_pause_effect(current.presentation_caps);
+        let desired_dynamic = PauseEffectDynamicConfig {
+            active: Self::pause_effect_active(&inner, current, desired_config.kind),
+        };
+        let state = inner
+            .displays
+            .get_mut(&display_id)
+            .expect("display checked above");
+
+        if state.presentation.config.pause_effect != desired_config {
+            let config_generation = state
+                .presentation
+                .config
+                .generation
+                .checked_add(1)
+                .expect("presentation config generation exhausted");
+            let dynamic_generation = state
+                .presentation
+                .dynamic_config
+                .generation
+                .checked_add(1)
+                .expect("presentation dynamic generation exhausted");
+            state.presentation = PresentationSnapshot {
+                config: PresentationConfig {
+                    generation: config_generation,
+                    pause_effect: desired_config,
+                },
+                dynamic_config: PresentationDynamicConfig {
+                    generation: dynamic_generation,
+                    config_generation,
+                    pause_effect: desired_dynamic,
+                },
+            };
+            let _ = state
+                .tx
+                .send(DisplayOutEvent::SetPresentationConfig(state.presentation));
+        } else if state.presentation.dynamic_config.pause_effect != desired_dynamic {
+            state.presentation.dynamic_config = PresentationDynamicConfig {
+                generation: state
+                    .presentation
+                    .dynamic_config
+                    .generation
+                    .checked_add(1)
+                    .expect("presentation dynamic generation exhausted"),
+                config_generation: state.presentation.config.generation,
+                pause_effect: desired_dynamic,
+            };
+            let _ = state.tx.send(DisplayOutEvent::SetPresentationDynamicConfig(
+                state.presentation.dynamic_config,
+            ));
+        }
+    }
+
+    pub async fn resync_presentation_configs(self: &Arc<Self>) {
+        let display_ids: Vec<DisplayId> = {
+            let inner = self.inner.lock().await;
+            inner.displays.keys().copied().collect()
+        };
+        for display_id in display_ids {
+            self.reconcile_presentation_config(display_id).await;
+        }
+    }
+
+    pub async fn resync_auto_replay(self: &Arc<Self>) {
+        let display_ids: Vec<DisplayId> = {
+            let inner = self.inner.lock().await;
+            inner.displays.keys().copied().collect()
+        };
+        let mut reconcile = false;
+        for display_id in display_ids {
+            reconcile |= matches!(
+                self.update_auto_state(display_id, None).await,
+                AutoStateAction::Reconcile
+            );
+        }
+        if reconcile {
+            self.apply_auto_stop_links().await;
+            self.reconcile_lifecycle().await;
+        }
     }
 
     /// Update the session-level state driven by the
@@ -2281,6 +2468,7 @@ impl Router {
         };
         for did in display_ids {
             self.sync_display(did).await;
+            self.reconcile_presentation_config(did).await;
         }
         // The first BindBuffers exposes the renderer's flags so the
         // router can compare them against consumer caps.
@@ -2552,6 +2740,13 @@ impl Router {
                     self.clear_resume_retry(&id).await;
                 }
             }
+        }
+        let display_ids: Vec<DisplayId> = {
+            let inner = self.inner.lock().await;
+            inner.displays.keys().copied().collect()
+        };
+        for display_id in display_ids {
+            self.reconcile_presentation_config(display_id).await;
         }
         self.refresh_runtime_health().await;
         for id in changed_ids {
@@ -3136,8 +3331,8 @@ mod tests {
             refresh_mhz: 60_000,
             gpu: DrmNode::UNKNOWN,
             properties: vec![],
+            presentation_caps: 0,
             consumer_caps: None,
-            protocol_version: 8,
         }
     }
 
@@ -3223,8 +3418,8 @@ mod tests {
             refresh_mhz: 60_000,
             gpu: DrmNode::UNKNOWN,
             properties: vec![],
+            presentation_caps: 0,
             consumer_caps: None,
-            protocol_version: 8,
         }
     }
 
@@ -4184,7 +4379,10 @@ mod tests {
     // auto replay - daemon-side decision driven by display state
 
     use super::auto_replay as ar;
-    use crate::settings::{AutoAction, AutoCondition, AutoReplayPolicy, SettingsStore};
+    use crate::settings::{
+        AutoAction, AutoCondition, AutoReplayPolicy, BlurEffectConfig as StoredBlurEffectConfig,
+        PauseEffectConfig as StoredPauseEffectConfig, PauseEffectKind, SettingsStore,
+    };
 
     async fn settings_with_auto_replay(policy: AutoReplayPolicy) -> Arc<SettingsStore> {
         let tmp = tempfile::tempdir().unwrap();
@@ -4194,6 +4392,262 @@ mod tests {
         });
         std::mem::forget(tmp);
         store
+    }
+
+    async fn settings_with_pause_effect(config: StoredPauseEffectConfig) -> Arc<SettingsStore> {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SettingsStore::load_or_default(tmp.path().join("settings.toml")).await;
+        store.update(|s| s.global.pause_effect = config);
+        std::mem::forget(tmp);
+        store
+    }
+
+    fn blur_pause_effect(radius: u32) -> StoredPauseEffectConfig {
+        StoredPauseEffectConfig {
+            kind: PauseEffectKind::Blur,
+            blur: StoredBlurEffectConfig { radius },
+        }
+    }
+
+    fn last_presentation_dynamic(
+        rx: &mut mpsc::UnboundedReceiver<DisplayOutEvent>,
+    ) -> Option<PresentationDynamicConfig> {
+        drain_display_events(rx)
+            .into_iter()
+            .filter_map(|event| match event {
+                DisplayOutEvent::SetPresentationDynamicConfig(config) => Some(config),
+                _ => None,
+            })
+            .last()
+    }
+
+    fn last_presentation_config(
+        rx: &mut mpsc::UnboundedReceiver<DisplayOutEvent>,
+    ) -> Option<PresentationSnapshot> {
+        drain_display_events(rx)
+            .into_iter()
+            .filter_map(|event| match event {
+                DisplayOutEvent::SetPresentationConfig(config) => Some(config),
+                _ => None,
+            })
+            .last()
+    }
+
+    #[tokio::test]
+    async fn pause_effect_uses_initial_snapshot_and_split_updates() {
+        let store = settings_with_pause_effect(blur_pause_effect(42)).await;
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        router.attach_settings(store.clone());
+        let renderer = RendererHandle::test_stub("r1", "image");
+        renderer.test_publish_pool(fake_published_pool(1, 1920, 1080));
+        mgr.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer).await;
+        let mut registration = reg("HDMI-A-1", 1920, 1080);
+        registration.presentation_caps = PRESENTATION_CAP_BLUR;
+        let mut display = router.register_display(registration).await;
+
+        assert_eq!(
+            display.presentation,
+            PresentationSnapshot {
+                config: PresentationConfig {
+                    generation: 1,
+                    pause_effect: PauseEffectConfig {
+                        kind: PauseEffectKind::Blur,
+                        blur: BlurEffectConfig { radius: 42 },
+                    },
+                },
+                dynamic_config: PresentationDynamicConfig {
+                    generation: 1,
+                    config_generation: 1,
+                    pause_effect: PauseEffectDynamicConfig { active: false },
+                },
+            }
+        );
+        drain_display_events(&mut display.rx);
+
+        router.set_manual_pause(true).await;
+        let dynamic = last_presentation_dynamic(&mut display.rx)
+            .expect("manual pause should update presentation activity");
+        assert_eq!(dynamic.generation, 2);
+        assert_eq!(dynamic.config_generation, 1);
+        assert!(dynamic.pause_effect.active);
+
+        store.update(|s| s.global.pause_effect.blur.radius = 55);
+        router.resync_presentation_configs().await;
+        let snapshot = last_presentation_config(&mut display.rx)
+            .expect("radius update should send an atomic presentation snapshot");
+        assert_eq!(snapshot.config.generation, 2);
+        assert_eq!(snapshot.config.pause_effect.blur.radius, 55);
+        assert_eq!(snapshot.dynamic_config.generation, 3);
+        assert_eq!(snapshot.dynamic_config.config_generation, 2);
+        assert!(snapshot.dynamic_config.pause_effect.active);
+
+        router.resync_presentation_configs().await;
+        assert!(display.rx.try_recv().is_err());
+
+        store.update(|s| s.global.pause_effect.kind = PauseEffectKind::None);
+        router.resync_presentation_configs().await;
+        let snapshot = last_presentation_config(&mut display.rx)
+            .expect("disabling the effect should send an atomic presentation snapshot");
+        assert_eq!(snapshot.config.pause_effect.kind, PauseEffectKind::None);
+        assert!(!snapshot.dynamic_config.pause_effect.active);
+    }
+
+    #[tokio::test]
+    async fn paused_binding_update_follows_initial_registration_snapshot() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        router.attach_settings(settings_with_pause_effect(blur_pause_effect(30)).await);
+        let renderer = RendererHandle::test_stub("r1", "image");
+        renderer.test_publish_pool(fake_published_pool(1, 1920, 1080));
+        mgr.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer).await;
+        router.set_manual_pause(true).await;
+
+        let mut registration = reg("HDMI-A-1", 1920, 1080);
+        registration.presentation_caps = PRESENTATION_CAP_BLUR;
+        let mut display = router.register_display(registration).await;
+
+        assert!(!display.presentation.dynamic_config.pause_effect.active);
+        let dynamic = last_presentation_dynamic(&mut display.rx)
+            .expect("paused binding should follow the accepted snapshot");
+        assert!(dynamic.pause_effect.active);
+        assert_eq!(
+            dynamic.config_generation,
+            display.presentation.config.generation
+        );
+        assert!(dynamic.generation > display.presentation.dynamic_config.generation);
+    }
+
+    #[tokio::test]
+    async fn shared_renderer_pause_activates_all_bound_displays_but_mute_does_not() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        router.attach_settings(settings_with_pause_effect(blur_pause_effect(30)).await);
+        let renderer = RendererHandle::test_stub("r1", "image");
+        renderer.test_publish_pool(fake_published_pool(1, 1920, 1080));
+        mgr.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer).await;
+        let mut a_registration = reg("A", 1920, 1080);
+        a_registration.presentation_caps = PRESENTATION_CAP_BLUR;
+        let mut b_registration = reg("B", 1920, 1080);
+        b_registration.presentation_caps = PRESENTATION_CAP_BLUR;
+        let mut a = router.register_display(a_registration).await;
+        let mut b = router.register_display(b_registration).await;
+        drain_display_events(&mut a.rx);
+        drain_display_events(&mut b.rx);
+
+        router.set_manual_mute(true).await;
+        assert!(router.is_muted("r1").await);
+        assert!(last_presentation_dynamic(&mut a.rx).is_none());
+        assert!(b.rx.try_recv().is_err());
+
+        router.set_manual_mute(false).await;
+        router.set_manual_pause(true).await;
+        assert!(
+            last_presentation_dynamic(&mut a.rx).is_some_and(|config| config.pause_effect.active)
+        );
+        assert!(
+            last_presentation_dynamic(&mut b.rx).is_some_and(|config| config.pause_effect.active)
+        );
+
+        router.set_manual_pause(false).await;
+        assert!(
+            last_presentation_dynamic(&mut a.rx).is_some_and(|config| !config.pause_effect.active)
+        );
+        assert!(
+            last_presentation_dynamic(&mut b.rx).is_some_and(|config| !config.pause_effect.active)
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_display_downgrades_pause_effect_to_none() {
+        let store = settings_with_pause_effect(blur_pause_effect(64)).await;
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        router.attach_settings(store.clone());
+        let renderer = RendererHandle::test_stub("r1", "image");
+        renderer.test_publish_pool(fake_published_pool(1, 1920, 1080));
+        mgr.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer).await;
+        let mut display = router
+            .register_display(reg("layer-shell", 1920, 1080))
+            .await;
+        assert_eq!(
+            display.presentation.config.pause_effect.kind,
+            PauseEffectKind::None
+        );
+        drain_display_events(&mut display.rx);
+
+        router.set_manual_pause(true).await;
+        store.update(|s| s.global.pause_effect.blur.radius = 10);
+        router.resync_presentation_configs().await;
+        assert!(display.rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn pause_effect_consumes_auto_replay_renderer_state() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        let settings = settings_with_pause_effect(blur_pause_effect(30)).await;
+        settings.update(|s| {
+            s.global.auto_replay = Some(auto_replay(&[(
+                AutoCondition::Fullscreen,
+                AutoAction::Pause,
+            )]));
+        });
+        router.attach_settings(settings);
+
+        let renderer = RendererHandle::test_stub("r1", "scene");
+        renderer.test_publish_pool(fake_published_pool(1, 1920, 1080));
+        mgr.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer).await;
+        let mut registration = reg("HDMI-A-1", 1920, 1080);
+        registration.presentation_caps = PRESENTATION_CAP_BLUR;
+        let mut display = router.register_display(registration).await;
+        drain_display_events(&mut display.rx);
+
+        router
+            .update_display_window_state(display.id, ar::FLAG_NON_MINIMIZED | ar::FLAG_FULLSCREEN)
+            .await;
+
+        assert!(router.is_paused("r1").await);
+        assert!(last_presentation_dynamic(&mut display.rx)
+            .is_some_and(|config| config.pause_effect.active));
+    }
+
+    #[tokio::test]
+    async fn pause_effect_deactivates_when_auto_stop_removes_binding() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        let settings = settings_with_pause_effect(blur_pause_effect(30)).await;
+        settings.update(|s| {
+            s.global.auto_replay = Some(auto_replay(&[(
+                AutoCondition::Fullscreen,
+                AutoAction::Stop,
+            )]));
+        });
+        router.attach_settings(settings);
+
+        let renderer = RendererHandle::test_stub("r1", "image");
+        renderer.test_publish_pool(fake_published_pool(1, 1920, 1080));
+        mgr.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer).await;
+        let mut registration = reg("HDMI-A-1", 1920, 1080);
+        registration.presentation_caps = PRESENTATION_CAP_BLUR;
+        let mut display = router.register_display(registration).await;
+        drain_display_events(&mut display.rx);
+
+        router.set_manual_pause(true).await;
+        assert!(last_presentation_dynamic(&mut display.rx)
+            .is_some_and(|config| config.pause_effect.active));
+
+        router
+            .update_display_window_state(display.id, ar::FLAG_NON_MINIMIZED | ar::FLAG_FULLSCREEN)
+            .await;
+        assert!(last_presentation_dynamic(&mut display.rx)
+            .is_some_and(|config| !config.pause_effect.active));
     }
 
     fn auto_replay(actions: &[(AutoCondition, AutoAction)]) -> AutoReplayPolicy {

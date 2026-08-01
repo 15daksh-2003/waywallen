@@ -1,4 +1,4 @@
-use crate::parser::{ArgType, FdSpec, InboundKind, Message, Protocol};
+use crate::parser::{ArgType, FdSpec, InboundKind, Message, NamedEnum, NamedStruct, Protocol};
 use std::fmt::Write;
 
 pub fn emit(p: &Protocol) -> String {
@@ -11,6 +11,8 @@ pub fn emit(p: &Protocol) -> String {
     emit_consts(&mut out, p, in_mod);
     emit_common_types(&mut out);
     emit_wire_helpers(&mut out);
+    emit_named_enums(&mut out, &p.enums);
+    emit_named_structs(&mut out, &p.structs);
     emit_enum(&mut out, in_enum, &p.requests, in_mod);
     emit_enum(&mut out, "Event", &p.events, "event");
     out
@@ -76,8 +78,10 @@ pub struct Rect {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecodeError {
     TooShort,
+    BadBool,
     BadString,
     BadArrayLen,
+    UnknownEnumValue { enum_name: &'static str, value: u32 },
     Trailing,
     UnknownOpcode(u16),
 }
@@ -86,8 +90,12 @@ impl std::fmt::Display for DecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TooShort => write!(f, "message body too short"),
+            Self::BadBool => write!(f, "boolean value is not 0 or 1"),
             Self::BadString => write!(f, "malformed string"),
             Self::BadArrayLen => write!(f, "array length overflow"),
+            Self::UnknownEnumValue { enum_name, value } => {
+                write!(f, "unknown {enum_name} value {value}")
+            }
             Self::Trailing => write!(f, "trailing bytes after decode"),
             Self::UnknownOpcode(op) => write!(f, "unknown opcode {op}"),
         }
@@ -107,6 +115,7 @@ fn emit_wire_helpers(out: &mut String) {
 
     // ---- writers ----
     pub fn w_u32(buf: &mut Vec<u8>, v: u32) { buf.extend_from_slice(&v.to_le_bytes()); }
+    pub fn w_bool(buf: &mut Vec<u8>, v: bool) { w_u32(buf, u32::from(v)); }
     pub fn w_i32(buf: &mut Vec<u8>, v: i32) { buf.extend_from_slice(&v.to_le_bytes()); }
     pub fn w_u64(buf: &mut Vec<u8>, v: u64) { buf.extend_from_slice(&v.to_le_bytes()); }
     pub fn w_i64(buf: &mut Vec<u8>, v: i64) { buf.extend_from_slice(&v.to_le_bytes()); }
@@ -174,6 +183,13 @@ fn emit_wire_helpers(out: &mut String) {
         }
         pub fn u32(&mut self) -> Result<u32, DecodeError> {
             Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+        }
+        pub fn bool(&mut self) -> Result<bool, DecodeError> {
+            match self.u32()? {
+                0 => Ok(false),
+                1 => Ok(true),
+                _ => Err(DecodeError::BadBool),
+            }
         }
         pub fn i32(&mut self) -> Result<i32, DecodeError> {
             Ok(i32::from_le_bytes(self.take(4)?.try_into().unwrap()))
@@ -260,6 +276,115 @@ fn emit_wire_helpers(out: &mut String) {
 
 "#,
     );
+}
+
+fn emit_named_enums(out: &mut String, enums: &[NamedEnum]) {
+    for item in enums {
+        let type_name = snake_to_camel(&item.name);
+        writeln!(out, "#[repr(u32)]").unwrap();
+        writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]").unwrap();
+        writeln!(out, "pub enum {type_name} {{").unwrap();
+        for entry in &item.entries {
+            writeln!(
+                out,
+                "    {} = {},",
+                snake_to_camel(&entry.name),
+                entry.value
+            )
+            .unwrap();
+        }
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+        writeln!(out, "impl {type_name} {{").unwrap();
+        writeln!(out, "    fn encode_wire(&self, buf: &mut Vec<u8>) {{").unwrap();
+        writeln!(out, "        wire::w_u32(buf, *self as u32);").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(
+            out,
+            "    fn decode_wire(r: &mut wire::R<'_>) -> Result<Self, DecodeError> {{"
+        )
+        .unwrap();
+        writeln!(out, "        match r.u32()? {{").unwrap();
+        for entry in &item.entries {
+            writeln!(
+                out,
+                "            {} => Ok(Self::{}),",
+                entry.value,
+                snake_to_camel(&entry.name)
+            )
+            .unwrap();
+        }
+        writeln!(
+            out,
+            "            value => Err(DecodeError::UnknownEnumValue {{ enum_name: \"{}\", value }}),",
+            item.name
+        )
+        .unwrap();
+        writeln!(out, "        }}").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+    }
+}
+
+fn emit_named_structs(out: &mut String, structs: &[NamedStruct]) {
+    for item in structs {
+        let type_name = snake_to_camel(&item.name);
+        writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq)]").unwrap();
+        writeln!(out, "pub struct {type_name} {{").unwrap();
+        for field in &item.fields {
+            writeln!(
+                out,
+                "    pub {}: {},",
+                field_name(&field.name),
+                rust_type(&field.ty)
+            )
+            .unwrap();
+        }
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+        writeln!(out, "impl {type_name} {{").unwrap();
+        writeln!(out, "    fn encode_wire(&self, buf: &mut Vec<u8>) {{").unwrap();
+        for field in &item.fields {
+            let name = field_name(&field.name);
+            match &field.ty {
+                ArgType::Bool => writeln!(out, "        wire::w_bool(buf, self.{name});").unwrap(),
+                ArgType::U32 => writeln!(out, "        wire::w_u32(buf, self.{name});").unwrap(),
+                ArgType::I32 => writeln!(out, "        wire::w_i32(buf, self.{name});").unwrap(),
+                ArgType::U64 => writeln!(out, "        wire::w_u64(buf, self.{name});").unwrap(),
+                ArgType::I64 => writeln!(out, "        wire::w_i64(buf, self.{name});").unwrap(),
+                ArgType::F32 => writeln!(out, "        wire::w_f32(buf, self.{name});").unwrap(),
+                ArgType::F64 => writeln!(out, "        wire::w_f64(buf, self.{name});").unwrap(),
+                ArgType::Named(_) | ArgType::Enum(_) => {
+                    writeln!(out, "        self.{name}.encode_wire(buf);").unwrap()
+                }
+                _ => unreachable!("parser restricts named struct fields"),
+            }
+        }
+        writeln!(out, "    }}").unwrap();
+        let mutability = item
+            .fields
+            .iter()
+            .any(|field| matches!(field.ty, ArgType::Named(_) | ArgType::Enum(_)))
+            .then_some("mut ")
+            .unwrap_or("");
+        writeln!(
+            out,
+            "    fn decode_wire({mutability}r: &mut wire::R<'_>) -> Result<Self, DecodeError> {{"
+        )
+        .unwrap();
+        for field in &item.fields {
+            emit_decode_arg(out, "        ", &field_name(&field.name), &field.ty);
+        }
+        writeln!(out, "        Ok(Self {{").unwrap();
+        for field in &item.fields {
+            writeln!(out, "            {},", field_name(&field.name)).unwrap();
+        }
+        writeln!(out, "        }})").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+    }
 }
 
 fn emit_enum(out: &mut String, enum_name: &str, msgs: &[Message], opcode_mod: &str) {
@@ -428,6 +553,7 @@ fn emit_enum(out: &mut String, enum_name: &str, msgs: &[Message], opcode_mod: &s
 
 fn emit_encode_arg(out: &mut String, indent: &str, name: &str, ty: &ArgType) {
     match ty {
+        ArgType::Bool => writeln!(out, "{indent}wire::w_bool(buf, *{name});").unwrap(),
         ArgType::U32 => writeln!(out, "{indent}wire::w_u32(buf, *{name});").unwrap(),
         ArgType::I32 => writeln!(out, "{indent}wire::w_i32(buf, *{name});").unwrap(),
         ArgType::U64 => writeln!(out, "{indent}wire::w_u64(buf, *{name});").unwrap(),
@@ -450,11 +576,15 @@ fn emit_encode_arg(out: &mut String, indent: &str, name: &str, ty: &ArgType) {
             };
             writeln!(out, "{indent}wire::w_array_{fn_suffix}(buf, {name});").unwrap();
         }
+        ArgType::Named(_) | ArgType::Enum(_) => {
+            writeln!(out, "{indent}{name}.encode_wire(buf);").unwrap()
+        }
     }
 }
 
 fn emit_decode_arg(out: &mut String, indent: &str, name: &str, ty: &ArgType) {
     let expr = match ty {
+        ArgType::Bool => "r.bool()?".to_string(),
         ArgType::U32 => "r.u32()?".to_string(),
         ArgType::I32 => "r.i32()?".to_string(),
         ArgType::U64 => "r.u64()?".to_string(),
@@ -477,12 +607,16 @@ fn emit_decode_arg(out: &mut String, indent: &str, name: &str, ty: &ArgType) {
             };
             format!("r.array_{suffix}()?")
         }
+        ArgType::Named(name) | ArgType::Enum(name) => {
+            format!("{}::decode_wire(&mut r)?", snake_to_camel(name))
+        }
     };
     writeln!(out, "{indent}let {name} = {expr};").unwrap();
 }
 
 fn rust_type(ty: &ArgType) -> String {
     match ty {
+        ArgType::Bool => "bool".into(),
         ArgType::U32 => "u32".into(),
         ArgType::I32 => "i32".into(),
         ArgType::U64 => "u64".into(),
@@ -493,6 +627,7 @@ fn rust_type(ty: &ArgType) -> String {
         ArgType::Rect => "Rect".into(),
         ArgType::KvList => "Vec<(String, String)>".into(),
         ArgType::Array(elem) => format!("Vec<{}>", rust_type(elem)),
+        ArgType::Named(name) | ArgType::Enum(name) => snake_to_camel(name),
     }
 }
 
@@ -537,6 +672,7 @@ mod tests {
 
     #[test]
     fn rust_type_basic() {
+        assert_eq!(rust_type(&ArgType::Bool), "bool");
         assert_eq!(rust_type(&ArgType::U32), "u32");
         assert_eq!(rust_type(&ArgType::String), "String");
         assert_eq!(
@@ -549,5 +685,9 @@ mod tests {
         );
         assert_eq!(rust_type(&ArgType::KvList), "Vec<(String, String)>");
         assert_eq!(rust_type(&ArgType::Rect), "Rect");
+        assert_eq!(
+            rust_type(&ArgType::Named("presentation_config".into())),
+            "PresentationConfig"
+        );
     }
 }

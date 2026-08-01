@@ -61,6 +61,26 @@ auto map_to_auto_replay(const QVariantMap& m) -> proto::AutoReplayPolicy {
     return p;
 }
 
+auto pause_effect_to_map(const proto::PauseEffectConfig& p) -> QVariantMap {
+    QVariantMap m;
+    m[u"kind"_s] = static_cast<int>(p.kind());
+    QVariantMap blur;
+    if (p.hasBlur()) {
+        blur[u"radius"_s] = p.blur().radius();
+    }
+    m[u"blur"_s] = blur;
+    return m;
+}
+
+auto map_to_pause_effect(const QVariantMap& m) -> proto::PauseEffectConfig {
+    proto::PauseEffectConfig p;
+    p.setKind(static_cast<proto::PauseEffectKind>(m.value(u"kind"_s).toInt()));
+    proto::BlurEffectConfig blur;
+    blur.setRadius(m.value(u"blur"_s).toMap().value(u"radius"_s).toUInt());
+    p.setBlur(std::move(blur));
+    return p;
+}
+
 auto global_to_map(const proto::GlobalSettings& g) -> QVariantMap {
     QVariantMap  m;
     QVariantList wallpaper_filters;
@@ -83,6 +103,9 @@ auto global_to_map(const proto::GlobalSettings& g) -> QVariantMap {
     }
     if (g.hasAutoReplay()) {
         m[u"autoReplay"_s] = auto_replay_to_map(g.autoReplay());
+    }
+    if (g.hasPauseEffect()) {
+        m[u"pauseEffect"_s] = pause_effect_to_map(g.pauseEffect());
     }
     m[u"queueMode"_s]                 = g.queueMode();
     m[u"rotationSecs"_s]              = g.rotationSecs();
@@ -152,6 +175,9 @@ auto map_to_global(const QVariantMap& m) -> proto::GlobalSettings {
     }
     if (m.contains(u"autoReplay"_s)) {
         g.setAutoReplay(map_to_auto_replay(m.value(u"autoReplay"_s).toMap()));
+    }
+    if (m.contains(u"pauseEffect"_s)) {
+        g.setPauseEffect(map_to_pause_effect(m.value(u"pauseEffect"_s).toMap()));
     }
     if (m.contains(u"queueMode"_s)) {
         g.setQueueMode(m.value(u"queueMode"_s).toString());

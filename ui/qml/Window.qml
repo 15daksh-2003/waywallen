@@ -36,6 +36,19 @@ MD.ApplicationWindow {
         id: healthQuery
     }
 
+    W.GlobalPauseToggleQuery {
+        id: globalPauseToggleQuery
+        onToggled: paused => W.Action.toast(paused ? qsTr("Paused") : qsTr("Resumed"))
+    }
+
+    Shortcut {
+        sequence: "Ctrl+P"
+        context: Qt.ApplicationShortcut
+        enabled: W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready
+                 && !globalPauseToggleQuery.querying
+        onActivated: globalPauseToggleQuery.reload()
+    }
+
     Connections {
         target: W.Notify
         function onDaemonReady() {

@@ -241,6 +241,58 @@ static void test_set_config(void) {
     ww_buf_free(&buf);
 }
 
+static void test_presentation_bool(void) {
+    ww_evt_set_presentation_dynamic_config_t in = {0};
+    in.dynamic_config.generation = 5;
+    in.dynamic_config.config_generation = 3;
+    in.dynamic_config.pause_effect.active = true;
+
+    ww_buf_t buf;
+    ww_buf_init(&buf);
+    assert(ww_evt_set_presentation_dynamic_config_encode(&in, &buf) == WW_OK);
+
+    ww_evt_set_presentation_dynamic_config_t out;
+    assert(ww_evt_set_presentation_dynamic_config_decode(buf.data, buf.len, &out) == WW_OK);
+    assert(out.dynamic_config.generation == 5);
+    assert(out.dynamic_config.config_generation == 3);
+    assert(out.dynamic_config.pause_effect.active);
+    ww_evt_set_presentation_dynamic_config_free(&out);
+
+    assert(buf.len == 20);
+    buf.data[16] = 2;
+    buf.data[17] = 0;
+    buf.data[18] = 0;
+    buf.data[19] = 0;
+    assert(ww_evt_set_presentation_dynamic_config_decode(buf.data, buf.len, &out) == WW_ERR_BAD_BOOL);
+    ww_buf_free(&buf);
+}
+
+static void test_presentation_enum(void) {
+    ww_evt_set_presentation_config_t in = {0};
+    in.presentation.config.generation = 2;
+    in.presentation.config.pause_effect.kind = WAYWALLEN_PAUSE_EFFECT_KIND_BLUR;
+    in.presentation.config.pause_effect.blur.radius = 30;
+    in.presentation.dynamic_config.generation = 2;
+    in.presentation.dynamic_config.config_generation = 2;
+    in.presentation.dynamic_config.pause_effect.active = true;
+
+    ww_buf_t buf;
+    ww_buf_init(&buf);
+    assert(ww_evt_set_presentation_config_encode(&in, &buf) == WW_OK);
+
+    ww_evt_set_presentation_config_t out;
+    assert(ww_evt_set_presentation_config_decode(buf.data, buf.len, &out) == WW_OK);
+    assert(out.presentation.config.pause_effect.kind == WAYWALLEN_PAUSE_EFFECT_KIND_BLUR);
+    ww_evt_set_presentation_config_free(&out);
+
+    buf.data[8] = 7;
+    buf.data[9] = 0;
+    buf.data[10] = 0;
+    buf.data[11] = 0;
+    assert(ww_evt_set_presentation_config_decode(buf.data, buf.len, &out) == WW_ERR_BAD_ENUM);
+    ww_buf_free(&buf);
+}
+
 static void test_bye_empty(void) {
     ww_req_bye_t in = {0};
     ww_buf_t buf;
@@ -259,6 +311,8 @@ int main(void) {
     test_bind_buffers();
     test_register_display_with_kv();
     test_set_config();
+    test_presentation_bool();
+    test_presentation_enum();
     test_bye_empty();
     printf("wayproto-gen C roundtrip: OK\n");
     return 0;

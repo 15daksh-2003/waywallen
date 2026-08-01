@@ -5,7 +5,7 @@ use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::display::proto::generated::Rect;
+use crate::display::proto::generated::{self as wire, Rect};
 use crate::display::proto::{
     codec, error_code, opcode, Event, Request, PROTOCOL_NAME, PROTOCOL_VERSION,
 };
@@ -16,7 +16,8 @@ use crate::display::layout::display_point_to_texture;
 use crate::error::{Error, Result, ResultExt};
 use crate::renderer_manager::{PublishedPool, RendererHandle};
 use crate::routing::{
-    DisplayConsumptionPermit, DisplayHandle, DisplayOutEvent, DisplayRegistration, Router,
+    DisplayConsumptionPermit, DisplayHandle, DisplayOutEvent, DisplayRegistration,
+    PresentationDynamicConfig, PresentationSnapshot, Router,
 };
 use crate::scheduler::ProjectedConfig;
 use crate::sync::drm_device;
@@ -27,7 +28,7 @@ pub const SERVER_VERSION: &str = concat!("waywallen ", env!("CARGO_PKG_VERSION")
 
 /// Inclusive range of `client_protocol_version` values this daemon
 /// accepts. Unsupported versions are rejected during handshake.
-pub const MIN_SUPPORTED_CLIENT_VERSION: u32 = 6;
+pub const MIN_SUPPORTED_CLIENT_VERSION: u32 = PROTOCOL_VERSION;
 pub const MAX_SUPPORTED_CLIENT_VERSION: u32 = PROTOCOL_VERSION;
 
 /// Advertised in `welcome.features`. Advisory in v3+ — clients MUST
@@ -129,10 +130,10 @@ async fn handle_client(
 ) -> Result<()> {
     log::info!("display client connected; performing handshake");
     let registration = do_handshake(&stream, &events_tx, &mut shutdown_rx).await?;
-    let client_protocol_version = registration.protocol_version;
     let DisplayHandle {
         id: display_id,
         session_id,
+        presentation,
         rx,
     } = router.register_display(registration).await;
     log::info!("display {display_id} registered with router");
@@ -141,7 +142,10 @@ async fn handle_client(
     tokio::task::spawn_blocking(move || {
         codec::send_event(
             &send_ack_stream,
-            &Event::DisplayAccepted { display_id },
+            &Event::DisplayAccepted {
+                display_id,
+                presentation: presentation_to_wire(presentation),
+            },
             &[],
         )
     })
@@ -154,7 +158,6 @@ async fn handle_client(
         router.clone(),
         display_id,
         session_id,
-        client_protocol_version,
         rx,
         shutdown_rx,
     )
@@ -266,6 +269,7 @@ async fn do_handshake(
         drm_render_major,
         drm_render_minor,
         properties,
+        presentation_caps,
     } = reg
     else {
         return Err(Error::Internal(anyhow!(
@@ -293,10 +297,10 @@ async fn do_handshake(
             minor: drm_render_minor,
         },
         properties,
+        presentation_caps: presentation_caps.flags,
         // consumer_caps arrives ASYNCHRONOUSLY in the frame loop's
         // request handler; registration does not block on it.
         consumer_caps: None,
-        protocol_version: client_protocol_version,
     })
 }
 
@@ -308,7 +312,6 @@ async fn run_frame_loop(
     router: Arc<Router>,
     display_id: crate::scheduler::DisplayId,
     display_session_id: crate::sync::DisplaySessionId,
-    client_protocol_version: u32,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<DisplayOutEvent>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
@@ -364,13 +367,23 @@ async fn run_frame_loop(
                         break Err(e);
                     }
                 }
+                Some(DisplayOutEvent::SetPresentationConfig(presentation)) => {
+                    if let Err(e) = send_presentation_config(&stream, presentation).await {
+                        break Err(e);
+                    }
+                }
+                Some(DisplayOutEvent::SetPresentationDynamicConfig(dynamic_config)) => {
+                    if let Err(e) = send_presentation_dynamic_config(&stream, dynamic_config).await {
+                        break Err(e);
+                    }
+                }
                 Some(DisplayOutEvent::Frame {
                     renderer, buffer_generation, buffer_index, seq,
                     consumption, member,
                 }) => {
                     match forward_frame_ready(
                         &stream, &renderer, buffer_generation, buffer_index, seq,
-                        consumption, member, client_protocol_version >= 8,
+                        consumption, member, true,
                     ).await {
                         Ok(Some(forwarded)) => {
                             release_sessions
@@ -397,12 +410,6 @@ async fn run_frame_loop(
                     router.update_display_window_state(display_id, flags).await;
                 }
                 Some(Ok(Request::FrameArmed { buffer_generation, seq })) => {
-                    if client_protocol_version < 8 {
-                        log::warn!(
-                            "display {display_id} session {display_session_id}: frame_armed from legacy protocol v{client_protocol_version}"
-                        );
-                        continue;
-                    }
                     match pending_arms.remove(&(buffer_generation, seq)) {
                         Some(arm) => arm.arm(),
                         None => log::warn!(
@@ -553,6 +560,71 @@ async fn wait_shutdown(rx: &mut tokio::sync::watch::Receiver<bool>) {
 
 // ---------------------------------------------------------------------------
 // Wire-event senders
+
+fn presentation_to_wire(snapshot: PresentationSnapshot) -> wire::PresentationSnapshot {
+    let kind = match snapshot.config.pause_effect.kind {
+        crate::settings::PauseEffectKind::None => wire::PauseEffectKind::None,
+        crate::settings::PauseEffectKind::Blur => wire::PauseEffectKind::Blur,
+    };
+    wire::PresentationSnapshot {
+        config: wire::PresentationConfig {
+            generation: snapshot.config.generation,
+            pause_effect: wire::PauseEffectConfig {
+                kind,
+                blur: wire::BlurEffectConfig {
+                    radius: snapshot.config.pause_effect.blur.radius,
+                },
+            },
+        },
+        dynamic_config: presentation_dynamic_to_wire(snapshot.dynamic_config),
+    }
+}
+
+fn presentation_dynamic_to_wire(
+    config: PresentationDynamicConfig,
+) -> wire::PresentationDynamicConfig {
+    wire::PresentationDynamicConfig {
+        generation: config.generation,
+        config_generation: config.config_generation,
+        pause_effect: wire::PauseEffectDynamicConfig {
+            active: config.pause_effect.active,
+        },
+    }
+}
+
+async fn send_presentation_config(
+    stream: &StdUnixStream,
+    presentation: PresentationSnapshot,
+) -> Result<()> {
+    let evt = Event::SetPresentationConfig {
+        presentation: presentation_to_wire(presentation),
+    };
+    let s = stream
+        .try_clone()
+        .context("clone for set_presentation_config")?;
+    tokio::task::spawn_blocking(move || codec::send_event(&s, &evt, &[]))
+        .await
+        .context("set_presentation_config join")?
+        .map_err(|e| Error::Internal(anyhow!("send set_presentation_config: {e}")))?;
+    Ok(())
+}
+
+async fn send_presentation_dynamic_config(
+    stream: &StdUnixStream,
+    dynamic_config: PresentationDynamicConfig,
+) -> Result<()> {
+    let evt = Event::SetPresentationDynamicConfig {
+        dynamic_config: presentation_dynamic_to_wire(dynamic_config),
+    };
+    let s = stream
+        .try_clone()
+        .context("clone for set_presentation_dynamic_config")?;
+    tokio::task::spawn_blocking(move || codec::send_event(&s, &evt, &[]))
+        .await
+        .context("set_presentation_dynamic_config join")?
+        .map_err(|e| Error::Internal(anyhow!("send set_presentation_dynamic_config: {e}")))?;
+    Ok(())
+}
 
 async fn send_unbind(stream: &StdUnixStream, buffer_generation: u64) -> Result<()> {
     let evt = Event::Unbind { buffer_generation };
