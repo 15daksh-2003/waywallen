@@ -307,6 +307,35 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 )
 target_link_libraries(${PROJECT_NAME} PRIVATE waywallen-qml)
 
+# ---------------------------------------------------------------------------
+# Translations
+#
+# .ts catalogs live in ui/i18n. lrelease compiles them to .qm, which
+# qt_add_translations embeds in the executable under the ":/i18n" resource
+# prefix — so a translated build needs no extra install step and behaves the
+# same from a distro package, an AppImage or a Flatpak. entry.cpp picks the
+# catalog matching the user's locale at startup.
+#
+# Adding a language is one line here plus the new .ts file. Refresh the
+# catalogs from the sources with:
+#     cmake --build <builddir> --target update_translations
+#
+# LinguistTools is optional: without it the UI still builds, English only.
+# ---------------------------------------------------------------------------
+set(WAYWALLEN_TS_FILES
+  i18n/waywallen_ru.ts
+)
+find_package(Qt6 QUIET COMPONENTS LinguistTools)
+if(Qt6LinguistTools_FOUND AND WAYWALLEN_TS_FILES)
+  qt_add_translations(${PROJECT_NAME}
+    TS_FILES ${WAYWALLEN_TS_FILES}
+    SOURCE_TARGETS waywallen-qml
+    LUPDATE_OPTIONS -locations none -no-obsolete)
+elseif(NOT Qt6LinguistTools_FOUND)
+  message(STATUS
+    "Qt6 LinguistTools not found - waywallen-ui will be built without translations")
+endif()
+
 set(APP_DESKTOP assets/waywallen-ui.desktop)
 set(APP_METAINFO assets/waywallen-ui.metainfo.xml)
 set(APP_SVG assets/waywallen-ui.svg)
