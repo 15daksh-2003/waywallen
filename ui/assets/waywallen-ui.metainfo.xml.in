@@ -6,16 +6,21 @@
 
   <name>@APP_NAME@</name>
   <summary>@APP_SUMMARY@</summary>
+  <summary xml:lang="ru">Менеджер обоев для Linux</summary>
 
   <description>
     <p>
       Waywallen is a dynamic wallpaper solution for Linux desktops with local media libraries, plugin-based discovery, and per-display controls.
+    </p>
+    <p xml:lang="ru">
+      Waywallen — живые обои для рабочих столов Linux: локальные библиотеки, поиск дополнений через плагины и отдельные настройки для каждого монитора.
     </p>
   </description>
 
   <screenshots>
       <screenshot type="default">
         <caption>main window</caption>
+        <caption xml:lang="ru">главное окно</caption>
         <image type="source">https://github.com/waywallen/waywallen/raw/refs/heads/main/ui/assets/main_page.webp</image>
       </screenshot>
   </screenshots>
