@@ -390,7 +390,7 @@ MD.Page {
                             text: modelData.name || ""
                             supportText: (modelData.types ? modelData.types.join(", ") : "")
                             leader: MD.Icon {
-                                name: MD.Token.icon.extension
+                                name: MD.Token.icon.widgets
                                 size: 24
                                 color: MD.Token.color.on_surface_variant
                             }

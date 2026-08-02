@@ -217,12 +217,14 @@ MD.ApplicationWindow {
                         Column {
                             id: m_rail_footer
                             width: parent.width
+                            spacing: m_rail.useLarge ? 0 : 12
 
                             MD.RailItem {
                                 width: parent.width
                                 expand: m_rail.useLarge
                                 checked: false
                                 icon.name: MD.Token.icon.extension
+                                iconStyle: m_rail.useLarge ? MD.Enum.IconAndText : MD.Enum.IconOnly
                                 text: qsTr("Plugins")
                                 onClicked: MD.Util.showPopup('waywallen.ui/PagePopup', {
                                     source: 'waywallen.ui/PluginManagePage'
@@ -234,6 +236,7 @@ MD.ApplicationWindow {
                                 expand: m_rail.useLarge
                                 checked: false
                                 icon.name: MD.Token.icon.settings
+                                iconStyle: m_rail.useLarge ? MD.Enum.IconAndText : MD.Enum.IconOnly
                                 text: qsTr("Settings")
                                 onClicked: MD.Util.showPopup('waywallen.ui/PagePopup', {
                                     source: 'waywallen.ui/SettingsPage'
