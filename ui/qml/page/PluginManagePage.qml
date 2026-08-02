@@ -8,7 +8,7 @@ import waywallen.ui as W
 
 MD.Page {
     id: root
-    title: 'Plugins'
+    title: qsTr('Plugins')
     scrolling: !m_flick.atYBeginning
     readonly property int inactivePluginCount: (pluginListQuery.inactiveSystem ? pluginListQuery.inactiveSystem.length : 0) + (pluginListQuery.inactiveUser ? pluginListQuery.inactiveUser.length : 0)
     readonly property int pluginUpdateStateUnknown: 1
@@ -292,7 +292,7 @@ MD.Page {
         id: zipDialog
         title: qsTr("Choose plugin package")
         fileMode: MD.FileDialog.OpenFile
-        nameFilters: ["Plugin package (*.zip)", "All files (*)"]
+        nameFilters: [qsTr("Plugin package (*.zip)"), qsTr("All files (*)")]
         onAccepted: {
             inspectQuery.zipPath = selectedFile.toString().replace(/^file:\/\//, "");
             inspectQuery.reload();
@@ -413,7 +413,7 @@ MD.Page {
             MD.Text {
                 Layout.fillWidth: true
                 visible: !pluginListQuery.plugins || pluginListQuery.plugins.length === 0
-                text: "No plugins installed"
+                text: qsTr("No plugins installed")
                 typescale: MD.Token.typescale.body_medium
                 color: MD.Token.color.on_surface_variant
                 wrapMode: Text.WordWrap

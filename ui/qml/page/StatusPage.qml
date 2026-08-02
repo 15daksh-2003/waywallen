@@ -11,7 +11,7 @@ MD.Page {
     padding: 0
     showHeader: MD.MProp.size.isCompact
     showBackground: false
-    title: 'Status'
+    title: qsTr('Status')
 
     actions: [
         MD.Action {
@@ -151,12 +151,12 @@ MD.Page {
         id: killDialog
         property string rendererId: ""
         property string label: ""
-        title: "Kill renderer?"
+        title: qsTr("Kill renderer?")
         parent: T.Overlay.overlay
         standardButtons: T.Dialog.Cancel | T.Dialog.Ok
 
         contentItem: MD.Text {
-            text: "Stop the renderer process\n\"" + killDialog.label + "\"?\nUnsaved frame state may be lost."
+            text: qsTr("Stop the renderer process\n\"%1\"?\nUnsaved frame state may be lost.").arg(killDialog.label)
             typescale: MD.Token.typescale.body_medium
             color: MD.Token.color.on_surface_variant
             wrapMode: Text.WordWrap
@@ -185,13 +185,13 @@ MD.Page {
                     spacing: 8
 
                     SectionTitle {
-                        text: "Daemon"
+                        text: qsTr("Daemon")
                     }
 
                     RowLayout {
                         spacing: 8
                         MD.Text {
-                            text: "Service:"
+                            text: qsTr("Service:")
                             typescale: MD.Token.typescale.label_medium
                             color: MD.Token.color.on_surface_variant
                         }
@@ -225,7 +225,7 @@ MD.Page {
                     RowLayout {
                         spacing: 8
                         MD.Text {
-                            text: "State:"
+                            text: qsTr("State:")
                             typescale: MD.Token.typescale.label_medium
                             color: MD.Token.color.on_surface_variant
                         }
@@ -256,7 +256,7 @@ MD.Page {
                         spacing: 8
 
                         SectionTitle {
-                            text: "Active Renderers"
+                            text: qsTr("Active Renderers")
                         }
 
                         Item {
@@ -291,7 +291,7 @@ MD.Page {
                     SectionHint {
                         readonly property var liveRenderers: W.App.rendererManager.renderers
                         visible: !liveRenderers || liveRenderers.length === 0
-                        text: "No active renderers"
+                        text: qsTr("No active renderers")
                     }
 
                     ListView {
@@ -356,18 +356,18 @@ MD.Page {
                     spacing: 8
 
                     SectionTitle {
-                        text: "Components"
+                        text: qsTr("Components")
                     }
 
                     SectionHint {
                         typescale: MD.Token.typescale.label_medium
                         visible: pluginQuery.supportedTypes && pluginQuery.supportedTypes.length > 0
-                        text: "Supported types: " + (pluginQuery.supportedTypes ? pluginQuery.supportedTypes.join(", ") : "")
+                        text: qsTr("Supported types: %1").arg(pluginQuery.supportedTypes ? pluginQuery.supportedTypes.join(", ") : "")
                     }
 
                     SectionHint {
                         visible: !pluginQuery.renderers || pluginQuery.renderers.length === 0
-                        text: "No components"
+                        text: qsTr("No components")
                     }
 
                     ListView {

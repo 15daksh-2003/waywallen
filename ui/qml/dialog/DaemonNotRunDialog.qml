@@ -52,14 +52,14 @@ MD.Popup {
             Layout.fillWidth: true
             title: {
                 if (root.daemonStarting)
-                    return "Starting…";
+                    return qsTr("Starting…");
                 switch (W.DaemonDBusClient.status) {
                 case W.DaemonDBusClient.Disconnected:
-                    return "Daemon not running";
+                    return qsTr("Daemon not running");
                 case W.DaemonDBusClient.VersionMissing:
-                    return "Daemon too old";
+                    return qsTr("Daemon too old");
                 case W.DaemonDBusClient.VersionMismatch:
-                    return "Daemon version mismatch";
+                    return qsTr("Daemon version mismatch");
                 }
                 return "";
             }
@@ -72,14 +72,14 @@ MD.Popup {
             wrapMode: Text.WordWrap
             text: {
                 if (root.daemonStarting)
-                    return "waywallen is initializing core services. This usually takes a few seconds.";
+                    return qsTr("waywallen is initializing core services. This usually takes a few seconds.");
                 switch (W.DaemonDBusClient.status) {
                 case W.DaemonDBusClient.Disconnected:
-                    return "The waywallen daemon is not on the session bus.";
+                    return qsTr("The waywallen daemon is not on the session bus.");
                 case W.DaemonDBusClient.VersionMissing:
-                    return `Daemon is online but does not advertise a version.`;
+                    return qsTr("Daemon is online but does not advertise a version.");
                 case W.DaemonDBusClient.VersionMismatch:
-                    return `Daemon version ${W.DaemonDBusClient.daemonVersion} + is incompatible.`;
+                    return qsTr("Daemon version %1 + is incompatible.").arg(W.DaemonDBusClient.daemonVersion);
                 }
                 return "";
             }
@@ -125,7 +125,7 @@ MD.Popup {
                 }
 
                 trailing: MD.BusyButton {
-                    text: "Kill"
+                    text: qsTr("Kill")
                     mdState.type: MD.Enum.BtText
                     busy: m_t.running
                     onClicked: {
@@ -146,13 +146,13 @@ MD.Popup {
             Layout.fillWidth: true
 
             MD.Button {
-                text: "Exit"
+                text: qsTr("Exit")
                 mdState.type: MD.Enum.BtText
                 T.DialogButtonBox.buttonRole: T.DialogButtonBox.RejectRole
                 onClicked: Qt.quit()
             }
             MD.Button {
-                text: "Restart"
+                text: qsTr("Restart")
                 mdState.type: MD.Enum.BtText
                 T.DialogButtonBox.buttonRole: T.DialogButtonBox.AcceptRole
                 visible: !root.daemonStarting

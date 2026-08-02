@@ -191,9 +191,9 @@ MD.Page {
         target: W.Notify
         function onWallpaperSyncFinished(count, error) {
             if (error && error.length > 0) {
-                W.Action.toast("Sync failed: " + error);
+                W.Action.toast(qsTr("Sync failed: %1").arg(error));
             } else {
-                W.Action.toast("Scanned " + count + " wallpapers");
+                W.Action.toast(qsTr("Scanned %n wallpaper(s)", "", count));
             }
             wallpaperQuery.reload();
         }
@@ -222,7 +222,7 @@ MD.Page {
 
     MD.Action {
         id: createPlaylistFromSelectionAction
-        text: "New playlist"
+        text: qsTr("New playlist")
         icon.name: MD.Token.icon.playlist_add
         busy: playlistMutation.querying
         checked: wallpaperSelectSheetRelay.activeAction === createPlaylistFromSelectionAction
@@ -232,7 +232,7 @@ MD.Page {
 
     MD.Action {
         id: addToPlaylistAction
-        text: "Add to playlist"
+        text: qsTr("Add to playlist")
         icon.name: MD.Token.icon.playlist_add
         checked: wallpaperSelectSheetRelay.activeAction === addToPlaylistAction
         enabled: root.selectedWallpaperCount > 0 && (playlistListQuery.playlists || []).length > 0 && !playlistMutation.querying
@@ -241,7 +241,7 @@ MD.Page {
 
     MD.Action {
         id: applyPlaylistSelectionAction
-        text: "Apply"
+        text: qsTr("Apply")
         icon.name: MD.Token.icon.check
         busy: playlistMutation.querying
         enabled: playlistWallpaperSelect.playlistEditTargetId > 0 && !playlistMutation.querying
@@ -259,7 +259,7 @@ MD.Page {
 
     MD.Action {
         id: playlistListAction
-        text: "Playlists"
+        text: qsTr("Playlists")
         icon.name: MD.Token.icon.playlist_play
         checked: W.App.displayManager.hasActivePlaylistDisplays
         onTriggered: root.togglePlaylistListSheet()
@@ -267,7 +267,7 @@ MD.Page {
 
     MD.Action {
         id: tweakAction
-        text: "Tweak"
+        text: qsTr("Tweak")
         icon.name: MD.Token.icon.tune
         checked: root.isSheetActive(root.wallpaperTweakSheet)
         onTriggered: root.toggleWallpaperTweakSheet()
@@ -276,7 +276,7 @@ MD.Page {
     MD.Action {
         id: filterAction
         icon.name: MD.Token.icon.filter_list
-        text: "Filters"
+        text: qsTr("Filters")
         checked: wallpaperQuery.hasActiveFilters
         onTriggered: MD.Util.showPopup(filterDialogComponent, {}, root.Window.window)
     }
@@ -293,7 +293,7 @@ MD.Page {
     MD.Action {
         id: refreshAction
         icon.name: MD.Token.icon.refresh
-        text: "Refresh"
+        text: qsTr("Refresh")
         enabled: !W.Notify.scanInProgress
         onTriggered: scanQuery.reload()
     }
@@ -1094,7 +1094,7 @@ MD.Page {
                             MD.Text {
                                 Layout.alignment: Qt.AlignHCenter
                                 visible: !wallpaperQuery.querying
-                                text: "No wallpapers found"
+                                text: qsTr("No wallpapers found")
                                 typescale: MD.Token.typescale.body_large
                                 color: MD.Token.color.on_surface_variant
                             }
@@ -1120,7 +1120,7 @@ MD.Page {
                                 // (in that case the user wants Refresh, not a
                                 // second round of auto-detection).
                                 visible: parent.showLibraryHint
-                                text: "Auto detect libraries"
+                                text: qsTr("Auto detect libraries")
                                 busy: autoDetectQuery.querying
                                 mdState.type: MD.Enum.BtFilledTonal
                                 onClicked: {

@@ -24,7 +24,7 @@ Item {
     property var applyTargetIds: []
     property int rendererIndex: 0
     readonly property var kFillModeValues: [1, 2, 3, 7]
-    readonly property var kFillModeLabels: ["Stretch", "Fit", "Crop", "Center"]
+    readonly property var kFillModeLabels: [qsTr("Stretch"), qsTr("Fit"), qsTr("Crop"), qsTr("Center")]
     readonly property var kRotationValues: [1, 2, 3, 4]
     readonly property var kRotationLabels: ["0°", "90°", "180°", "270°"]
     readonly property bool wallpaperLayoutOverrideSet: root.wp?.wallpaperLayoutOverrideSet ?? false
@@ -151,16 +151,16 @@ Item {
         target: portalApplyQuery
         function onStatusChanged() {
             if (portalApplyQuery.status === 3)
-                W.Action.toast("Portal apply failed");
+                W.Action.toast(qsTr("Portal apply failed"));
             else if (portalApplyQuery.status === 2)
-                W.Action.toast("Wallpaper sent to desktop portal");
+                W.Action.toast(qsTr("Wallpaper sent to desktop portal"));
         }
     }
 
     Connections {
         target: removeQuery
         function onRemoved() {
-            W.Action.toast("Wallpaper removed");
+            W.Action.toast(qsTr("Wallpaper removed"));
             root.back();
         }
         function onStatusChanged() {
@@ -205,7 +205,7 @@ Item {
             if (layoutSetQuery.status === 2)
                 wallpaperGetQuery.reload();
             else if (layoutSetQuery.status === 3)
-                W.Action.toast("Layout update failed");
+                W.Action.toast(qsTr("Layout update failed"));
         }
     }
 
@@ -277,7 +277,7 @@ Item {
 
     MD.Action {
         id: applyAction
-        text: "Apply"
+        text: qsTr("Apply")
         busy: applyQuery.querying
         enabled: (W.App.displayManager.displays || []).length > 0
         onTriggered: {
@@ -297,7 +297,7 @@ Item {
 
     MD.Action {
         id: applyViaPortalAction
-        text: "Apply via desktop portal"
+        text: qsTr("Apply via desktop portal")
         busy: portalApplyQuery.querying
         onTriggered: {
             if (busy) return;
@@ -309,14 +309,14 @@ Item {
 
     MD.Action {
         id: closeAction
-        text: "Close"
+        text: qsTr("Close")
         icon.name: MD.Token.icon.close
         onTriggered: root.back()
     }
 
     MD.Action {
         id: infoAction
-        text: "Info"
+        text: qsTr("Info")
         icon.name: MD.Token.icon.info
         enabled: (root.wp?.id_proto ?? "") !== ""
         onTriggered: root.openInfo()
@@ -324,7 +324,7 @@ Item {
 
     MD.Action {
         id: openContainerFolderAction
-        text: "Open containing folder"
+        text: qsTr("Open containing folder")
         icon.name: MD.Token.icon.folder_open
         enabled: root.containerFolderUrl(root.wp?.resource).length > 0
         onTriggered: root.openContainerFolder()
@@ -332,7 +332,7 @@ Item {
 
     MD.Action {
         id: removeAction
-        text: "Remove"
+        text: qsTr("Remove")
         icon.name: MD.Token.icon.delete
         busy: removeQuery.querying
         enabled: (root.wp?.supportsItemRemove ?? false) && (root.wp?.id_proto ?? "") !== ""
@@ -405,7 +405,7 @@ Item {
 
                 MD.Text {
                     Layout.fillWidth: true
-                    text: root.wp?.name || "Untitled"
+                    text: root.wp?.name || qsTr("Untitled")
                     typescale: MD.Token.typescale.title_large
                     color: MD.Token.color.on_surface
                     wrapMode: Text.Wrap
@@ -461,7 +461,7 @@ Item {
 
                     MD.Text {
                         visible: m_meta.hasPath
-                        text: "Path"
+                        text: qsTr("Path")
                         typescale: MD.Token.typescale.label_medium
                         color: MD.Token.color.on_surface_variant
                     }
@@ -478,7 +478,7 @@ Item {
 
                     MD.Text {
                         visible: m_meta.hasResolution
-                        text: "Resolution"
+                        text: qsTr("Resolution")
                         typescale: MD.Token.typescale.label_medium
                         color: MD.Token.color.on_surface_variant
                     }
@@ -491,7 +491,7 @@ Item {
 
                     MD.Text {
                         visible: m_meta.hasSize
-                        text: "Size"
+                        text: qsTr("Size")
                         typescale: MD.Token.typescale.label_medium
                         color: MD.Token.color.on_surface_variant
                     }
@@ -504,7 +504,7 @@ Item {
 
                     MD.Text {
                         visible: m_meta.hasFormat
-                        text: "Format"
+                        text: qsTr("Format")
                         typescale: MD.Token.typescale.label_medium
                         color: MD.Token.color.on_surface_variant
                     }
@@ -545,7 +545,7 @@ Item {
                         spacing: 4
                         MD.Text {
                             Layout.fillWidth: true
-                            text: "Description"
+                            text: qsTr("Description")
                             typescale: MD.Token.typescale.label_large
                             color: MD.Token.color.on_surface_variant
                         }
@@ -583,7 +583,7 @@ Item {
 
                         MD.Text {
                             Layout.fillWidth: true
-                            text: "Layout override"
+                            text: qsTr("Layout override")
                             typescale: MD.Token.typescale.label_large
                             color: MD.Token.color.on_surface_variant
                         }
@@ -594,7 +594,7 @@ Item {
                             enabled: root.wallpaperLayoutOverrideSet
                             onClicked: root.resetWallpaperLayout()
                             MD.ToolTip.visible: hovered
-                            MD.ToolTip.text: "Reset to display layout"
+                            MD.ToolTip.text: qsTr("Reset to display layout")
                         }
                     }
 
@@ -615,7 +615,7 @@ Item {
                             spacing: 4
 
                             MD.Text {
-                                text: "Fill mode"
+                                text: qsTr("Fill mode")
                                 typescale: MD.Token.typescale.label_medium
                                 color: MD.Token.color.on_surface_variant
                             }
@@ -641,7 +641,7 @@ Item {
                             opacity: enabled ? 1.0 : 0.4
 
                             MD.Text {
-                                text: "Horizontal"
+                                text: qsTr("Horizontal")
                                 typescale: MD.Token.typescale.label_medium
                                 color: MD.Token.color.on_surface_variant
                             }
@@ -671,7 +671,7 @@ Item {
                             opacity: enabled ? 1.0 : 0.4
 
                             MD.Text {
-                                text: "Vertical"
+                                text: qsTr("Vertical")
                                 typescale: MD.Token.typescale.label_medium
                                 color: MD.Token.color.on_surface_variant
                             }
@@ -699,7 +699,7 @@ Item {
                             spacing: 4
 
                             MD.Text {
-                                text: "Rotation"
+                                text: qsTr("Rotation")
                                 typescale: MD.Token.typescale.label_medium
                                 color: MD.Token.color.on_surface_variant
                             }
@@ -783,7 +783,7 @@ Item {
                                 propertyModel.resetUserProperties();
                         }
                         MD.ToolTip.visible: hovered
-                        MD.ToolTip.text: "Reset to defaults"
+                        MD.ToolTip.text: qsTr("Reset to defaults")
                     }
                 }
             }
@@ -918,13 +918,13 @@ Item {
                         enabled: m_text_input.text !== m_prop_delegate.currentValue
                         onClicked: m_text_input.submit()
                         MD.ToolTip.visible: hovered
-                        MD.ToolTip.text: "Apply"
+                        MD.ToolTip.text: qsTr("Apply")
                     }
                 }
 
                 MD.Text {
                     visible: !m_prop_delegate.supported
-                    text: "(" + m_prop_delegate.type + " — not yet supported)"
+                    text: qsTr("(%1 — not yet supported)").arg(m_prop_delegate.type)
                     typescale: MD.Token.typescale.body_small
                     color: MD.Token.color.on_surface_variant
                 }
@@ -946,7 +946,7 @@ Item {
                 visible: (W.App.displayManager.displays || []).length > 0
 
                 MD.Text {
-                    text: "Apply to"
+                    text: qsTr("Apply to")
                     typescale: MD.Token.typescale.label_medium
                     color: MD.Token.color.on_surface_variant
                 }
@@ -956,7 +956,7 @@ Item {
                     spacing: 6
 
                     MD.FilterChip {
-                        text: "All"
+                        text: qsTr("All")
                         checked: root.isTargetAll()
                         onClicked: root.applyTargetIds = []
                     }
@@ -966,7 +966,7 @@ Item {
                         MD.FilterChip {
                             required property var modelData
                             width: Math.min(implicitWidth, 220)
-                            text: (modelData?.displayLabel ?? "") || (modelData?.name ?? "").replace(/^waywallen-[a-z]+-[a-z]+-/, "") || ("Display " + modelData?.id)
+                            text: (modelData?.displayLabel ?? "") || (modelData?.name ?? "").replace(/^waywallen-[a-z]+-[a-z]+-/, "") || qsTr("Display %1").arg(modelData?.id)
                             checked: root.applyTargetIds.indexOf(modelData?.id) >= 0
                             onClicked: root.toggleTarget(modelData?.id)
                         }
@@ -980,7 +980,7 @@ Item {
                 visible: root.rendererCandidates.length >= 2
 
                 MD.Text {
-                    text: "Renderer"
+                    text: qsTr("Renderer")
                     typescale: MD.Token.typescale.label_medium
                     color: MD.Token.color.on_surface_variant
                 }
@@ -1007,7 +1007,7 @@ Item {
                 action: root.activeApplyAction
                 mdState.type: MD.Enum.BtFilled
                 MD.ToolTip.visible: applyBtn.hovered && !applyBtn.enabled
-                MD.ToolTip.text: "No display connected"
+                MD.ToolTip.text: qsTr("No display connected")
             }
         }
     }

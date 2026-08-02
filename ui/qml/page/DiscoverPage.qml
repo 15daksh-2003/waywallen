@@ -253,7 +253,7 @@ MD.Page {
 
     MD.Action {
         id: tweakAction
-        text: "Tweak"
+        text: qsTr("Tweak")
         icon.name: MD.Token.icon.tune
         checked: root.isSheetActive(root.discoverTweakSheet)
         onTriggered: root.toggleDiscoverTweakSheet()
@@ -262,7 +262,7 @@ MD.Page {
     MD.Action {
         id: filterAction
         icon.name: MD.Token.icon.filter_list
-        text: "Filters"
+        text: qsTr("Filters")
         enabled: m_filter_dialog.filters.length > 0
         checked: searchQuery.tags.length > 0
         onTriggered: m_filter_dialog.open()
@@ -271,7 +271,7 @@ MD.Page {
     MD.Action {
         id: refreshAction
         icon.name: MD.Token.icon.refresh
-        text: "Refresh"
+        text: qsTr("Refresh")
         enabled: searchQuery.browsingEnabled && !searchQuery.querying
         onTriggered: searchQuery.reload()
     }

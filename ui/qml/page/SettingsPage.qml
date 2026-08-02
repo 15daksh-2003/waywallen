@@ -12,7 +12,7 @@ MD.Page {
     padding: 0
     showHeader: true
     showBackground: false
-    title: 'Settings'
+    title: qsTr('Settings')
     scrolling: !m_flick.atYBeginning
 
     actions: [
