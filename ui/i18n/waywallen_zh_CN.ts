@@ -1014,7 +1014,7 @@ Related display: #%1</source>
     </message>
     <message>
         <source>Origin</source>
-        <translation>来源</translation>
+        <translation>原始</translation>
     </message>
     <message>
         <source>Requires renderer restart</source>
@@ -1197,7 +1197,7 @@ Related display: #%1</source>
     </message>
     <message>
         <source>Rotation</source>
-        <translation>旋转</translation>
+        <translation>轮换</translation>
     </message>
     <message>
         <source>Queue mode</source>
@@ -1291,7 +1291,7 @@ Unsaved frame state may be lost.</source>
     </message>
     <message>
         <source>Daemon</source>
-        <translation>守护进程</translation>
+        <translation>后台</translation>
     </message>
     <message>
         <source>Service:</source>
@@ -1303,7 +1303,7 @@ Unsaved frame state may be lost.</source>
     </message>
     <message>
         <source>Active Renderers</source>
-        <translation>活跃渲染器</translation>
+        <translation>运行的渲染器</translation>
     </message>
     <message>
         <source>Mute all</source>
