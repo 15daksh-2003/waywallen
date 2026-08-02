@@ -17,7 +17,7 @@ MD.Dialog {
     property var valueDialog: null
     property var activeFilter: null
     property var confirmationFilter: null
-    readonly property var popupParent: root.Window.window ? root.Window.window : root.parent
+    readonly property Item popupParent: T.Overlay.overlay ?? root.parent
 
     signal apply(var values)
 
