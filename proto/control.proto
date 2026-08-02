@@ -637,7 +637,7 @@ enum Align {
 // layout broadcast back to clients on `DisplayInfo`.
 //
 // Background / clear color is NOT part of layout. The renderer is
-// the sole authority — see `report_state` in waywallen_ipc_v2.
+// the sole authority — see `report_state` in waywallen_ipc_v3.
 message LayoutPrefs {
   FillMode fillmode = 1;
   Align    align    = 2;

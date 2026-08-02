@@ -35,10 +35,9 @@ void                ww_pulse_capture_close(ww_pulse_capture_t* capture);
 
 /* Copies interleaved stereo F32LE frames from the callback-owned fixed ring.
  * Returns the number of frames copied. */
-size_t ww_pulse_capture_read(ww_pulse_capture_t* capture, float* samples, size_t frame_capacity);
-
-uint64_t ww_pulse_capture_generation(ww_pulse_capture_t* capture);
-int      ww_pulse_capture_failed(ww_pulse_capture_t* capture, char* error, size_t error_capacity);
+size_t ww_pulse_capture_read(ww_pulse_capture_t* capture, float* samples, size_t frame_capacity,
+                             uint64_t* generation);
+int    ww_pulse_capture_failed(ww_pulse_capture_t* capture, char* error, size_t error_capacity);
 
 ww_pulse_playback_observer_t* ww_pulse_playback_observer_open(int* error_code, char* error,
                                                               size_t error_capacity);

@@ -1,6 +1,8 @@
 use std::ffi::{c_char, c_float, c_int, c_void, CStr};
 use std::ptr::NonNull;
 
+use super::window::{AudioPcmWindow, PcmWindowAssembler};
+
 const ERROR_CAPACITY: usize = 512;
 
 #[link(name = "waywallen_pulse_adapter", kind = "static")]
@@ -15,8 +17,8 @@ unsafe extern "C" {
         capture: *mut c_void,
         samples: *mut c_float,
         frame_capacity: usize,
+        generation: *mut u64,
     ) -> usize;
-    fn ww_pulse_capture_generation(capture: *mut c_void) -> u64;
     fn ww_pulse_capture_failed(
         capture: *mut c_void,
         error: *mut c_char,
@@ -76,13 +78,14 @@ impl std::fmt::Display for CaptureError {
 impl std::error::Error for CaptureError {}
 
 pub trait AudioCaptureBackend: Send {
-    fn generation(&self) -> u64;
-    fn read(&mut self, samples: &mut [f32]) -> Result<usize, CaptureError>;
+    fn snapshot(&mut self, captured_at_ns: u64) -> Result<Option<AudioPcmWindow>, CaptureError>;
     fn discard(&mut self);
 }
 
 pub struct PulseCapture {
     handle: NonNull<c_void>,
+    assembler: PcmWindowAssembler,
+    scratch: [f32; 2048],
 }
 
 // The opaque handle is created, polled, and destroyed by one audio worker.
@@ -99,7 +102,11 @@ impl PulseCapture {
                 message: c_message(&error),
             });
         };
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            assembler: PcmWindowAssembler::default(),
+            scratch: [0.0; 2048],
+        })
     }
 
     fn status(&self) -> Result<(), CaptureError> {
@@ -119,32 +126,39 @@ impl PulseCapture {
 }
 
 impl AudioCaptureBackend for PulseCapture {
-    fn generation(&self) -> u64 {
-        unsafe { ww_pulse_capture_generation(self.handle.as_ptr()) }
-    }
-
-    fn read(&mut self, samples: &mut [f32]) -> Result<usize, CaptureError> {
+    fn snapshot(&mut self, captured_at_ns: u64) -> Result<Option<AudioPcmWindow>, CaptureError> {
         self.status()?;
+        let mut generation = 0;
         let frames = unsafe {
             ww_pulse_capture_read(
                 self.handle.as_ptr(),
-                samples.as_mut_ptr(),
-                samples.len() / 2,
+                self.scratch.as_mut_ptr(),
+                self.scratch.len() / 2,
+                &mut generation,
             )
         };
-        Ok(frames)
+        self.assembler
+            .ingest_interleaved(generation, &self.scratch[..frames * 2]);
+        Ok(self.assembler.snapshot(captured_at_ns))
     }
 
     fn discard(&mut self) {
-        let mut scratch = [0.0f32; 2048];
-        while unsafe {
-            ww_pulse_capture_read(
-                self.handle.as_ptr(),
-                scratch.as_mut_ptr(),
-                scratch.len() / 2,
-            )
-        } > 0
-        {}
+        loop {
+            let mut generation = 0;
+            let frames = unsafe {
+                ww_pulse_capture_read(
+                    self.handle.as_ptr(),
+                    self.scratch.as_mut_ptr(),
+                    self.scratch.len() / 2,
+                    &mut generation,
+                )
+            };
+            self.assembler.ingest_interleaved(generation, &[]);
+            if frames == 0 {
+                break;
+            }
+        }
+        self.assembler.discard();
     }
 }
 

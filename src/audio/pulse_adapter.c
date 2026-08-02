@@ -248,6 +248,14 @@ static void reset_ring(ww_pulse_capture_t* self) {
     pthread_mutex_unlock(&self->state_mutex);
 }
 
+static void mark_discontinuity(ww_pulse_capture_t* self) {
+    pthread_mutex_lock(&self->state_mutex);
+    self->ring_read   = 0;
+    self->ring_length = 0;
+    self->generation  = atomic_fetch_add_explicit(&generation_counter, 1, memory_order_relaxed) + 1;
+    pthread_mutex_unlock(&self->state_mutex);
+}
+
 static void destroy_stream_locked(ww_pulse_capture_t* self) {
     if (! self->stream) return;
     self->api.stream_set_state_callback(self->stream, NULL, NULL);
@@ -343,6 +351,7 @@ static void ring_write(ww_pulse_capture_t* self, const float* samples, size_t fr
     if (frames > WW_PULSE_RING_FRAMES) {
         samples += (frames - WW_PULSE_RING_FRAMES) * 2u;
         frames = WW_PULSE_RING_FRAMES;
+        mark_discontinuity(self);
     }
 
     pthread_mutex_lock(&self->state_mutex);
@@ -350,8 +359,10 @@ static void ring_write(ww_pulse_capture_t* self, const float* samples, size_t fr
                                 ? self->ring_length + frames - WW_PULSE_RING_FRAMES
                                 : 0;
     if (overflow > 0) {
-        self->ring_read = (self->ring_read + overflow) % WW_PULSE_RING_FRAMES;
-        self->ring_length -= overflow;
+        self->ring_read   = 0;
+        self->ring_length = 0;
+        self->generation =
+            atomic_fetch_add_explicit(&generation_counter, 1, memory_order_relaxed) + 1;
     }
     size_t write = (self->ring_read + self->ring_length) % WW_PULSE_RING_FRAMES;
     for (size_t frame = 0; frame < frames; ++frame) {
@@ -385,6 +396,8 @@ static void on_stream_read(pa_stream* stream, size_t bytes, void* userdata) {
                 self, WW_PULSE_STREAM_FAILED, "PulseAudio stream returned a partial stereo frame");
         } else if (data) {
             ring_write(self, data, size / (2u * sizeof(float)));
+        } else {
+            mark_discontinuity(self);
         }
         if (self->api.stream_drop(stream) < 0) {
             set_failure(self, WW_PULSE_STREAM_FAILED, "failed to drop PulseAudio stream data");
@@ -625,9 +638,11 @@ void ww_pulse_capture_close(ww_pulse_capture_t* self) {
     free(self);
 }
 
-size_t ww_pulse_capture_read(ww_pulse_capture_t* self, float* samples, size_t frame_capacity) {
+size_t ww_pulse_capture_read(ww_pulse_capture_t* self, float* samples, size_t frame_capacity,
+                             uint64_t* generation) {
     if (! self || ! samples || frame_capacity == 0) return 0;
     pthread_mutex_lock(&self->state_mutex);
+    if (generation) *generation = self->generation;
     const size_t frames = self->ring_length < frame_capacity ? self->ring_length : frame_capacity;
     for (size_t frame = 0; frame < frames; ++frame) {
         const size_t index       = (self->ring_read + frame) % WW_PULSE_RING_FRAMES;
@@ -638,14 +653,6 @@ size_t ww_pulse_capture_read(ww_pulse_capture_t* self, float* samples, size_t fr
     self->ring_length -= frames;
     pthread_mutex_unlock(&self->state_mutex);
     return frames;
-}
-
-uint64_t ww_pulse_capture_generation(ww_pulse_capture_t* self) {
-    if (! self) return 0;
-    pthread_mutex_lock(&self->state_mutex);
-    const uint64_t generation = self->generation;
-    pthread_mutex_unlock(&self->state_mutex);
-    return generation;
 }
 
 int ww_pulse_capture_failed(ww_pulse_capture_t* self, char* error, size_t error_capacity) {

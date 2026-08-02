@@ -353,13 +353,17 @@ mod tests {
         assert_eq!(applied, got);
         assert!(fds.is_empty());
 
-        let audio = EventIn::AudioSpectrum {
+        let audio = EventIn::AudioWindow {
             subscription_revision: 7,
             generation: 3,
             sequence: 11,
             captured_at_ns: 42,
-            left: (0..64).map(|index| index as f32 / 63.0).collect(),
-            right: (0..64).map(|index| 1.0 - index as f32 / 63.0).collect(),
+            end_sample_frame: 4096,
+            sample_rate_hz: 48_000,
+            channels: 2,
+            frames: 4096,
+            flags: 0,
+            samples: (0..8192).map(|index| index as f32 / 8191.0).collect(),
         };
         send_control(&a, &audio, &[]).unwrap();
         let (got, fds) = recv_control(&b).unwrap();

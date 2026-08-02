@@ -3,9 +3,9 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
-use super::analyzer::{AudioSpectrumFrame, SpectrumAnalyzer, AUDIO_SPECTRUM_BINS};
 use super::playback::{has_external_playback, PlaybackObserverBackend};
 use super::pulse::{AudioCaptureBackend, CaptureErrorKind, PulseCapture, PulsePlaybackObserver};
+use super::window::{AudioPcmWindow, AUDIO_WINDOW_END_OF_STREAM};
 use crate::events::GlobalEvent;
 use crate::renderer_manager::{RendererEventKind, RendererManager};
 use crate::routing::Router;
@@ -50,7 +50,7 @@ impl AudioService {
         mut shutdown: watch::Receiver<bool>,
     ) -> Self {
         let (command_tx, command_rx) = std::sync::mpsc::channel();
-        let (frame_tx, frame_rx) = watch::channel::<Option<AudioSpectrumFrame>>(None);
+        let (frame_tx, frame_rx) = watch::channel::<Option<AudioPcmWindow>>(None);
         let (state_tx, state_rx) = watch::channel(AudioServiceState::Closed);
         let worker = std::thread::spawn(move || {
             run_worker(command_rx, frame_tx, state_tx, DEFAULT_IDLE_TIMEOUT, || {
@@ -141,7 +141,7 @@ impl AudioService {
                                             last_sent.max(frame_identity),
                                         );
                                         last_sent = Some((generation, sequence));
-                                        send_silence(&manager, generation, sequence).await;
+                                        send_end(&manager, generation, sequence).await;
                                     }
                                 }
                                 let demanded = global.mute_when_other_audio;
@@ -176,14 +176,18 @@ impl AudioService {
                             .subscribers(RendererEventKind::Audio);
                         for (id, revision) in targets {
                             if let Err(error) = manager
-                                .send_audio_spectrum_latest(
+                                .send_audio_window_latest(
                                     &id,
                                     revision,
                                     frame.generation,
                                     frame.sequence,
                                     frame.captured_at_ns,
-                                    frame.left.to_vec(),
-                                    frame.right.to_vec(),
+                                    frame.end_sample_frame,
+                                    frame.sample_rate_hz,
+                                    frame.channels,
+                                    frame.frames,
+                                    0,
+                                    frame.samples.to_vec(),
                                 )
                                 .await
                             {
@@ -223,33 +227,36 @@ fn next_audio_identity(last: Option<(u64, u64)>) -> (u64, u64) {
     }
 }
 
-async fn send_silence(manager: &RendererManager, generation: u64, sequence: u64) {
+async fn send_end(manager: &RendererManager, generation: u64, sequence: u64) {
     let targets = manager
         .subscription_snapshot()
         .subscribers(RendererEventKind::Audio);
-    let silence = vec![0.0; AUDIO_SPECTRUM_BINS];
     let captured_at_ns = monotonic_now_ns();
     for (id, revision) in targets {
         if let Err(error) = manager
-            .send_audio_spectrum_latest(
+            .send_audio_window_latest(
                 &id,
                 revision,
                 generation,
                 sequence,
                 captured_at_ns,
-                silence.clone(),
-                silence.clone(),
+                0,
+                0,
+                0,
+                0,
+                AUDIO_WINDOW_END_OF_STREAM,
+                Vec::new(),
             )
             .await
         {
-            log::debug!("renderer {id}: audio silence dispatch dropped: {error}");
+            log::debug!("renderer {id}: audio end dispatch dropped: {error}");
         }
     }
 }
 
 fn run_worker<F>(
     commands: std::sync::mpsc::Receiver<CaptureWorkerCommand>,
-    frames: watch::Sender<Option<AudioSpectrumFrame>>,
+    frames: watch::Sender<Option<AudioPcmWindow>>,
     states: watch::Sender<AudioServiceState>,
     idle_timeout: Duration,
     mut open_backend: F,
@@ -257,14 +264,12 @@ fn run_worker<F>(
     F: FnMut() -> Result<Box<dyn AudioCaptureBackend>, super::pulse::CaptureError>,
 {
     let mut backend: Option<Box<dyn AudioCaptureBackend>> = None;
-    let mut analyzer = SpectrumAnalyzer::default();
     let mut enabled = true;
     let mut demand = false;
     let mut idle_deadline: Option<Instant> = None;
     let mut retry_deadline: Option<Instant> = None;
     let mut backoff = Duration::from_secs(1);
     let mut unavailable_latched = false;
-    let mut samples = [0.0f32; 2048];
 
     loop {
         let timeout = if demand {
@@ -287,7 +292,6 @@ fn run_worker<F>(
                 enabled = next_enabled;
                 demand = next_demand;
                 frames.send_replace(None);
-                analyzer.clear();
                 retry_deadline = None;
                 backoff = Duration::from_secs(1);
                 if !enabled {
@@ -300,7 +304,6 @@ fn run_worker<F>(
                     unavailable_latched = false;
                     if let Some(capture) = backend.as_mut() {
                         capture.discard();
-                        analyzer.reset(capture.generation());
                         states.send_replace(AudioServiceState::Active);
                     }
                 } else if backend.is_some() {
@@ -338,7 +341,6 @@ fn run_worker<F>(
             match open_backend() {
                 Ok(mut capture) => {
                     capture.discard();
-                    analyzer.reset(capture.generation());
                     backend = Some(capture);
                     retry_deadline = None;
                     backoff = Duration::from_secs(1);
@@ -366,24 +368,15 @@ fn run_worker<F>(
         let Some(capture) = backend.as_mut() else {
             continue;
         };
-        let generation = capture.generation();
-        match capture.read(&mut samples) {
-            Ok(0) => {}
-            Ok(frame_count) => {
-                let captured_at_ns = monotonic_now_ns();
-                if let Some(frame) = analyzer.ingest_interleaved(
-                    generation,
-                    captured_at_ns,
-                    &samples[..frame_count * 2],
-                ) {
-                    frames.send_replace(Some(frame));
-                }
+        match capture.snapshot(monotonic_now_ns()) {
+            Ok(None) => {}
+            Ok(Some(frame)) => {
+                frames.send_replace(Some(frame));
             }
             Err(error) => {
                 log::warn!("audio response capture failed: {error}");
                 frames.send_replace(None);
                 drop(backend.take());
-                analyzer.clear();
                 retry_deadline = Some(Instant::now() + backoff);
                 backoff = (backoff * 2).min(MAX_BACKOFF);
                 states.send_replace(AudioServiceState::Backoff);
@@ -512,12 +505,12 @@ mod tests {
     }
 
     impl AudioCaptureBackend for FakeCapture {
-        fn generation(&self) -> u64 {
-            self.generation
-        }
-
-        fn read(&mut self, _samples: &mut [f32]) -> Result<usize, CaptureError> {
-            Ok(0)
+        fn snapshot(
+            &mut self,
+            _captured_at_ns: u64,
+        ) -> Result<Option<AudioPcmWindow>, CaptureError> {
+            let _ = self.generation;
+            Ok(None)
         }
 
         fn discard(&mut self) {}

@@ -1,6 +1,6 @@
 /* waywallen-bridge — IPC framing + high-level helpers.
  *
- * Handwritten companion to the auto-generated src/ipc_v2.c. Provides
+ * Handwritten companion to the auto-generated src/ipc_v3.c. Provides
  * SCM_RIGHTS fd passing on top of the generated per-message encoders
  * and a tagged union for incoming control requests.
  */
@@ -527,8 +527,8 @@ int ww_bridge_recv_control(int sock, ww_bridge_control_t* out) {
         rc = ww_evt_in_event_subscriptions_applied_decode(
             body, body_len, &out->u.event_subscriptions_applied);
         break;
-    case WW_EVT_IN_AUDIO_SPECTRUM:
-        rc = ww_evt_in_audio_spectrum_decode(body, body_len, &out->u.audio_spectrum);
+    case WW_EVT_IN_AUDIO_WINDOW:
+        rc = ww_evt_in_audio_window_decode(body, body_len, &out->u.audio_window);
         break;
     case WW_EVT_IN_SET_FPS: rc = ww_evt_in_set_fps_decode(body, body_len, &out->u.set_fps); break;
     case WW_EVT_IN_SHUTDOWN:
@@ -560,7 +560,7 @@ void ww_bridge_control_free(ww_bridge_control_t* msg) {
     case WW_EVT_IN_EVENT_SUBSCRIPTIONS_APPLIED:
         ww_evt_in_event_subscriptions_applied_free(&msg->u.event_subscriptions_applied);
         break;
-    case WW_EVT_IN_AUDIO_SPECTRUM: ww_evt_in_audio_spectrum_free(&msg->u.audio_spectrum); break;
+    case WW_EVT_IN_AUDIO_WINDOW: ww_evt_in_audio_window_free(&msg->u.audio_window); break;
     case WW_EVT_IN_SET_FPS: ww_evt_in_set_fps_free(&msg->u.set_fps); break;
     case WW_EVT_IN_SHUTDOWN: ww_evt_in_shutdown_free(&msg->u.shutdown); break;
     case WW_EVT_IN_NEGOTIATE_BUFFERS:
@@ -664,7 +664,7 @@ int ww_bridge_recv_init(int sock, ww_bridge_init_t* out) {
 void ww_bridge_init_free(ww_bridge_init_t* out) {
     if (! out) return;
     /* `ww_kv_list_t` cleanup mirrors what the auto-generated
-     * `free_kv_list` does in ipc_v2.c — but that helper is `static`
+     * `free_kv_list` does in ipc_v3.c — but that helper is `static`
      * inside the generated TU. Replicate the freeing pattern locally
      * (free key+value strings, then the `data` array). */
     if (out->settings.data) {
@@ -743,20 +743,30 @@ void ww_bridge_event_subscriptions_applied_free(ww_bridge_event_subscriptions_ap
     memset(out, 0, sizeof(*out));
 }
 
-int ww_bridge_audio_spectrum_from_control(const ww_bridge_control_t*  ctrl,
-                                          ww_bridge_audio_spectrum_t* out) {
+int ww_bridge_audio_window_from_control(const ww_bridge_control_t* ctrl,
+                                        ww_bridge_audio_window_t*  out) {
     if (! ctrl || ! out) return -EINVAL;
     memset(out, 0, sizeof(*out));
-    if (ctrl->op != WW_EVT_IN_AUDIO_SPECTRUM) return -EINVAL;
+    if (ctrl->op != WW_EVT_IN_AUDIO_WINDOW) return -EINVAL;
 
-    const ww_evt_in_audio_spectrum_t* in = &ctrl->u.audio_spectrum;
-    if (in->left.count != WW_BRIDGE_AUDIO_SPECTRUM_BINS ||
-        in->right.count != WW_BRIDGE_AUDIO_SPECTRUM_BINS || ! in->left.data || ! in->right.data) {
+    const ww_evt_in_audio_window_t* in          = &ctrl->u.audio_window;
+    const uint32_t                  known_flags = WW_BRIDGE_AUDIO_END_OF_STREAM;
+    if ((in->flags & ~known_flags) != 0) {
         return -EPROTO;
     }
-    for (uint32_t i = 0; i < WW_BRIDGE_AUDIO_SPECTRUM_BINS; ++i) {
-        if (! isfinite(in->left.data[i]) || in->left.data[i] < 0.0f || in->left.data[i] > 1.0f ||
-            ! isfinite(in->right.data[i]) || in->right.data[i] < 0.0f || in->right.data[i] > 1.0f) {
+    const int ended = (in->flags & WW_BRIDGE_AUDIO_END_OF_STREAM) != 0;
+    if (ended) {
+        if (in->samples.count != 0 || in->frames != 0 || in->sample_rate_hz != 0 ||
+            in->channels != 0)
+            return -EPROTO;
+    } else if (in->sample_rate_hz != WW_BRIDGE_AUDIO_SAMPLE_RATE ||
+               in->channels != WW_BRIDGE_AUDIO_CHANNELS ||
+               in->frames != WW_BRIDGE_AUDIO_WINDOW_FRAMES ||
+               in->samples.count != WW_BRIDGE_AUDIO_SAMPLE_COUNT || ! in->samples.data) {
+        return -EPROTO;
+    }
+    for (uint32_t i = 0; i < in->samples.count; ++i) {
+        if (! isfinite(in->samples.data[i])) {
             return -EPROTO;
         }
     }
@@ -765,8 +775,12 @@ int ww_bridge_audio_spectrum_from_control(const ww_bridge_control_t*  ctrl,
     out->generation            = in->generation;
     out->sequence              = in->sequence;
     out->captured_at_ns        = in->captured_at_ns;
-    memcpy(out->left, in->left.data, sizeof(out->left));
-    memcpy(out->right, in->right.data, sizeof(out->right));
+    out->end_sample_frame      = in->end_sample_frame;
+    out->sample_rate_hz        = in->sample_rate_hz;
+    out->channels              = in->channels;
+    out->frames                = in->frames;
+    out->flags                 = in->flags;
+    if (in->samples.count > 0) memcpy(out->samples, in->samples.data, sizeof(out->samples));
     return 0;
 }
 

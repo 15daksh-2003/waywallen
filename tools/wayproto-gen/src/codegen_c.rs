@@ -392,7 +392,7 @@ pub fn emit_source(p: &Protocol) -> String {
 /// Different protocol consumers install headers at different paths.
 pub fn default_c_include(protocol_name: &str) -> &'static str {
     match protocol_name {
-        "waywallen-ipc" | "waywallen_ipc" => "waywallen-bridge/ipc_v2.h",
+        "waywallen-ipc" | "waywallen_ipc" => "waywallen-bridge/ipc_v3.h",
         _ => "ww_proto.h",
     }
 }

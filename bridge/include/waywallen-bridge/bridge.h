@@ -3,7 +3,7 @@
  *
  * This header layers length-prefix framing + SCM_RIGHTS fd passing
  * on top of the auto-generated per-message encoders/decoders in
- * <waywallen-bridge/ipc_v2.h>.
+ * <waywallen-bridge/ipc_v3.h>.
  *
  * Wire frame (same layout as waywallen-display-v1):
  *
@@ -14,7 +14,7 @@
  *
  * Error conventions: all functions return 0 on success and a negative
  * value on failure. The negative is either a negated errno, or one of
- * the WW_ERR_* codes defined in <waywallen-bridge/ipc_v2.h>.
+ * the WW_ERR_* codes defined in <waywallen-bridge/ipc_v3.h>.
  *
  * Thread safety: none. Each socket is single-writer, single-reader
  * from the caller's perspective.
@@ -22,7 +22,7 @@
 #ifndef WAYWALLEN_BRIDGE_H
 #define WAYWALLEN_BRIDGE_H
 
-#include <waywallen-bridge/ipc_v2.h>
+#include <waywallen-bridge/ipc_v3.h>
 #include <waywallen-bridge/drm_fourcc.h>
 #include <waywallen-bridge/protocol_bits.h>
 
@@ -397,7 +397,7 @@ typedef struct ww_bridge_control {
         ww_evt_in_pointer_axis_t                pointer_axis;
         ww_evt_in_mpris_t                       mpris;
         ww_evt_in_event_subscriptions_applied_t event_subscriptions_applied;
-        ww_evt_in_audio_spectrum_t              audio_spectrum;
+        ww_evt_in_audio_window_t                audio_window;
         ww_evt_in_set_fps_t                     set_fps;
         ww_evt_in_shutdown_t                    shutdown;
         ww_evt_in_negotiate_buffers_t           negotiate_buffers;
@@ -441,7 +441,7 @@ void ww_bridge_control_free(ww_bridge_control_t* msg);
  * Bump when the daemon/renderer wire contract changes; `ww_bridge_recv_init`
  * validates the value sent by the daemon matches and returns -EPROTO
  * otherwise. */
-#define WW_BRIDGE_SUPPORTED_PROTOCOL_VERSION 2u
+#define WW_BRIDGE_SUPPORTED_PROTOCOL_VERSION 3u
 #define WW_BRIDGE_SUPPORTED_SPAWN_VERSION    8u
 
 /* Caller-friendly view of the typed Init payload. The kv list is
@@ -553,21 +553,30 @@ int ww_bridge_event_subscriptions_applied_from_control(
     ww_bridge_control_t* ctrl, ww_bridge_event_subscriptions_applied_t* out);
 void ww_bridge_event_subscriptions_applied_free(ww_bridge_event_subscriptions_applied_t* out);
 
-#define WW_BRIDGE_AUDIO_SPECTRUM_BINS 64u
-typedef struct ww_bridge_audio_spectrum {
+#define WW_BRIDGE_AUDIO_SAMPLE_RATE   48000u
+#define WW_BRIDGE_AUDIO_CHANNELS      2u
+#define WW_BRIDGE_AUDIO_WINDOW_FRAMES 4096u
+#define WW_BRIDGE_AUDIO_SAMPLE_COUNT  (WW_BRIDGE_AUDIO_CHANNELS * WW_BRIDGE_AUDIO_WINDOW_FRAMES)
+#define WW_BRIDGE_AUDIO_END_OF_STREAM 1u
+
+typedef struct ww_bridge_audio_window {
     uint64_t subscription_revision;
     uint64_t generation;
     uint64_t sequence;
     uint64_t captured_at_ns;
-    float    left[WW_BRIDGE_AUDIO_SPECTRUM_BINS];
-    float    right[WW_BRIDGE_AUDIO_SPECTRUM_BINS];
-} ww_bridge_audio_spectrum_t;
+    uint64_t end_sample_frame;
+    uint32_t sample_rate_hz;
+    uint32_t channels;
+    uint32_t frames;
+    uint32_t flags;
+    float    samples[WW_BRIDGE_AUDIO_SAMPLE_COUNT];
+} ww_bridge_audio_window_t;
 
-/* Copy and validate one normalized spectrum. Both wire arrays must contain
- * exactly 64 finite values in [0, 1]. `ctrl` retains its allocations and
- * must still be released with `ww_bridge_control_free`. */
-int ww_bridge_audio_spectrum_from_control(const ww_bridge_control_t*  ctrl,
-                                          ww_bridge_audio_spectrum_t* out);
+/* Copy and validate a complete PCM window or an explicit end marker. `ctrl`
+ * retains its allocations and must still be released with
+ * `ww_bridge_control_free`. */
+int ww_bridge_audio_window_from_control(const ww_bridge_control_t* ctrl,
+                                        ww_bridge_audio_window_t*  out);
 
 /* -----------------------------------------------------------------------
  * Pointer events

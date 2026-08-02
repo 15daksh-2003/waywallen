@@ -4,7 +4,7 @@
 #define WAYWALLEN_BRIDGE_POOL_INTERNAL_H
 
 #include <waywallen-bridge/bridge.h>
-#include <waywallen-bridge/ipc_v2.h>
+#include <waywallen-bridge/ipc_v3.h>
 #include <waywallen-bridge/pool.h>
 
 #include <stdbool.h>

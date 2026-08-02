@@ -1652,15 +1652,19 @@ impl RendererManager {
             .is_some()
     }
 
-    pub async fn send_audio_spectrum_latest(
+    pub async fn send_audio_window_latest(
         &self,
         id: &str,
         subscription_revision: u64,
         generation: u64,
         sequence: u64,
         captured_at_ns: u64,
-        left: Vec<f32>,
-        right: Vec<f32>,
+        end_sample_frame: u64,
+        sample_rate_hz: u32,
+        channels: u32,
+        frames: u32,
+        flags: u32,
+        samples: Vec<f32>,
     ) -> Result<()> {
         let handle = self
             .get(id)
@@ -1677,13 +1681,17 @@ impl RendererManager {
             .writer
             .replace_audio(
                 subscription_revision,
-                ControlMsg::AudioSpectrum {
+                ControlMsg::AudioWindow {
                     subscription_revision,
                     generation,
                     sequence,
                     captured_at_ns,
-                    left,
-                    right,
+                    end_sample_frame,
+                    sample_rate_hz,
+                    channels,
+                    frames,
+                    flags,
+                    samples,
                 },
             )
             .map_err(|error| Error::RendererControlFailed(format!("send audio: {error}")))
@@ -2485,13 +2493,17 @@ mod subscription_tests {
         writer
             .replace_audio(
                 1,
-                ControlMsg::AudioSpectrum {
+                ControlMsg::AudioWindow {
                     subscription_revision: 1,
                     generation: 2,
                     sequence: 3,
                     captured_at_ns: 4,
-                    left: vec![0.0; 64],
-                    right: vec![0.0; 64],
+                    end_sample_frame: 4096,
+                    sample_rate_hz: 48_000,
+                    channels: 2,
+                    frames: 4096,
+                    flags: 0,
+                    samples: vec![0.0; 8192],
                 },
             )
             .unwrap();
@@ -2504,7 +2516,7 @@ mod subscription_tests {
         ));
         assert!(matches!(
             second,
-            ControlMsg::AudioSpectrum {
+            ControlMsg::AudioWindow {
                 subscription_revision: 1,
                 generation: 2,
                 sequence: 3,

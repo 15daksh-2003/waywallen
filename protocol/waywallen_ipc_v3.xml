@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  waywallen-ipc-v2
+  waywallen-ipc-v3
 
   Wire protocol between the waywallen daemon ("manager") and a renderer
   subprocess ("host"). Spoken over a SOCK_STREAM Unix-domain socket the
@@ -16,7 +16,7 @@
                  control-plane notifications: init, setting_changed,
                  play, pause, set_fps, shutdown, pointer_*,
                  mpris, negotiate_buffers, event_subscriptions_applied,
-                 audio_spectrum.
+                 audio_window.
     <event>    — subprocess → daemon (outbound from the renderer):
                  ready, bind_buffers, frame_ready, error,
                  release_syncobj, format_caps, bind_failed, init_nack,
@@ -142,7 +142,7 @@
 
   Version: 2 (file); spawn payload = SPAWN_VERSION 8
 -->
-<protocol name="waywallen_ipc" version="2">
+<protocol name="waywallen_ipc" version="3">
 
   <!-- ==================================================================
        INBOUND EVENTS  (daemon -> subprocess, control plane)
@@ -372,18 +372,24 @@
   </event_in>
 
   <!--
-    Latest normalized system-output spectrum. Delivered only while the
-    renderer's applied set contains `audio`. Arrays contain exactly 64
-    finite values in 0..=1. The renderer rejects a frame whose
-    subscription_revision no longer matches its applied revision.
+    Latest complete system-output PCM window. Delivered only while the
+    renderer's applied set contains `audio`. A normal window is 4096
+    interleaved stereo F32 samples at 48 kHz. flags bit 0 marks an explicit
+    end-of-stream message, which carries no samples. The renderer rejects a
+    window whose subscription_revision no longer matches its applied
+    revision.
   -->
-  <event_in name="audio_spectrum" opcode="17">
+  <event_in name="audio_window" opcode="17">
     <arg name="subscription_revision" type="u64"/>
     <arg name="generation" type="u64"/>
     <arg name="sequence" type="u64"/>
     <arg name="captured_at_ns" type="u64"/>
-    <arg name="left" type="array" element="f32"/>
-    <arg name="right" type="array" element="f32"/>
+    <arg name="end_sample_frame" type="u64"/>
+    <arg name="sample_rate_hz" type="u32"/>
+    <arg name="channels" type="u32"/>
+    <arg name="frames" type="u32"/>
+    <arg name="flags" type="u32"/>
+    <arg name="samples" type="array" element="f32"/>
   </event_in>
 
   <!-- ==================================================================

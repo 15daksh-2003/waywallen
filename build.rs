@@ -27,7 +27,7 @@ fn main() {
         &out_dir.join("display_proto_generated.rs"),
     );
     gen_rust(
-        &manifest_dir.join("protocol/waywallen_ipc_v2.xml"),
+        &manifest_dir.join("protocol/waywallen_ipc_v3.xml"),
         &out_dir.join("ipc_generated.rs"),
     );
 

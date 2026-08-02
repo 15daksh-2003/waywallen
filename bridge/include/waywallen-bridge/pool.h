@@ -3,7 +3,7 @@
 #ifndef WAYWALLEN_BRIDGE_POOL_H
 #define WAYWALLEN_BRIDGE_POOL_H
 
-#include <waywallen-bridge/ipc_v2.h>
+#include <waywallen-bridge/ipc_v3.h>
 #include <waywallen-bridge/protocol_bits.h>
 
 #include <stddef.h>
