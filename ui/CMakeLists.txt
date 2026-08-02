@@ -70,6 +70,7 @@ set(SOURCES_NO_MOC
   src/util.cpp
   src/backend.cpp
   src/app.cpp
+  src/ui_language.cpp
   src/daemon_dbus.cpp
   src/objmodel/display.cpp
   src/objmodel/gpu.cpp
@@ -146,6 +147,7 @@ set(MOC_SOURCE_FILES
 )
 set(MODULES
     src/entry.cppm
+    src/ui_language.cppm
     src/mod.cppm
     src/proto.cppm
     src/model/share_store.cppm
@@ -315,8 +317,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE waywallen-qml)
 # .ts catalogs live in ui/i18n. lrelease compiles them to .qm, which
 # qt_add_translations embeds in the executable under the ":/i18n" resource
 # prefix — so a translated build needs no extra install step and behaves the
-# same from a distro package, an AppImage or a Flatpak. entry.cpp picks the
-# catalog matching the user's locale at startup.
+# same from a distro package, an AppImage or a Flatpak. The UI language
+# controller discovers and loads the embedded catalogs.
 #
 # Adding a language is one line here plus the new .ts file. Refresh the
 # catalogs from the sources with:

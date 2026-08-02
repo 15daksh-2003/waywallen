@@ -1086,6 +1086,10 @@ Related display: #%1</source>
         <translation>Стоп</translation>
     </message>
     <message>
+        <source>Failed to change language</source>
+        <translation>Не удалось изменить язык</translation>
+    </message>
+    <message>
         <source>Sequential</source>
         <translation>По порядку</translation>
     </message>
@@ -1118,6 +1122,10 @@ Related display: #%1</source>
         <translation>Системная</translation>
     </message>
     <message>
+        <source>Language</source>
+        <translation>Язык</translation>
+    </message>
+    <message>
         <source>Auto-expand sidebar</source>
         <translation>Раскрывать боковую панель</translation>
     </message>
@@ -1134,12 +1142,32 @@ Related display: #%1</source>
         <translation>Разрешить дублирование рендереров</translation>
     </message>
     <message>
+        <source>Mouse forwarding</source>
+        <translation>Передача событий мыши</translation>
+    </message>
+    <message>
         <source>Plugin update notifications</source>
         <translation>Уведомлять об обновлениях плагинов</translation>
     </message>
     <message>
         <source>Auto replay</source>
         <translation>Автоповтор</translation>
+    </message>
+    <message>
+        <source>Effect</source>
+        <translation>Эффект</translation>
+    </message>
+    <message>
+        <source>Blur while paused</source>
+        <translation>Размытие во время паузы</translation>
+    </message>
+    <message>
+        <source>Blur radius</source>
+        <translation>Радиус размытия</translation>
+    </message>
+    <message>
+        <source>px</source>
+        <translation>пкс</translation>
     </message>
     <message>
         <source>Audio</source>
@@ -1282,6 +1310,14 @@ Unsaved frame state may be lost.</source>
     <message>
         <source>Active Renderers</source>
         <translation>Активные рендереры</translation>
+    </message>
+    <message>
+        <source>Mute all</source>
+        <translation>Заглушить всё</translation>
+    </message>
+    <message>
+        <source>Pause all</source>
+        <translation>Приостановить всё</translation>
     </message>
     <message>
         <source>No active renderers</source>
@@ -1800,6 +1836,14 @@ Unsaved frame state may be lost.</source>
 </context>
 <context>
     <name>Window</name>
+    <message>
+        <source>Paused</source>
+        <translation>Приостановлено</translation>
+    </message>
+    <message>
+        <source>Resumed</source>
+        <translation>Возобновлено</translation>
+    </message>
     <message>
         <source>Wallpapers</source>
         <translation>Обои</translation>

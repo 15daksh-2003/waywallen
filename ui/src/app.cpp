@@ -10,6 +10,7 @@ import :gpu;
 import :renderer;
 import :query;
 import :notify;
+import :ui_language;
 
 using namespace waywallen;
 using namespace Qt::Literals::StringLiterals;
@@ -35,6 +36,8 @@ public:
           m_library_mgr(Box<LibraryManager>::make()),
           m_gpu_mgr(Box<GpuManager>::make()),
           m_qml_engine(Box<QQmlApplicationEngine>::make()),
+          m_ui_language(Box<UiLanguageController>::make(
+              *qobject_cast<QGuiApplication*>(QGuiApplication::instance()), *m_qml_engine)),
           m_port(port) {}
     ~AppPrivate() { save_settings(); }
 
@@ -50,6 +53,7 @@ public:
     Box<LibraryManager>        m_library_mgr;
     Box<GpuManager>            m_gpu_mgr;
     Box<QQmlApplicationEngine> m_qml_engine;
+    Box<UiLanguageController>  m_ui_language;
     qint64                     m_network_cache_size { 0 };
     quint16                    m_port;
 };
@@ -68,9 +72,13 @@ App* App::instance() { return app_instance(); }
 
 App::App(quint16 port, rstd::empty): QObject(nullptr), d_ptr(new AppPrivate(this, port)) {
     app_instance(this);
+    QGuiApplication::instance()->installEventFilter(this);
 }
 
-App::~App() { QAsyncResult::dropEx(); }
+App::~App() {
+    QGuiApplication::instance()->removeEventFilter(this);
+    QAsyncResult::dropEx();
+}
 
 void App::init() {
     Q_D(App);
@@ -198,6 +206,21 @@ auto App::networkCacheMaximumSize() const -> qint64 {
     return d->m_qml_network_cache.maximumCacheSize();
 }
 
+auto App::uiLanguage() const -> const QString& {
+    Q_D(const App);
+    return d->m_ui_language->preference();
+}
+
+auto App::resolvedUiLanguage() const -> const QString& {
+    Q_D(const App);
+    return d->m_ui_language->resolvedLanguage();
+}
+
+auto App::availableUiLanguages() const -> QVariantList {
+    Q_D(const App);
+    return d->m_ui_language->availableLanguages();
+}
+
 void App::refreshNetworkCacheSize() {
     Q_D(App);
     const auto size = d->m_qml_network_cache.cacheSize();
@@ -218,6 +241,32 @@ void App::clearNetworkCache() {
     Q_D(App);
     d->m_qml_network_cache.clear();
     refreshNetworkCacheSize();
+}
+
+bool App::setUiLanguage(const QString& language) {
+    Q_D(App);
+    const auto previous_preference = d->m_ui_language->preference();
+    const auto previous_resolved   = d->m_ui_language->resolvedLanguage();
+    if (! d->m_ui_language->setLanguage(language)) return false;
+
+    if (previous_preference != d->m_ui_language->preference()) Q_EMIT uiLanguageChanged();
+    if (previous_resolved != d->m_ui_language->resolvedLanguage())
+        Q_EMIT resolvedUiLanguageChanged();
+    return true;
+}
+
+bool App::eventFilter(QObject* watched, QEvent* event) {
+    if (event->type() == QEvent::LocaleChange) {
+        Q_D(App);
+        const auto previous_resolved = d->m_ui_language->resolvedLanguage();
+        if (d->m_ui_language->preference() == QStringLiteral("system") &&
+            d->m_ui_language->refreshSystemLanguage()) {
+            Q_EMIT uiLanguageChanged();
+            if (previous_resolved != d->m_ui_language->resolvedLanguage())
+                Q_EMIT resolvedUiLanguageChanged();
+        }
+    }
+    return QObject::eventFilter(watched, event);
 }
 
 void App::load_settings() {}

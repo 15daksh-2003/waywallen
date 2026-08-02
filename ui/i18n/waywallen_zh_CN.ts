@@ -1080,6 +1080,10 @@ Related display: #%1</source>
         <translation>停止</translation>
     </message>
     <message>
+        <source>Failed to change language</source>
+        <translation>切换语言失败</translation>
+    </message>
+    <message>
         <source>Sequential</source>
         <translation>顺序</translation>
     </message>
@@ -1110,6 +1114,10 @@ Related display: #%1</source>
     <message>
         <source>System</source>
         <translation>系统</translation>
+    </message>
+    <message>
+        <source>Language</source>
+        <translation>语言</translation>
     </message>
     <message>
         <source>Auto-expand sidebar</source>

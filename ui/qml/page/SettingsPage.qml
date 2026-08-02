@@ -193,6 +193,13 @@ MD.Page {
         return 0;
     }
 
+    function _uiLanguageIndex() {
+        const languages = W.App.availableUiLanguages;
+        for (let i = 0; i < languages.length; ++i)
+            if (languages[i].code === W.App.uiLanguage) return i;
+        return 0;
+    }
+
     function _currentGlobal() {
         return m_pending.nextGlobal
             ? m_pending.nextGlobal
@@ -240,6 +247,8 @@ MD.Page {
         W.Global.sidebarAutoExpand = true;
         W.Global.networkCacheMaximumMiB = 1024;
         W.Global.setThemeMode("system");
+        if (!W.App.setUiLanguage("system"))
+            W.Global.toastError(qsTr("Failed to change language"));
         root.autoReplayRevision += 1;
         root.pauseEffectRevision += 1;
         setQ.global = nextGlobal;
@@ -393,6 +402,39 @@ MD.Page {
                             checked: W.Global.themeMode === "system"
                             onClicked: W.Global.setThemeMode("system")
                         }
+                    }
+                }
+            }
+
+            SettingItem {
+                first: false
+                last: false
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Language")
+                    }
+
+                    MD.ComboBox {
+                        id: m_ui_language
+                        Layout.preferredWidth: 180
+                        model: W.App.availableUiLanguages.map(language => language.label)
+                        onActivated: index => {
+                            const languages = W.App.availableUiLanguages;
+                            if (index < 0 || index >= languages.length)
+                                return;
+                            if (!W.App.setUiLanguage(languages[index].code))
+                                W.Global.toastError(qsTr("Failed to change language"));
+                        }
+                    }
+                    Binding {
+                        target: m_ui_language
+                        property: "currentIndex"
+                        value: root._uiLanguageIndex()
                     }
                 }
             }
