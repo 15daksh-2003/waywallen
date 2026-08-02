@@ -286,6 +286,9 @@ pub struct GlobalSettings {
 
     pub duplicate_renderers_for_same_wallpaper: bool,
 
+    /// Forward pointer input received by the daemon to subscribed renderers.
+    pub pointer_forwarding_enabled: bool,
+
     /// Last autostart state successfully accepted by the Flatpak portal.
     pub autostart_enabled: bool,
 }
@@ -312,6 +315,7 @@ impl Default for GlobalSettings {
             auto_attach_playlist_id: None,
             plugin_update_notifications: true,
             duplicate_renderers_for_same_wallpaper: false,
+            pointer_forwarding_enabled: true,
             autostart_enabled: false,
         }
     }
@@ -814,6 +818,14 @@ impl SettingsStore {
         self.inner.read().expect("settings poisoned").global.clone()
     }
 
+    pub fn pointer_forwarding_enabled(&self) -> bool {
+        self.inner
+            .read()
+            .expect("settings poisoned")
+            .global
+            .pointer_forwarding_enabled
+    }
+
     /// Clone the value map for a single plugin, or `None` if the
     /// plugin has no recorded settings.
     pub fn plugin(&self, plugin_name: &str) -> Option<HashMap<String, String>> {
@@ -1122,6 +1134,7 @@ mod tests {
         assert!(!s.global.manual_muted);
         assert!(s.global.plugin_update_notifications);
         assert!(!s.global.duplicate_renderers_for_same_wallpaper);
+        assert!(s.global.pointer_forwarding_enabled);
         assert!(!s.global.autostart_enabled);
         assert!(s.plugins.is_empty());
     }
@@ -1150,6 +1163,19 @@ duplicate_renderers_for_same_wallpaper = true
         assert!(toml::to_string(&s)
             .unwrap()
             .contains("duplicate_renderers_for_same_wallpaper = true"));
+    }
+
+    #[test]
+    fn pointer_forwarding_setting_roundtrip() {
+        let src = r#"
+[global]
+pointer_forwarding_enabled = false
+"#;
+        let s: Settings = toml::from_str(src).unwrap();
+        assert!(!s.global.pointer_forwarding_enabled);
+        assert!(toml::to_string(&s)
+            .unwrap()
+            .contains("pointer_forwarding_enabled = false"));
     }
 
     #[test]

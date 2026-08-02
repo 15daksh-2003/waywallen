@@ -221,6 +221,7 @@ MD.Page {
             audioFadeMs: 500,
             muteWhenOtherAudio: false,
             audioCaptureEnabled: true,
+            pointerForwardingEnabled: true,
             "renderer.enable_audio": true,
             "renderer.volume": 100,
             pluginUpdateNotifications: true,
@@ -257,6 +258,7 @@ MD.Page {
             audioFadeMs: Number(g.audioFadeMs ?? 500),
             muteWhenOtherAudio: Boolean(g.muteWhenOtherAudio ?? false),
             audioCaptureEnabled: Boolean(g.audioCaptureEnabled),
+            pointerForwardingEnabled: Boolean(g.pointerForwardingEnabled ?? true),
             rendererEnableAudio: root._rendererAudioEnabled(g),
             rendererVolume: root._rendererVolume(g),
             pluginUpdateNotifications: Boolean(g.pluginUpdateNotifications ?? true),
@@ -481,6 +483,33 @@ MD.Page {
                         target: m_duplicate_renderers
                         property: "checked"
                         value: Boolean(root._currentGlobal()?.duplicateRenderers ?? false)
+                    }
+                }
+            }
+
+            SettingItem {
+                first: false
+                last: false
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Mouse forwarding")
+                    }
+
+                    MD.Switch {
+                        id: m_pointer_forwarding
+                        onToggled: root._mut(g => {
+                            g.pointerForwardingEnabled = checked;
+                        })
+                    }
+                    Binding {
+                        target: m_pointer_forwarding
+                        property: "checked"
+                        value: Boolean(root._currentGlobal()?.pointerForwardingEnabled ?? true)
                     }
                 }
             }

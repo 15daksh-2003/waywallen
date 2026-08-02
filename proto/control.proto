@@ -1300,6 +1300,9 @@ message GlobalSettings {
 
   // Presentation effect applied while a display's bound renderer is paused.
   PauseEffectConfig pause_effect = 24;
+
+  // Allow the daemon to forward display pointer input to subscribed renderers.
+  bool pointer_forwarding_enabled = 25;
 }
 
 enum AutoAction {

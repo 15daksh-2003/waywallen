@@ -277,6 +277,7 @@ async fn async_main() -> anyhow::Result<()> {
     renderer_mgr.start_reaper();
     let settings_store =
         settings::SettingsStore::load_or_default(settings::default_config_path()).await;
+    renderer_mgr.attach_settings(settings_store.clone());
     router.attach_settings(settings_store.clone());
     let registry_snapshot = renderer_mgr.registry_snapshot();
     settings_store.reconcile(&registry_snapshot);
