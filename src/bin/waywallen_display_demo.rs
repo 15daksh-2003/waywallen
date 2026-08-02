@@ -5,7 +5,8 @@ use std::thread;
 use std::time::Duration;
 
 use waywallen::display::proto::{
-    codec, Event, PresentationCapabilities, Request, PROTOCOL_NAME, PROTOCOL_VERSION,
+    codec, ConsumerCapabilities, DisplayMetrics, Event, PresentationCapabilities, Request,
+    PROTOCOL_VERSION,
 };
 
 #[derive(Debug)]
@@ -125,10 +126,9 @@ fn run_session(sock_path: &Path, args: &Args) -> Result<()> {
     codec::send_request(
         &stream,
         &Request::Hello {
-            protocol: PROTOCOL_NAME.to_string(),
             client_name: args.name.clone(),
             client_version: env!("CARGO_PKG_VERSION").to_string(),
-            client_protocol_version: PROTOCOL_VERSION,
+            protocol_version: PROTOCOL_VERSION,
         },
         &[],
     )
@@ -136,16 +136,8 @@ fn run_session(sock_path: &Path, args: &Args) -> Result<()> {
 
     let (welcome, _fds) = codec::recv_event(&stream).map_err(|e| anyhow!("recv welcome: {e}"))?;
     match welcome {
-        Event::Welcome {
-            server_version,
-            features,
-        } => {
-            log::info!("welcome from {server_version}, features={features:?}");
-            if !features.iter().any(|s| s == "explicit_sync_fd") {
-                return Err(anyhow!(
-                    "server missing mandatory feature \"explicit_sync_fd\""
-                ));
-            }
+        Event::Welcome { server_version } => {
+            log::info!("welcome from {server_version}");
         }
         other => return Err(anyhow!("expected welcome, got opcode {}", other.opcode())),
     }
@@ -156,15 +148,28 @@ fn run_session(sock_path: &Path, args: &Args) -> Result<()> {
         &Request::RegisterDisplay {
             name: args.name.clone(),
             instance_id: String::new(),
-            width: args.width,
-            height: args.height,
-            refresh_mhz: args.refresh_mhz,
-            // Demo client doesn't import dmabufs; advertise UNKNOWN to
-            // force the daemon onto the conservative cross-GPU path.
-            drm_render_major: 0,
-            drm_render_minor: 0,
-            properties: Vec::new(),
+            metrics: DisplayMetrics {
+                width: args.width,
+                height: args.height,
+                refresh_mhz: args.refresh_mhz,
+            },
+            consumer_caps: ConsumerCapabilities {
+                fourccs: vec![0x3432_4241, 0x3432_4258, 0x3432_5241, 0x3432_5258],
+                mod_counts: vec![1; 4],
+                modifiers: vec![0; 4],
+                plane_counts: vec![1; 4],
+                device_uuid: vec![0; 4],
+                driver_uuid: vec![0; 4],
+                drm_render_major: 0,
+                drm_render_minor: 0,
+                mem_hints: 1 << 1,
+                sync_caps: 1 << 1,
+                color_caps: (1 << 0) | (1 << 6) | (1 << 7),
+                extent_max_w: args.width,
+                extent_max_h: args.height,
+            },
             presentation_caps: PresentationCapabilities { flags: 0 },
+            window_state_flags: 0,
         },
         &[],
     )
@@ -182,7 +187,7 @@ fn run_session(sock_path: &Path, args: &Args) -> Result<()> {
         };
     log::info!("registered as display_id={display_id}");
 
-    // ---- bind_buffers + set_config ----
+    // ---- initial binding ----
     let (first, first_fds) =
         codec::recv_event(&stream).map_err(|e| anyhow!("recv bind_buffers: {e}"))?;
     let buffer_generation = match first {
@@ -194,6 +199,7 @@ fn run_session(sock_path: &Path, args: &Args) -> Result<()> {
             fourcc,
             modifier,
             planes_per_buffer,
+            initial_config,
             ..
         } => {
             let expected_fds = (count * planes_per_buffer) as usize;
@@ -206,8 +212,18 @@ fn run_session(sock_path: &Path, args: &Args) -> Result<()> {
             log::info!(
                 "bind_buffers gen={buffer_generation} count={count} tex={width}x{height} \
                  fourcc=0x{fourcc:08x} modifier=0x{modifier:016x} planes={planes_per_buffer} \
-                 (received {} dma-buf fds; closing without import)",
-                first_fds.len()
+                 composition={} source=({:.0},{:.0},{:.0},{:.0}) \
+                 dest=({:.0},{:.0},{:.0},{:.0}) ({} dma-buf fds)",
+                initial_config.generation,
+                initial_config.source_rect.x,
+                initial_config.source_rect.y,
+                initial_config.source_rect.w,
+                initial_config.source_rect.h,
+                initial_config.dest_rect.x,
+                initial_config.dest_rect.y,
+                initial_config.dest_rect.w,
+                initial_config.dest_rect.h,
+                first_fds.len(),
             );
             drop(first_fds);
             buffer_generation
@@ -220,48 +236,21 @@ fn run_session(sock_path: &Path, args: &Args) -> Result<()> {
         }
     };
 
-    let (cfg, _fds) = codec::recv_event(&stream).map_err(|e| anyhow!("recv set_config: {e}"))?;
-    match cfg {
-        Event::SetConfig {
-            config_generation,
-            source_rect,
-            dest_rect,
-            transform,
-            ..
-        } => {
-            log::info!(
-                "set_config gen={config_generation} source=({:.0},{:.0},{:.0},{:.0}) \
-                 dest=({:.0},{:.0},{:.0},{:.0}) xform={transform}",
-                source_rect.x,
-                source_rect.y,
-                source_rect.w,
-                source_rect.h,
-                dest_rect.x,
-                dest_rect.y,
-                dest_rect.w,
-                dest_rect.h,
-            );
-        }
-        other => {
-            return Err(anyhow!(
-                "expected set_config, got opcode {}",
-                other.opcode()
-            ))
-        }
-    }
-
     // ---- frame loop ----
     let mut frames_seen: u64 = 0;
+    let mut buffer_generation = Some(buffer_generation);
     loop {
-        let (evt, fds) = codec::recv_event(&stream).map_err(|e| anyhow!("recv event: {e}"))?;
+        let (evt, mut fds) = codec::recv_event(&stream).map_err(|e| anyhow!("recv event: {e}"))?;
         match evt {
             Event::FrameReady {
                 buffer_generation: g,
                 buffer_index,
                 seq,
             } => {
-                if g != buffer_generation {
-                    log::warn!("stray frame_ready gen={g} (current={buffer_generation}); dropping");
+                if Some(g) != buffer_generation {
+                    log::warn!(
+                        "stray frame_ready gen={g} (current={buffer_generation:?}); dropping"
+                    );
                     drop(fds);
                     continue;
                 }
@@ -271,42 +260,71 @@ fn run_session(sock_path: &Path, args: &Args) -> Result<()> {
                         fds.len()
                     ));
                 }
-                // Drop both fds; this demo does not import acquire fences
-                // or signal release syncobjs.
-                drop(fds);
+                let release_fd = fds.swap_remove(1);
+                let device = waywallen::sync::drm_device().context("open DRM render node")?;
+                let release = device
+                    .fd_to_handle(&release_fd)
+                    .context("import release syncobj")?;
+                device.signal(&release).context("signal release syncobj")?;
+                drop((fds, release_fd, release));
+                codec::send_request(
+                    &stream,
+                    &Request::FrameReleaseArmed {
+                        buffer_generation: g,
+                        seq,
+                    },
+                    &[],
+                )
+                .map_err(|error| anyhow!("send frame_release_armed: {error}"))?;
 
                 frames_seen += 1;
                 log::info!(
                     "display {display_id}: frame {frames_seen} ready (idx={buffer_index} seq={seq})"
                 );
-                let _ = g;
-                // BufferRelease request was removed in v1; release is the
-                // syncobj signal. See TODO above.
-
                 if let Some(max) = args.max_frames {
                     if frames_seen >= max {
-                        log::info!("max-frames reached; sending bye");
-                        codec::send_request(&stream, &Request::Bye, &[])
-                            .map_err(|e| anyhow!("send bye: {e}"))?;
+                        log::info!("max-frames reached; closing session");
                         return Ok(());
                     }
                 }
             }
-            Event::BindBuffers { .. } => {
-                log::warn!("mid-session bind_buffers ignored (Phase 1)");
+            Event::BindBuffers {
+                buffer_generation: generation,
+                initial_config,
+                ..
+            } => {
+                if initial_config.buffer_generation != generation {
+                    return Err(anyhow!("bind composition targets another generation"));
+                }
+                buffer_generation = Some(generation);
+                log::info!("installed binding generation {generation}");
                 drop(fds);
             }
-            Event::SetConfig { .. } => {
-                log::info!("received updated set_config");
+            Event::SetCompositionConfig { config } => {
+                if Some(config.buffer_generation) == buffer_generation {
+                    log::info!("received composition generation {}", config.generation);
+                } else {
+                    log::warn!("ignored stale composition generation {}", config.generation);
+                }
             }
             Event::Unbind {
                 buffer_generation: g,
             } => {
-                log::info!("server unbound generation {g}; ending session");
-                return Ok(());
+                if buffer_generation == Some(g) {
+                    buffer_generation = None;
+                }
+                codec::send_request(
+                    &stream,
+                    &Request::AckUnbind {
+                        buffer_generation: g,
+                    },
+                    &[],
+                )
+                .map_err(|error| anyhow!("send ack_unbind: {error}"))?;
+                log::info!("server unbound generation {g}");
             }
             Event::Error { code, message } => {
-                return Err(anyhow!("server error {code}: {message}"));
+                return Err(anyhow!("server error {code:?}: {message}"));
             }
             other => {
                 log::warn!("ignoring unexpected event opcode {}", other.opcode());

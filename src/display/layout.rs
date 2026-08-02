@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::scheduler::ProjectedConfig;
+use crate::scheduler::CompositionConfig;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -217,7 +217,7 @@ pub fn compute(i: LayoutInput) -> LayoutOutput {
 pub fn display_point_to_texture(
     disp_x: f32,
     disp_y: f32,
-    cfg: &ProjectedConfig,
+    cfg: &CompositionConfig,
 ) -> Option<(f32, f32)> {
     if cfg.display_w <= 0.0 || cfg.display_h <= 0.0 || cfg.dest_w <= 0.0 || cfg.dest_h <= 0.0 {
         return None;
@@ -499,7 +499,7 @@ mod tests {
         source: (f32, f32, f32, f32),
         dest: (f32, f32, f32, f32),
         transform: u32,
-    ) -> ProjectedConfig {
+    ) -> CompositionConfig {
         cfg_with_display(source, dest, (dest.0 + dest.2, dest.1 + dest.3), transform)
     }
 
@@ -508,9 +508,10 @@ mod tests {
         dest: (f32, f32, f32, f32),
         display: (f32, f32),
         transform: u32,
-    ) -> ProjectedConfig {
-        ProjectedConfig {
-            config_generation: 1,
+    ) -> CompositionConfig {
+        CompositionConfig {
+            generation: 1,
+            buffer_generation: 1,
             display_w: display.0,
             display_h: display.1,
             source_x: source.0,

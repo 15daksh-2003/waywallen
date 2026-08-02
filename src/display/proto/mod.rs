@@ -10,19 +10,12 @@ pub use codec::{
     MAX_FDS_PER_MSG,
 };
 pub use generated::{
-    opcode, BlurEffectConfig, DecodeError, Event, PauseEffectConfig, PauseEffectDynamicConfig,
-    PauseEffectKind, PresentationCapabilities, PresentationConfig, PresentationDynamicConfig,
-    PresentationSnapshot, Rect, Request, PROTOCOL_NAME, PROTOCOL_VERSION,
+    opcode, BlurEffectConfig, BufferImportFailureKind, CompositionConfig, ConsumerCapabilities,
+    DecodeError, DisplayErrorCode, DisplayMetrics, Event, PauseEffectConfig, PauseEffectKind,
+    PauseEffectState, PointerAxisSource, PointerButtonState, PresentationCapabilities,
+    PresentationConfig, PresentationSnapshot, PresentationState, Rect, Request, RgbaColor,
+    PROTOCOL_NAME, PROTOCOL_VERSION,
 };
-
-/// Wire-level `error.code` values. Kept in lockstep with the table in
-/// `protocol/waywallen_display_v1.xml`'s header comment.
-pub mod error_code {
-    /// `hello.protocol` did not match `PROTOCOL_NAME`.
-    pub const PROTO_NAME_MISMATCH: u32 = 1;
-    /// `hello.client_protocol_version` outside daemon's supported range.
-    pub const VERSION_UNSUPPORTED: u32 = 2;
-}
 
 #[cfg(test)]
 mod tests {
@@ -47,16 +40,28 @@ mod tests {
         roundtrip_req(Request::RegisterDisplay {
             name: "DP-1".to_string(),
             instance_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(),
-            width: 1920,
-            height: 1080,
-            refresh_mhz: 60000,
-            drm_render_major: 226,
-            drm_render_minor: 128,
-            properties: vec![
-                ("scale".to_string(), "1.0".to_string()),
-                ("hdr".to_string(), "false".to_string()),
-            ],
+            metrics: DisplayMetrics {
+                width: 1920,
+                height: 1080,
+                refresh_mhz: 60000,
+            },
+            consumer_caps: ConsumerCapabilities {
+                fourccs: vec![0x34325258],
+                mod_counts: vec![1],
+                modifiers: vec![0],
+                plane_counts: vec![1],
+                device_uuid: vec![0; 4],
+                driver_uuid: vec![0; 4],
+                drm_render_major: 226,
+                drm_render_minor: 128,
+                mem_hints: 1,
+                sync_caps: 1,
+                color_caps: 1,
+                extent_max_w: 7680,
+                extent_max_h: 4320,
+            },
             presentation_caps: PresentationCapabilities { flags: 1 },
+            window_state_flags: 8,
         });
     }
 
@@ -73,6 +78,29 @@ mod tests {
             stride: vec![7680, 7680, 7680],
             plane_offset: vec![0, 0, 0],
             size: vec![8_294_400, 8_294_400, 8_294_400],
+            initial_config: CompositionConfig {
+                generation: 7,
+                buffer_generation: 1,
+                source_rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1920.0,
+                    h: 1080.0,
+                },
+                dest_rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1920.0,
+                    h: 1080.0,
+                },
+                transform: 0,
+                clear_color: RgbaColor {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            },
         };
         // expected fds = count * planes_per_buffer = 3 * 1 = 3
         assert_eq!(evt.expected_fds(), 3);
@@ -80,35 +108,40 @@ mod tests {
     }
 
     #[test]
-    fn event_set_config_roundtrip() {
-        roundtrip_evt(Event::SetConfig {
-            config_generation: 7,
-            source_rect: Rect {
-                x: 0.0,
-                y: 0.0,
-                w: 1920.0,
-                h: 1080.0,
+    fn event_set_composition_config_roundtrip() {
+        roundtrip_evt(Event::SetCompositionConfig {
+            config: CompositionConfig {
+                generation: 7,
+                buffer_generation: 1,
+                source_rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1920.0,
+                    h: 1080.0,
+                },
+                dest_rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1920.0,
+                    h: 1080.0,
+                },
+                transform: 0,
+                clear_color: RgbaColor {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
             },
-            dest_rect: Rect {
-                x: 0.0,
-                y: 0.0,
-                w: 1920.0,
-                h: 1080.0,
-            },
-            transform: 0,
-            clear_r: 0.0,
-            clear_g: 0.0,
-            clear_b: 0.0,
-            clear_a: 1.0,
         });
     }
 
     #[test]
     fn presentation_snapshot_roundtrip_and_noncanonical_bool_rejected() {
-        let dynamic_config = PresentationDynamicConfig {
+        let state = PresentationState {
             generation: 5,
             config_generation: 3,
-            pause_effect: PauseEffectDynamicConfig { active: true },
+            pause_effect: PauseEffectState { active: true },
         };
         let accepted = Event::DisplayAccepted {
             display_id: 9,
@@ -120,7 +153,7 @@ mod tests {
                         blur: BlurEffectConfig { radius: 40 },
                     },
                 },
-                dynamic_config,
+                state,
             },
         };
         roundtrip_evt(accepted.clone());
@@ -136,7 +169,7 @@ mod tests {
             })
         ));
 
-        let event = Event::SetPresentationDynamicConfig { dynamic_config };
+        let event = Event::SetPresentationState { state };
         let mut buf = Vec::new();
         event.encode(&mut buf);
         buf[16..20].copy_from_slice(&2_u32.to_le_bytes());
@@ -161,7 +194,7 @@ mod tests {
     #[test]
     fn event_error_roundtrip() {
         roundtrip_evt(Event::Error {
-            code: 42,
+            code: DisplayErrorCode::ProtocolViolation,
             message: "protocol violation: unexpected frame_ready".to_string(),
         });
     }
@@ -170,25 +203,27 @@ mod tests {
     fn opcodes_match_spec() {
         assert_eq!(opcode::request::HELLO, 1);
         assert_eq!(opcode::request::REGISTER_DISPLAY, 2);
-        assert_eq!(opcode::request::UPDATE_DISPLAY, 3);
-        // opcode 4 is reserved (was BufferRelease in pre-v1; removed
-        // when release switched to the syncobj signal).
-        assert_eq!(opcode::request::BYE, 5);
+        assert_eq!(opcode::request::SET_DISPLAY_METRICS, 3);
+        assert_eq!(opcode::request::BUFFER_IMPORT_FAILED, 7);
+        assert_eq!(opcode::request::ACK_UNBIND, 11);
+        assert_eq!(opcode::request::SET_WINDOW_STATE, 12);
+        assert_eq!(opcode::request::FRAME_RELEASE_ARMED, 13);
         assert_eq!(opcode::event::WELCOME, 1);
         assert_eq!(opcode::event::BIND_BUFFERS, 3);
         assert_eq!(opcode::event::FRAME_READY, 5);
         assert_eq!(opcode::event::ERROR, 7);
-        assert_eq!(opcode::event::SET_PRESENTATION_CONFIG, 8);
-        assert_eq!(opcode::event::SET_PRESENTATION_DYNAMIC_CONFIG, 9);
+        assert_eq!(opcode::event::SET_PRESENTATION_SNAPSHOT, 8);
+        assert_eq!(opcode::event::SET_PRESENTATION_STATE, 9);
     }
 
     #[test]
     fn decode_trailing_bytes_rejected() {
         let mut buf = Vec::new();
-        Request::Bye.encode(&mut buf);
+        let request = Request::SetWindowState { flags: 0 };
+        request.encode(&mut buf);
         buf.push(0xff);
         assert!(matches!(
-            Request::decode(opcode::request::BYE, &buf),
+            Request::decode(opcode::request::SET_WINDOW_STATE, &buf),
             Err(DecodeError::Trailing)
         ));
     }

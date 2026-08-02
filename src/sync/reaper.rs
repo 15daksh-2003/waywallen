@@ -541,17 +541,17 @@ pub(crate) fn spawn_reaper(
                                         }
                                         Ok(BinarySyncobjState::Unsubmitted) => {
                                             member.state = MemberState::DeliveredUnarmed(handle);
-                                            Err("frame_armed before release fence submission")
+                                            Err("frame_release_armed before release fence submission")
                                         }
                                         Err(_) => {
                                             member.state = MemberState::DeliveredUnarmed(handle);
-                                            Err("frame_armed release fence classification failed")
+                                            Err("frame_release_armed release fence classification failed")
                                         }
                                     }
                                 }
                                 other => {
                                     member.state = other;
-                                    Err("frame_armed for member not awaiting arm")
+                                    Err("frame_release_armed for member not awaiting arm")
                                 }
                             }
                         }
@@ -571,9 +571,10 @@ pub(crate) fn spawn_reaper(
                             "reaper {renderer_id}: reject point {} update: {error}",
                             identity.release_point,
                         );
-                        if error.contains("frame_armed") {
+                        if error.contains("frame_release_armed") {
                             cancelled.store(true, Ordering::Release);
-                            let consumer = poison_consumer.expect("frame_armed error has consumer");
+                            let consumer =
+                                poison_consumer.expect("frame_release_armed error has consumer");
                             let _ = release_events.send(ReleaseEvent::GenerationPoisoned {
                                 consumer,
                                 reason: error.to_string(),

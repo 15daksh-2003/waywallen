@@ -249,6 +249,9 @@ pub fn unflatten_caps(
     mem_hint: u32,
     extent_max: (u32, u32),
 ) -> Result<PeerCaps, NegotiateError> {
+    if fourccs.is_empty() {
+        return Err(NegotiateError::MalformedCaps("fourccs must not be empty"));
+    }
     if fourccs.len() != mod_counts.len() {
         return Err(NegotiateError::MalformedCaps(
             "fourccs.len() != mod_counts.len()",
@@ -265,9 +268,42 @@ pub fn unflatten_caps(
             "plane_counts.len() != sum(mod_counts)",
         ));
     }
+    if mod_counts.contains(&0) {
+        return Err(NegotiateError::MalformedCaps(
+            "every fourcc must advertise at least one modifier",
+        ));
+    }
+    if plane_counts.iter().any(|count| !(1..=4).contains(count)) {
+        return Err(NegotiateError::MalformedCaps(
+            "plane_count must be in 1..=4",
+        ));
+    }
     if device_uuid.len() != 4 || driver_uuid.len() != 4 {
         return Err(NegotiateError::MalformedCaps(
             "device_uuid/driver_uuid must be 4×u32 (16 bytes packed LE)",
+        ));
+    }
+    let known_sync = SYNC_IMPLICIT | SYNC_SYNCOBJ_BINARY | SYNC_SYNCOBJ_TIMELINE;
+    if sync & !known_sync != 0 {
+        return Err(NegotiateError::MalformedCaps(
+            "sync contains unknown capability bits",
+        ));
+    }
+    let known_color = COLOR_MASK_ENCODING | COLOR_MASK_RANGE | COLOR_MASK_ALPHA;
+    if color & !known_color != 0 {
+        return Err(NegotiateError::MalformedCaps(
+            "color contains unknown capability bits",
+        ));
+    }
+    #[allow(deprecated)]
+    let known_mem = MEM_HINT_DEVICE_LOCAL
+        | MEM_HINT_HOST_VISIBLE
+        | MEM_HINT_SCANOUT_CAPABLE
+        | MEM_HINT_PROTECTED
+        | MEM_HINT_LINEAR_ONLY;
+    if mem_hint & !known_mem != 0 {
+        return Err(NegotiateError::MalformedCaps(
+            "mem_hint contains unknown capability bits",
         ));
     }
 

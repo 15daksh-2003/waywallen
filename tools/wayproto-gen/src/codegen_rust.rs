@@ -1,4 +1,5 @@
 use crate::parser::{ArgType, FdSpec, InboundKind, Message, NamedEnum, NamedStruct, Protocol};
+use std::collections::HashMap;
 use std::fmt::Write;
 
 pub fn emit(p: &Protocol) -> String {
@@ -328,9 +329,16 @@ fn emit_named_enums(out: &mut String, enums: &[NamedEnum]) {
 }
 
 fn emit_named_structs(out: &mut String, structs: &[NamedStruct]) {
+    let mut copy_structs = HashMap::new();
     for item in structs {
         let type_name = snake_to_camel(&item.name);
-        writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq)]").unwrap();
+        let is_copy = item
+            .fields
+            .iter()
+            .all(|field| type_is_copy(&field.ty, &copy_structs));
+        copy_structs.insert(item.name.clone(), is_copy);
+        let copy_derive = if is_copy { ", Copy" } else { "" };
+        writeln!(out, "#[derive(Debug, Clone{copy_derive}, PartialEq)]").unwrap();
         writeln!(out, "pub struct {type_name} {{").unwrap();
         for field in &item.fields {
             writeln!(
@@ -355,26 +363,36 @@ fn emit_named_structs(out: &mut String, structs: &[NamedStruct]) {
                 ArgType::I64 => writeln!(out, "        wire::w_i64(buf, self.{name});").unwrap(),
                 ArgType::F32 => writeln!(out, "        wire::w_f32(buf, self.{name});").unwrap(),
                 ArgType::F64 => writeln!(out, "        wire::w_f64(buf, self.{name});").unwrap(),
+                ArgType::Rect => writeln!(out, "        wire::w_rect(buf, &self.{name});").unwrap(),
+                ArgType::String => {
+                    writeln!(out, "        wire::w_string(buf, &self.{name});").unwrap()
+                }
+                ArgType::KvList => {
+                    writeln!(out, "        wire::w_kv_list(buf, &self.{name});").unwrap()
+                }
+                ArgType::Array(elem) => {
+                    let fn_suffix = array_fn_suffix(elem);
+                    writeln!(out, "        wire::w_array_{fn_suffix}(buf, &self.{name});").unwrap();
+                }
                 ArgType::Named(_) | ArgType::Enum(_) => {
                     writeln!(out, "        self.{name}.encode_wire(buf);").unwrap()
                 }
-                _ => unreachable!("parser restricts named struct fields"),
             }
         }
         writeln!(out, "    }}").unwrap();
-        let mutability = item
-            .fields
-            .iter()
-            .any(|field| matches!(field.ty, ArgType::Named(_) | ArgType::Enum(_)))
-            .then_some("mut ")
-            .unwrap_or("");
         writeln!(
             out,
-            "    fn decode_wire({mutability}r: &mut wire::R<'_>) -> Result<Self, DecodeError> {{"
+            "    fn decode_wire(reader: &mut wire::R<'_>) -> Result<Self, DecodeError> {{"
         )
         .unwrap();
         for field in &item.fields {
-            emit_decode_arg(out, "        ", &field_name(&field.name), &field.ty);
+            emit_decode_arg(
+                out,
+                "        ",
+                &field_name(&field.name),
+                &field.ty,
+                "reader",
+            );
         }
         writeln!(out, "        Ok(Self {{").unwrap();
         for field in &item.fields {
@@ -509,7 +527,7 @@ fn emit_enum(out: &mut String, enum_name: &str, msgs: &[Message], opcode_mod: &s
         "    pub fn decode(opcode: u16, body: &[u8]) -> Result<Self, DecodeError> {{"
     )
     .unwrap();
-    writeln!(out, "        let mut r = wire::R::new(body);").unwrap();
+    writeln!(out, "        let mut reader = wire::R::new(body);").unwrap();
     writeln!(out, "        let v = match opcode {{").unwrap();
     for m in msgs {
         let variant = snake_to_camel(&m.name);
@@ -523,7 +541,13 @@ fn emit_enum(out: &mut String, enum_name: &str, msgs: &[Message], opcode_mod: &s
             writeln!(out, "                Self::{variant}").unwrap();
         } else {
             for a in &m.args {
-                emit_decode_arg(out, "                ", &field_name(&a.name), &a.ty);
+                emit_decode_arg(
+                    out,
+                    "                ",
+                    &field_name(&a.name),
+                    &a.ty,
+                    "&mut reader",
+                );
             }
             writeln!(out, "                Self::{variant} {{").unwrap();
             for a in &m.args {
@@ -541,7 +565,7 @@ fn emit_enum(out: &mut String, enum_name: &str, msgs: &[Message], opcode_mod: &s
     writeln!(out, "        }};").unwrap();
     writeln!(
         out,
-        "        if !r.at_end() {{ return Err(DecodeError::Trailing); }}"
+        "        if !reader.at_end() {{ return Err(DecodeError::Trailing); }}"
     )
     .unwrap();
     writeln!(out, "        Ok(v)").unwrap();
@@ -564,16 +588,7 @@ fn emit_encode_arg(out: &mut String, indent: &str, name: &str, ty: &ArgType) {
         ArgType::String => writeln!(out, "{indent}wire::w_string(buf, {name});").unwrap(),
         ArgType::KvList => writeln!(out, "{indent}wire::w_kv_list(buf, {name});").unwrap(),
         ArgType::Array(elem) => {
-            let fn_suffix = match **elem {
-                ArgType::U32 => "u32",
-                ArgType::I32 => "i32",
-                ArgType::U64 => "u64",
-                ArgType::I64 => "i64",
-                ArgType::F32 => "f32",
-                ArgType::F64 => "f64",
-                ArgType::String => "string",
-                _ => panic!("unsupported array element"),
-            };
+            let fn_suffix = array_fn_suffix(elem);
             writeln!(out, "{indent}wire::w_array_{fn_suffix}(buf, {name});").unwrap();
         }
         ArgType::Named(_) | ArgType::Enum(_) => {
@@ -582,36 +597,56 @@ fn emit_encode_arg(out: &mut String, indent: &str, name: &str, ty: &ArgType) {
     }
 }
 
-fn emit_decode_arg(out: &mut String, indent: &str, name: &str, ty: &ArgType) {
+fn emit_decode_arg(out: &mut String, indent: &str, name: &str, ty: &ArgType, reader: &str) {
     let expr = match ty {
-        ArgType::Bool => "r.bool()?".to_string(),
-        ArgType::U32 => "r.u32()?".to_string(),
-        ArgType::I32 => "r.i32()?".to_string(),
-        ArgType::U64 => "r.u64()?".to_string(),
-        ArgType::I64 => "r.i64()?".to_string(),
-        ArgType::F32 => "r.f32()?".to_string(),
-        ArgType::F64 => "r.f64()?".to_string(),
-        ArgType::Rect => "r.rect()?".to_string(),
-        ArgType::String => "r.string()?".to_string(),
-        ArgType::KvList => "r.kv_list()?".to_string(),
+        ArgType::Bool => format!("({reader}).bool()?"),
+        ArgType::U32 => format!("({reader}).u32()?"),
+        ArgType::I32 => format!("({reader}).i32()?"),
+        ArgType::U64 => format!("({reader}).u64()?"),
+        ArgType::I64 => format!("({reader}).i64()?"),
+        ArgType::F32 => format!("({reader}).f32()?"),
+        ArgType::F64 => format!("({reader}).f64()?"),
+        ArgType::Rect => format!("({reader}).rect()?"),
+        ArgType::String => format!("({reader}).string()?"),
+        ArgType::KvList => format!("({reader}).kv_list()?"),
         ArgType::Array(elem) => {
-            let suffix = match **elem {
-                ArgType::U32 => "u32",
-                ArgType::I32 => "i32",
-                ArgType::U64 => "u64",
-                ArgType::I64 => "i64",
-                ArgType::F32 => "f32",
-                ArgType::F64 => "f64",
-                ArgType::String => "string",
-                _ => panic!("unsupported array element"),
-            };
-            format!("r.array_{suffix}()?")
+            let suffix = array_fn_suffix(elem);
+            format!("({reader}).array_{suffix}()?")
         }
         ArgType::Named(name) | ArgType::Enum(name) => {
-            format!("{}::decode_wire(&mut r)?", snake_to_camel(name))
+            format!("{}::decode_wire({reader})?", snake_to_camel(name))
         }
     };
     writeln!(out, "{indent}let {name} = {expr};").unwrap();
+}
+
+fn array_fn_suffix(elem: &ArgType) -> &'static str {
+    match elem {
+        ArgType::U32 => "u32",
+        ArgType::I32 => "i32",
+        ArgType::U64 => "u64",
+        ArgType::I64 => "i64",
+        ArgType::F32 => "f32",
+        ArgType::F64 => "f64",
+        ArgType::String => "string",
+        _ => panic!("unsupported array element"),
+    }
+}
+
+fn type_is_copy(ty: &ArgType, copy_structs: &HashMap<String, bool>) -> bool {
+    match ty {
+        ArgType::Bool
+        | ArgType::U32
+        | ArgType::I32
+        | ArgType::U64
+        | ArgType::I64
+        | ArgType::F32
+        | ArgType::F64
+        | ArgType::Rect
+        | ArgType::Enum(_) => true,
+        ArgType::Named(name) => copy_structs.get(name).copied().unwrap_or(false),
+        ArgType::String | ArgType::Array(_) | ArgType::KvList => false,
+    }
 }
 
 fn rust_type(ty: &ArgType) -> String {

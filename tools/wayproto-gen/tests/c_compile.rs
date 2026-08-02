@@ -105,10 +105,10 @@ fn roundtrip_hello_and_bind_buffers() {
 #include <string.h>
 
 static void test_hello(void) {
-    ww_req_hello_t in;
-    in.protocol = strdup("waywallen-display-v1");
+    ww_req_hello_t in = {0};
     in.client_name = strdup("rt-test");
     in.client_version = strdup("0.0.1");
+    in.protocol_version = 8;
 
     ww_buf_t buf;
     ww_buf_init(&buf);
@@ -118,9 +118,9 @@ static void test_hello(void) {
     ww_req_hello_t out;
     rc = ww_req_hello_decode(buf.data, buf.len, &out);
     assert(rc == WW_OK);
-    assert(strcmp(out.protocol, "waywallen-display-v1") == 0);
     assert(strcmp(out.client_name, "rt-test") == 0);
     assert(strcmp(out.client_version, "0.0.1") == 0);
+    assert(out.protocol_version == 8);
 
     ww_req_hello_free(&out);
     ww_req_hello_free(&in);
@@ -151,6 +151,16 @@ static void test_bind_buffers(void) {
     in.size.data = calloc(3, sizeof(uint64_t));
     for (int i = 0; i < 3; i++) in.size.data[i] = 8294400ULL;
 
+    in.initial_config.generation = 7;
+    in.initial_config.buffer_generation = 42;
+    in.initial_config.source_rect.w = 1920.f;
+    in.initial_config.source_rect.h = 1080.f;
+    in.initial_config.dest_rect.x = 10.f;
+    in.initial_config.dest_rect.y = 20.f;
+    in.initial_config.dest_rect.w = 1900.f;
+    in.initial_config.dest_rect.h = 1060.f;
+    in.initial_config.clear_color.a = 1.f;
+
     uint32_t fds = ww_evt_bind_buffers_expected_fds(&in);
     assert(fds == 3);
 
@@ -171,25 +181,52 @@ static void test_bind_buffers(void) {
     assert(out.planes_per_buffer == 1);
     assert(out.stride.count == 3 && out.stride.data[0] == 7680);
     assert(out.size.count == 3 && out.size.data[0] == 8294400ULL);
+    assert(out.initial_config.generation == 7);
+    assert(out.initial_config.buffer_generation == 42);
+    assert(out.initial_config.dest_rect.x == 10.f);
+    assert(out.initial_config.clear_color.a == 1.f);
 
     ww_evt_bind_buffers_free(&out);
     ww_evt_bind_buffers_free(&in);
     ww_buf_free(&buf);
 }
 
-static void test_register_display_with_kv(void) {
+static void test_register_display_with_owned_struct(void) {
     ww_req_register_display_t in;
     memset(&in, 0, sizeof(in));
     in.name = strdup("DP-1");
-    in.width = 2560;
-    in.height = 1440;
-    in.refresh_mhz = 144000;
-    in.properties.count = 2;
-    in.properties.data = calloc(2, sizeof(ww_kv_t));
-    in.properties.data[0].key = strdup("scale");
-    in.properties.data[0].value = strdup("1.5");
-    in.properties.data[1].key = strdup("hdr");
-    in.properties.data[1].value = strdup("false");
+    in.instance_id = strdup("connector-DP-1");
+    in.metrics.width = 2560;
+    in.metrics.height = 1440;
+    in.metrics.refresh_mhz = 144000;
+
+    in.consumer_caps.fourccs.count = 1;
+    in.consumer_caps.fourccs.data = calloc(1, sizeof(uint32_t));
+    in.consumer_caps.fourccs.data[0] = 0x34325258;
+    in.consumer_caps.mod_counts.count = 1;
+    in.consumer_caps.mod_counts.data = calloc(1, sizeof(uint32_t));
+    in.consumer_caps.mod_counts.data[0] = 1;
+    in.consumer_caps.modifiers.count = 1;
+    in.consumer_caps.modifiers.data = calloc(1, sizeof(uint64_t));
+    in.consumer_caps.modifiers.data[0] = 0;
+    in.consumer_caps.plane_counts.count = 1;
+    in.consumer_caps.plane_counts.data = calloc(1, sizeof(uint32_t));
+    in.consumer_caps.plane_counts.data[0] = 1;
+    in.consumer_caps.device_uuid.count = 4;
+    in.consumer_caps.device_uuid.data = calloc(4, sizeof(uint32_t));
+    in.consumer_caps.device_uuid.data[0] = 0x01020304;
+    in.consumer_caps.driver_uuid.count = 4;
+    in.consumer_caps.driver_uuid.data = calloc(4, sizeof(uint32_t));
+    in.consumer_caps.driver_uuid.data[0] = 0x05060708;
+    in.consumer_caps.drm_render_major = 226;
+    in.consumer_caps.drm_render_minor = 128;
+    in.consumer_caps.mem_hints = 3;
+    in.consumer_caps.sync_caps = 1;
+    in.consumer_caps.color_caps = 1;
+    in.consumer_caps.extent_max_w = 7680;
+    in.consumer_caps.extent_max_h = 4320;
+    in.presentation_caps.flags = 1;
+    in.window_state_flags = 8;
 
     ww_buf_t buf;
     ww_buf_init(&buf);
@@ -198,122 +235,137 @@ static void test_register_display_with_kv(void) {
     ww_req_register_display_t out;
     assert(ww_req_register_display_decode(buf.data, buf.len, &out) == WW_OK);
     assert(strcmp(out.name, "DP-1") == 0);
-    assert(out.width == 2560);
-    assert(out.refresh_mhz == 144000);
-    assert(out.properties.count == 2);
-    assert(strcmp(out.properties.data[0].key, "scale") == 0);
-    assert(strcmp(out.properties.data[1].value, "false") == 0);
+    assert(strcmp(out.instance_id, "connector-DP-1") == 0);
+    assert(out.metrics.width == 2560);
+    assert(out.metrics.refresh_mhz == 144000);
+    assert(out.consumer_caps.fourccs.count == 1);
+    assert(out.consumer_caps.fourccs.data[0] == 0x34325258);
+    assert(out.consumer_caps.modifiers.count == 1);
+    assert(out.consumer_caps.modifiers.data[0] == 0);
+    assert(out.consumer_caps.device_uuid.count == 4);
+    assert(out.consumer_caps.device_uuid.data[0] == 0x01020304);
+    assert(out.consumer_caps.drm_render_major == 226);
+    assert(out.presentation_caps.flags == 1);
+    assert(out.window_state_flags == 8);
 
     ww_req_register_display_free(&out);
     ww_req_register_display_free(&in);
     ww_buf_free(&buf);
 }
 
-static void test_set_config(void) {
-    ww_evt_set_config_t in = {0};
-    in.config_generation = 7;
-    in.source_rect.x = 0.f;
-    in.source_rect.y = 0.f;
-    in.source_rect.w = 1920.f;
-    in.source_rect.h = 1080.f;
-    in.dest_rect.x = 10.f;
-    in.dest_rect.y = 20.f;
-    in.dest_rect.w = 1900.f;
-    in.dest_rect.h = 1060.f;
-    in.transform = 0;
-    in.clear_r = 0.f;
-    in.clear_g = 0.f;
-    in.clear_b = 0.f;
-    in.clear_a = 1.f;
+static void test_set_composition_config(void) {
+    ww_evt_set_composition_config_t in = {0};
+    in.config.generation = 7;
+    in.config.buffer_generation = 42;
+    in.config.source_rect.w = 1920.f;
+    in.config.source_rect.h = 1080.f;
+    in.config.dest_rect.x = 10.f;
+    in.config.dest_rect.y = 20.f;
+    in.config.dest_rect.w = 1900.f;
+    in.config.dest_rect.h = 1060.f;
+    in.config.clear_color.a = 1.f;
 
     ww_buf_t buf;
     ww_buf_init(&buf);
-    assert(ww_evt_set_config_encode(&in, &buf) == WW_OK);
+    assert(ww_evt_set_composition_config_encode(&in, &buf) == WW_OK);
 
-    ww_evt_set_config_t out;
-    assert(ww_evt_set_config_decode(buf.data, buf.len, &out) == WW_OK);
-    assert(out.config_generation == 7);
-    assert(out.source_rect.w == 1920.f);
-    assert(out.dest_rect.x == 10.f);
-    assert(out.clear_a == 1.f);
+    ww_evt_set_composition_config_t out;
+    assert(ww_evt_set_composition_config_decode(buf.data, buf.len, &out) == WW_OK);
+    assert(out.config.generation == 7);
+    assert(out.config.buffer_generation == 42);
+    assert(out.config.source_rect.w == 1920.f);
+    assert(out.config.dest_rect.x == 10.f);
+    assert(out.config.clear_color.a == 1.f);
 
-    ww_evt_set_config_free(&out);
+    ww_evt_set_composition_config_free(&out);
     ww_buf_free(&buf);
 }
 
 static void test_presentation_bool(void) {
-    ww_evt_set_presentation_dynamic_config_t in = {0};
-    in.dynamic_config.generation = 5;
-    in.dynamic_config.config_generation = 3;
-    in.dynamic_config.pause_effect.active = true;
+    ww_evt_set_presentation_state_t in = {0};
+    in.state.generation = 5;
+    in.state.config_generation = 3;
+    in.state.pause_effect.active = true;
 
     ww_buf_t buf;
     ww_buf_init(&buf);
-    assert(ww_evt_set_presentation_dynamic_config_encode(&in, &buf) == WW_OK);
+    assert(ww_evt_set_presentation_state_encode(&in, &buf) == WW_OK);
 
-    ww_evt_set_presentation_dynamic_config_t out;
-    assert(ww_evt_set_presentation_dynamic_config_decode(buf.data, buf.len, &out) == WW_OK);
-    assert(out.dynamic_config.generation == 5);
-    assert(out.dynamic_config.config_generation == 3);
-    assert(out.dynamic_config.pause_effect.active);
-    ww_evt_set_presentation_dynamic_config_free(&out);
+    ww_evt_set_presentation_state_t out;
+    assert(ww_evt_set_presentation_state_decode(buf.data, buf.len, &out) == WW_OK);
+    assert(out.state.generation == 5);
+    assert(out.state.config_generation == 3);
+    assert(out.state.pause_effect.active);
+    ww_evt_set_presentation_state_free(&out);
 
     assert(buf.len == 20);
     buf.data[16] = 2;
     buf.data[17] = 0;
     buf.data[18] = 0;
     buf.data[19] = 0;
-    assert(ww_evt_set_presentation_dynamic_config_decode(buf.data, buf.len, &out) == WW_ERR_BAD_BOOL);
+    assert(ww_evt_set_presentation_state_decode(buf.data, buf.len, &out) == WW_ERR_BAD_BOOL);
     ww_buf_free(&buf);
 }
 
 static void test_presentation_enum(void) {
-    ww_evt_set_presentation_config_t in = {0};
+    ww_evt_set_presentation_snapshot_t in = {0};
     in.presentation.config.generation = 2;
     in.presentation.config.pause_effect.kind = WAYWALLEN_PAUSE_EFFECT_KIND_BLUR;
     in.presentation.config.pause_effect.blur.radius = 30;
-    in.presentation.dynamic_config.generation = 2;
-    in.presentation.dynamic_config.config_generation = 2;
-    in.presentation.dynamic_config.pause_effect.active = true;
+    in.presentation.state.generation = 2;
+    in.presentation.state.config_generation = 2;
+    in.presentation.state.pause_effect.active = true;
 
     ww_buf_t buf;
     ww_buf_init(&buf);
-    assert(ww_evt_set_presentation_config_encode(&in, &buf) == WW_OK);
+    assert(ww_evt_set_presentation_snapshot_encode(&in, &buf) == WW_OK);
 
-    ww_evt_set_presentation_config_t out;
-    assert(ww_evt_set_presentation_config_decode(buf.data, buf.len, &out) == WW_OK);
+    ww_evt_set_presentation_snapshot_t out;
+    assert(ww_evt_set_presentation_snapshot_decode(buf.data, buf.len, &out) == WW_OK);
     assert(out.presentation.config.pause_effect.kind == WAYWALLEN_PAUSE_EFFECT_KIND_BLUR);
-    ww_evt_set_presentation_config_free(&out);
+    ww_evt_set_presentation_snapshot_free(&out);
 
     buf.data[8] = 7;
     buf.data[9] = 0;
     buf.data[10] = 0;
     buf.data[11] = 0;
-    assert(ww_evt_set_presentation_config_decode(buf.data, buf.len, &out) == WW_ERR_BAD_ENUM);
+    assert(ww_evt_set_presentation_snapshot_decode(buf.data, buf.len, &out) == WW_ERR_BAD_ENUM);
     ww_buf_free(&buf);
 }
 
-static void test_bye_empty(void) {
-    ww_req_bye_t in = {0};
+static void test_buffer_import_failure_enum(void) {
+    ww_req_buffer_import_failed_t in = {0};
+    in.buffer_generation = 42;
+    in.kind = WAYWALLEN_BUFFER_IMPORT_FAILURE_KIND_UNSUPPORTED;
+    in.message = strdup("unsupported modifier");
     ww_buf_t buf;
     ww_buf_init(&buf);
-    assert(ww_req_bye_encode(&in, &buf) == WW_OK);
-    assert(buf.len == 0);
+    assert(ww_req_buffer_import_failed_encode(&in, &buf) == WW_OK);
 
-    ww_req_bye_t out;
-    assert(ww_req_bye_decode(buf.data, buf.len, &out) == WW_OK);
-    ww_req_bye_free(&out);
+    ww_req_buffer_import_failed_t out;
+    assert(ww_req_buffer_import_failed_decode(buf.data, buf.len, &out) == WW_OK);
+    assert(out.buffer_generation == 42);
+    assert(out.kind == WAYWALLEN_BUFFER_IMPORT_FAILURE_KIND_UNSUPPORTED);
+    assert(strcmp(out.message, "unsupported modifier") == 0);
+    ww_req_buffer_import_failed_free(&out);
+
+    buf.data[8] = 7;
+    buf.data[9] = 0;
+    buf.data[10] = 0;
+    buf.data[11] = 0;
+    assert(ww_req_buffer_import_failed_decode(buf.data, buf.len, &out) == WW_ERR_BAD_ENUM);
+    ww_req_buffer_import_failed_free(&in);
     ww_buf_free(&buf);
 }
 
 int main(void) {
     test_hello();
     test_bind_buffers();
-    test_register_display_with_kv();
-    test_set_config();
+    test_register_display_with_owned_struct();
+    test_set_composition_config();
     test_presentation_bool();
     test_presentation_enum();
-    test_bye_empty();
+    test_buffer_import_failure_enum();
     printf("wayproto-gen C roundtrip: OK\n");
     return 0;
 }

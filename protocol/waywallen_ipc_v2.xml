@@ -612,7 +612,7 @@
                       `"r,g,b,a"` (RGBA non-premultiplied straight
                       alpha, sRGB). Becomes the `clear_{r,g,b,a}` field
                       of the daemon's outbound display
-                      `set_config` (waywallen_display_v1 opcode 4) for
+                      `set_composition_config` (waywallen_display_v1 opcode 4) for
                       every display routed from this renderer. The
                       daemon clamps each component into `[0,1]` and
                       forces `a = 1.0` on parse failure or absence;

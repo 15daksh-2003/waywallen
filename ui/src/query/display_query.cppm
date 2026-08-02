@@ -36,7 +36,7 @@ private:
 /// fillmode override; `clearFillmode = true` removes the override
 /// (revert to global default). Same pattern for `location*`,
 /// `align*`, and `rotation*`. Empty `name` is rejected by the daemon. The daemon re-emits
-/// `set_config` to the live consumer and broadcasts a
+/// composition config to the live consumer and broadcasts a
 /// `DisplayChanged` event with the refreshed `effectiveLayout`.
 ///
 /// Clear color is NOT exposed here — it's owned by the renderer.

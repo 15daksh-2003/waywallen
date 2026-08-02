@@ -33,8 +33,10 @@ pub fn emit_types_header(p: &Protocol) -> String {
     writeln!(out, "#define WAYWALLEN_DISPLAY_PROTOCOL_TYPES_H").unwrap();
     writeln!(out).unwrap();
     writeln!(out, "#include <stdbool.h>").unwrap();
+    writeln!(out, "#include <stddef.h>").unwrap();
     writeln!(out, "#include <stdint.h>").unwrap();
     writeln!(out).unwrap();
+    emit_value_types(&mut out);
     emit_named_types(&mut out, &p.enums, &p.structs);
     writeln!(out, "#endif /* WAYWALLEN_DISPLAY_PROTOCOL_TYPES_H */").unwrap();
     out
@@ -120,8 +122,38 @@ fn emit_header_epilogue(out: &mut String) {
 }
 
 fn emit_common_types(out: &mut String) {
+    emit_value_types(out);
     out.push_str(
-        r#"/* --- Shared primitive types --- */
+        r#"/* --- Codec buffer + return codes --- */
+
+typedef struct ww_buf {
+    uint8_t *data;
+    size_t len;
+    size_t cap;
+} ww_buf_t;
+
+/* Return codes: 0 = success, negative = -errno-ish. */
+#define WW_OK                  0
+#define WW_ERR_SHORT           (-1)   /* buffer truncated */
+#define WW_ERR_BAD_STRING      (-2)   /* malformed length-prefixed string */
+#define WW_ERR_BAD_ARRAY       (-3)   /* array length overflow */
+#define WW_ERR_TRAILING        (-4)   /* unexpected trailing bytes */
+#define WW_ERR_UNKNOWN_OPCODE  (-5)
+#define WW_ERR_NOMEM           (-6)
+#define WW_ERR_OVERFLOW        (-7)   /* frame bigger than u16 can address */
+#define WW_ERR_BAD_BOOL        (-8)   /* boolean is not canonical 0/1 */
+#define WW_ERR_BAD_ENUM        (-9)   /* enum value is not declared */
+
+"#,
+    );
+}
+
+fn emit_value_types(out: &mut String) {
+    out.push_str(
+        r#"#ifndef WAYWALLEN_PROTOCOL_VALUE_TYPES_DEFINED
+#define WAYWALLEN_PROTOCOL_VALUE_TYPES_DEFINED
+
+/* --- Shared primitive value types --- */
 
 typedef struct ww_rect {
     float x;
@@ -175,25 +207,7 @@ typedef struct ww_kv_list {
     ww_kv_t *data;
 } ww_kv_list_t;
 
-/* --- Codec buffer + return codes --- */
-
-typedef struct ww_buf {
-    uint8_t *data;
-    size_t len;
-    size_t cap;
-} ww_buf_t;
-
-/* Return codes: 0 = success, negative = -errno-ish. */
-#define WW_OK                  0
-#define WW_ERR_SHORT           (-1)   /* buffer truncated */
-#define WW_ERR_BAD_STRING      (-2)   /* malformed length-prefixed string */
-#define WW_ERR_BAD_ARRAY       (-3)   /* array length overflow */
-#define WW_ERR_TRAILING        (-4)   /* unexpected trailing bytes */
-#define WW_ERR_UNKNOWN_OPCODE  (-5)
-#define WW_ERR_NOMEM           (-6)
-#define WW_ERR_OVERFLOW        (-7)   /* frame bigger than u16 can address */
-#define WW_ERR_BAD_BOOL        (-8)   /* boolean is not canonical 0/1 */
-#define WW_ERR_BAD_ENUM        (-9)   /* enum value is not declared */
+#endif /* WAYWALLEN_PROTOCOL_VALUE_TYPES_DEFINED */
 
 "#,
     );
@@ -870,8 +884,10 @@ fn emit_named_helpers(out: &mut String, structs: &[NamedStruct]) {
                 | ArgType::F32
                 | ArgType::F64
                 | ArgType::Enum(_) => format!("v->{name}"),
-                ArgType::Named(_) => format!("&v->{name}"),
-                _ => unreachable!("parser restricts named struct fields"),
+                ArgType::String => format!("v->{name}"),
+                ArgType::Rect | ArgType::KvList | ArgType::Array(_) | ArgType::Named(_) => {
+                    format!("&v->{name}")
+                }
             };
             writeln!(out, "    if ((rc = {call}(b, {arg}))) return rc;").unwrap();
         }
@@ -892,6 +908,23 @@ fn emit_named_helpers(out: &mut String, structs: &[NamedStruct]) {
             writeln!(out, "    if ((rc = {call}(r, &v->{name}))) return rc;").unwrap();
         }
         writeln!(out, "    return WW_OK;").unwrap();
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+
+        writeln!(out, "static void free_{}({c_name} *v) {{", item.name).unwrap();
+        let owned: Vec<_> = item
+            .fields
+            .iter()
+            .filter(|field| ty_owns_heap(&field.ty))
+            .collect();
+        if owned.is_empty() {
+            writeln!(out, "    (void)v;").unwrap();
+        } else {
+            for field in owned {
+                let name = c_field_name(&field.name);
+                writeln!(out, "    {}", free_stmt_for_base(&field.ty, "v", &name)).unwrap();
+            }
+        }
         writeln!(out, "}}").unwrap();
         writeln!(out).unwrap();
     }
@@ -1085,17 +1118,27 @@ fn decode_call_for(ty: &ArgType) -> String {
 }
 
 fn ty_owns_heap(ty: &ArgType) -> bool {
-    matches!(ty, ArgType::String | ArgType::KvList | ArgType::Array(_))
+    matches!(
+        ty,
+        ArgType::String | ArgType::KvList | ArgType::Array(_) | ArgType::Named(_)
+    )
 }
 
 fn free_stmt_for(ty: &ArgType, field: &str) -> String {
+    free_stmt_for_base(ty, "m", field)
+}
+
+fn free_stmt_for_base(ty: &ArgType, base: &str, field: &str) -> String {
     match ty {
-        ArgType::String => format!("free(m->{field}); m->{field} = NULL;"),
-        ArgType::KvList => format!("free_kv_list(&m->{field});"),
+        ArgType::String => format!("free({base}->{field}); {base}->{field} = NULL;"),
+        ArgType::KvList => format!("free_kv_list(&{base}->{field});"),
         ArgType::Array(elem) => match **elem {
-            ArgType::String => format!("free_array_string(&m->{field});"),
-            _ => format!("free(m->{field}.data); m->{field}.data = NULL; m->{field}.count = 0;"),
+            ArgType::String => format!("free_array_string(&{base}->{field});"),
+            _ => format!(
+                "free({base}->{field}.data); {base}->{field}.data = NULL; {base}->{field}.count = 0;"
+            ),
         },
+        ArgType::Named(name) => format!("free_{name}(&{base}->{field});"),
         _ => format!("/* {field}: no heap */"),
     }
 }

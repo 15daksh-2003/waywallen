@@ -248,6 +248,29 @@ mod tests {
             stride: vec![7680, 7680, 7680],
             plane_offset: vec![0, 0, 0],
             size: vec![8_294_400; 3],
+            initial_config: crate::display::proto::CompositionConfig {
+                generation: 1,
+                buffer_generation: 1,
+                source_rect: crate::display::proto::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1920.0,
+                    h: 1080.0,
+                },
+                dest_rect: crate::display::proto::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1920.0,
+                    h: 1080.0,
+                },
+                transform: 0,
+                clear_color: crate::display::proto::RgbaColor {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            },
         };
         assert_eq!(sent.expected_fds(), 3);
         send_event(&a, &sent, &raw_fds).unwrap();
@@ -316,16 +339,19 @@ mod tests {
     #[test]
     fn back_to_back_frames_parse_independently() {
         let (a, b) = pair();
-        send_request(&a, &Request::Bye, &[]).unwrap();
-        let update = Request::UpdateDisplay {
-            width: 800,
-            height: 600,
-            properties: vec![],
+        let window = Request::SetWindowState { flags: 1 };
+        send_request(&a, &window, &[]).unwrap();
+        let update = Request::SetDisplayMetrics {
+            metrics: crate::display::proto::DisplayMetrics {
+                width: 800,
+                height: 600,
+                refresh_mhz: 60_000,
+            },
         };
         send_request(&a, &update, &[]).unwrap();
         let (r1, _) = recv_request(&b).unwrap();
         let (r2, _) = recv_request(&b).unwrap();
-        assert_eq!(r1, Request::Bye);
+        assert_eq!(r1, window);
         assert_eq!(r2, update);
     }
 

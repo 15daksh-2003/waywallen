@@ -334,6 +334,10 @@ fn parse_struct(
                 | ArgType::I64
                 | ArgType::F32
                 | ArgType::F64
+                | ArgType::String
+                | ArgType::Array(_)
+                | ArgType::KvList
+                | ArgType::Rect
                 | ArgType::Named(_)
                 | ArgType::Enum(_)
         ) {

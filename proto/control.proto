@@ -583,7 +583,7 @@ message DisplayLinkInfo {
 // TiledOnlyHorizontally / TiledOnlyVertically / Centered) so the daemon
 // API maps 1:1 onto a future Plasma plugin. Tile* variants used to
 // exist (tags 4, 5, 6) but were never wired through — the v1
-// set_config wire can't express texture wrap in a single rect, and
+// CompositionConfig can't express texture wrap in a single rect, and
 // the daemon was just degrading them to PRESERVE_ASPECT_FIT.
 enum FillMode {
   FILL_MODE_UNSPECIFIED          = 0;
@@ -973,7 +973,7 @@ message DisplayListResponse {
 
 // Mutate the per-display layout override for a single display. The
 // daemon writes through to its settings store and re-emits
-// `set_config` to the live consumer (if any) immediately. After the
+// composition config to the live consumer (if any) immediately. After the
 // write the daemon also broadcasts a `DisplayChanged` event so other
 // UIs see the new effective layout.
 //

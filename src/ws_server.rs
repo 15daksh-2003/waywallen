@@ -2779,7 +2779,7 @@ async fn dispatch_inner(
             }
             let new_layout = current_settings.global.layout.clone();
             if new_layout != prev_layout {
-                state.router.resync_all_set_configs().await;
+                state.router.resync_all_compositions().await;
                 // Push fresh DisplaySnapshot so subscribers see new
                 // effective_layout values.
                 let snap = state.router.snapshot_displays().await;

@@ -25,7 +25,7 @@ use crate::plugin::renderer_registry::RendererActivityMode;
 use crate::renderer_manager::{
     DrmNode, PublishedPool, RendererHandle, RendererId, RendererManager,
 };
-use crate::scheduler::{DisplayId, DisplayInfo, ProjectedConfig};
+use crate::scheduler::{CompositionConfig, DisplayId, DisplayInfo, DisplayMetrics};
 use crate::settings::{
     AutoAction, AutoReplayPolicy, PauseEffectConfig as StoredPauseEffectConfig, PauseEffectKind,
     ResolvedLayout, SettingsStore,
@@ -43,15 +43,16 @@ pub enum DisplayOutEvent {
         renderer: Arc<RendererHandle>,
         pool: Arc<PublishedPool>,
         buffer_generation: u64,
+        initial_config: CompositionConfig,
     },
     /// Retire the named buffer pool generation.
     Unbind { buffer_generation: u64 },
     /// Update composition geometry / clear color.
-    SetConfig(ProjectedConfig),
+    SetCompositionConfig(CompositionConfig),
     /// Replace persistent presentation config and its current dynamic result.
-    SetPresentationConfig(PresentationSnapshot),
+    SetPresentationSnapshot(PresentationSnapshot),
     /// Update high-frequency presentation state for the current config.
-    SetPresentationDynamicConfig(PresentationDynamicConfig),
+    SetPresentationState(PresentationState),
     /// A frame is ready on `renderer` at `buffer_index` for the named
     /// generation. The endpoint pulls the matching sync_fd from the handle.
     Frame {
@@ -64,7 +65,21 @@ pub enum DisplayOutEvent {
     },
 }
 
-pub const PRESENTATION_CAP_BLUR: u32 = 1 << 0;
+pub const PRESENTATION_CAP_PAUSE_BLUR: u32 = 1 << 0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsumerImportFailureKind {
+    Unsupported,
+    ResourceExhausted,
+    BackendFailure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsumerImportFailureOutcome {
+    Retry { fourcc: u32, modifier: u64 },
+    Stale,
+    Terminal,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlurEffectConfig {
@@ -78,7 +93,7 @@ pub struct PauseEffectConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PauseEffectDynamicConfig {
+pub struct PauseEffectState {
     pub active: bool,
 }
 
@@ -89,16 +104,16 @@ pub struct PresentationConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PresentationDynamicConfig {
+pub struct PresentationState {
     pub generation: u64,
     pub config_generation: u64,
-    pub pause_effect: PauseEffectDynamicConfig,
+    pub pause_effect: PauseEffectState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PresentationSnapshot {
     pub config: PresentationConfig,
-    pub dynamic_config: PresentationDynamicConfig,
+    pub state: PresentationState,
 }
 
 #[derive(Clone)]
@@ -176,17 +191,10 @@ pub struct DisplayRegistration {
     /// Stable identifier persisted by the consumer (e.g. UUID4 stored in
     /// the shell extension config). Used as the settings key when present.
     pub instance_id: Option<String>,
-    pub width: u32,
-    pub height: u32,
-    pub refresh_mhz: u32,
-    /// DRM render-node id of the GPU this display will sample dmabufs
-    /// on (i.e. the GPU backing the consumer's EGL/Vulkan context).
-    pub gpu: DrmNode,
-    pub properties: Vec<(String, String)>,
+    pub metrics: DisplayMetrics,
     pub presentation_caps: u32,
-    /// Modifier-negotiation capabilities the consumer declared in
-    /// its `consumer_caps` request.
-    pub consumer_caps: Option<crate::dma::negotiate::PeerCaps>,
+    pub consumer_caps: crate::dma::negotiate::PeerCaps,
+    pub window_state_flags: u32,
 }
 
 /// Returned from `register_display` — the assigned id plus the rx end
@@ -362,11 +370,11 @@ struct DisplayState {
     tx: mpsc::UnboundedSender<DisplayOutEvent>,
     binding: Option<DisplayBinding>,
     next_wire_buffer_generation: u64,
-    /// Consumer's modifier-negotiation caps. `None` until the
-    /// consumer_caps request is received.
-    consumer_caps: Option<crate::dma::negotiate::PeerCaps>,
+    consumer_caps: crate::dma::negotiate::PeerCaps,
+    failed_binding_generation: Option<u64>,
     presentation_caps: u32,
     presentation: PresentationSnapshot,
+    accepted: bool,
     /// Per-display auto replay machine driven by display facts and
     /// the resolved rule policy.
     auto_replay: auto_replay::State,
@@ -517,10 +525,10 @@ pub struct Router {
     events_tx: broadcast::Sender<RouterEvent>,
     auto_stop_tx: broadcast::Sender<AutoStopEvent>,
     /// Settings store used to resolve per-display fillmode/align when
-    /// computing set_config. Set once at startup.
+    /// computing composition config. Set once at startup.
     settings: std::sync::OnceLock<Arc<SettingsStore>>,
     /// Wakes any task currently inside `await_unbind_acks_for` whenever
-    /// `record_unbind_done` mutates `unbind_acks_pending`.
+    /// `record_ack_unbind` mutates `unbind_acks_pending`.
     unbind_ack_notify: Notify,
 }
 
@@ -570,7 +578,7 @@ impl Router {
     }
 
     /// Wire the daemon's `SettingsStore` so `sync_display` can resolve
-    /// per-display layout when projecting set_config.
+    /// per-display layout when projecting composition config.
     pub fn attach_settings(self: &Arc<Self>, settings: Arc<SettingsStore>) {
         if self.settings.set(settings).is_err() {
             log::warn!("router: attach_settings called twice; ignoring second call");
@@ -658,7 +666,7 @@ impl Router {
             .unwrap_or_else(StoredPauseEffectConfig::default)
             .effective();
         let kind = if stored.kind == PauseEffectKind::Blur
-            && presentation_caps & PRESENTATION_CAP_BLUR != 0
+            && presentation_caps & PRESENTATION_CAP_PAUSE_BLUR != 0
         {
             PauseEffectKind::Blur
         } else {
@@ -755,7 +763,7 @@ impl Router {
                 s.displays.remove(&key);
             }
         });
-        self.resync_display_set_config(target_id).await;
+        self.resync_display_composition(target_id).await;
         if let Some(snap) = self.snapshot_display(target_id).await {
             self.emit(RouterEvent::DisplayUpsert(snap));
         }
@@ -802,9 +810,9 @@ impl Router {
         Some(target_id)
     }
 
-    /// Re-emit `set_config` for a single display to pick up new
+    /// Re-emit composition config for a single display to pick up new
     /// settings without rebinding buffers.
-    async fn resync_display_set_config(self: &Arc<Self>, display_id: DisplayId) {
+    async fn resync_display_composition(self: &Arc<Self>, display_id: DisplayId) {
         let mut inner = self.inner.lock().await;
         if !inner.displays.contains_key(&display_id) {
             return;
@@ -812,18 +820,19 @@ impl Router {
         let display_links = inner.table.links_for_display(display_id);
         let target = display_links.into_iter().find(|l| l.enabled).and_then(|l| {
             let binding = inner.displays.get(&display_id)?.binding.as_ref()?;
-            (binding.renderer.id == l.renderer_id).then(|| (l, Arc::clone(&binding.pool)))
+            (binding.renderer.id == l.renderer_id)
+                .then(|| (l, Arc::clone(&binding.pool), binding.wire_generation))
         });
-        let Some((link, pool)) = target else {
+        let Some((link, pool, buffer_generation)) = target else {
             return;
         };
         inner.next_config_generation += 1;
         let cfg_gen = inner.next_config_generation;
         let info = inner.displays.get(&display_id).unwrap().info.clone();
         let layout = self.resolved_layout_for_renderer(&info, &link.renderer_id, &inner);
-        let cfg = project_link(&link, &pool, &info, cfg_gen, &layout);
+        let cfg = project_link(&link, &pool, &info, cfg_gen, buffer_generation, &layout);
         if let Some(state) = inner.displays.get(&display_id) {
-            let _ = state.tx.send(DisplayOutEvent::SetConfig(cfg));
+            let _ = state.tx.send(DisplayOutEvent::SetCompositionConfig(cfg));
         }
     }
 
@@ -845,15 +854,15 @@ impl Router {
         Some((display_id, Self::settings_key_for(&state.info).to_string()))
     }
 
-    /// Re-emit `set_config` for every registered display. Called from
+    /// Re-emit composition config for every registered display. Called from
     /// the control surface after global layout settings change.
-    pub async fn resync_all_set_configs(self: &Arc<Self>) {
+    pub async fn resync_all_compositions(self: &Arc<Self>) {
         let ids: Vec<DisplayId> = {
             let inner = self.inner.lock().await;
             inner.displays.keys().copied().collect()
         };
         for did in ids {
-            self.resync_display_set_config(did).await;
+            self.resync_display_composition(did).await;
         }
     }
 
@@ -1025,7 +1034,7 @@ impl Router {
                 .collect()
         };
         for did in &display_ids {
-            self.resync_display_set_config(*did).await;
+            self.resync_display_composition(*did).await;
         }
         if !display_ids.is_empty() {
             let all = self.snapshot_displays().await;
@@ -1034,7 +1043,7 @@ impl Router {
         true
     }
 
-    /// Arm `unbind_done` ack tracking for `renderer_id`. MUST be called
+    /// Arm `ack_unbind` tracking for `renderer_id`. MUST be called
     /// before any sync_display that emits Unbind for this renderer.
     pub async fn begin_unbind_ack_tracking(self: &Arc<Self>, renderer_id: &str) {
         let mut inner = self.inner.lock().await;
@@ -1044,9 +1053,9 @@ impl Router {
             .or_insert_with(HashSet::new);
     }
 
-    /// Record an `unbind_done` request from a display for a specific
+    /// Record an `ack_unbind` request from a display for a specific
     /// generation, draining the matching pending pair if present.
-    pub async fn record_unbind_done(
+    pub async fn record_ack_unbind(
         self: &Arc<Self>,
         display_id: DisplayId,
         buffer_generation: u64,
@@ -1071,7 +1080,7 @@ impl Router {
         let result = tokio::time::timeout_at(deadline, async {
             loop {
                 // Create the notified future before checking pending state
-                // so concurrent record_unbind_done cannot be missed.
+                // so a concurrent record_ack_unbind cannot be missed.
                 let notified = self.unbind_ack_notify.notified();
                 tokio::pin!(notified);
                 {
@@ -1126,7 +1135,8 @@ impl Router {
             }
         }
         let (tx, rx) = mpsc::unbounded_channel();
-        let (display_id, display_session_id, auto_linked, initial_presentation) = {
+        let initial_window_state_flags = reg.window_state_flags;
+        let (display_id, display_session_id, auto_linked) = {
             let mut inner = self.inner.lock().await;
             inner.next_display_id += 1;
             inner.next_display_session_id = inner
@@ -1139,10 +1149,7 @@ impl Router {
                 id,
                 name: reg.name,
                 instance_id: reg.instance_id,
-                width: reg.width,
-                height: reg.height,
-                refresh_mhz: reg.refresh_mhz,
-                properties: reg.properties,
+                metrics: reg.metrics,
                 bound: false,
             };
             let pause_effect = self.resolved_pause_effect(reg.presentation_caps);
@@ -1151,10 +1158,10 @@ impl Router {
                     generation: 1,
                     pause_effect,
                 },
-                dynamic_config: PresentationDynamicConfig {
+                state: PresentationState {
                     generation: 1,
                     config_generation: 1,
-                    pause_effect: PauseEffectDynamicConfig { active: false },
+                    pause_effect: PauseEffectState { active: false },
                 },
             };
             inner.displays.insert(
@@ -1162,13 +1169,15 @@ impl Router {
                 DisplayState {
                     info,
                     session_id,
-                    gpu: reg.gpu,
+                    gpu: reg.consumer_caps.identity.drm,
                     tx,
                     binding: None,
                     next_wire_buffer_generation: 0,
                     consumer_caps: reg.consumer_caps,
+                    failed_binding_generation: None,
                     presentation_caps: reg.presentation_caps,
                     presentation,
+                    accepted: false,
                     auto_replay: auto_replay::State::new(),
                     consumption_epoch: Arc::new(AtomicU64::new(1)),
                 },
@@ -1178,24 +1187,37 @@ impl Router {
             if let Some(rid) = auto.clone() {
                 inner.table.add_link(rid, id);
             }
-            (id, session_id, auto, presentation)
+            (id, session_id, auto)
         };
         // A freshly auto-linked renderer just gained an audience —
         // cancel any pending orphan timer so it survives.
         if let Some(rid) = auto_linked.as_deref() {
             self.cancel_orphan_timer(rid).await;
         }
+        let auto_action = self
+            .update_auto_state(display_id, Some(initial_window_state_flags))
+            .await;
+        self.run_auto_state_action(auto_action).await;
+        self.reconcile_buffer_flags().await;
         self.sync_display(display_id).await;
         self.reconcile_lifecycle().await;
-        self.reconcile_buffer_flags().await;
         self.refresh_runtime_health().await;
         if let Some(snap) = self.snapshot_display(display_id).await {
             self.emit(RouterEvent::DisplayUpsert(snap));
         }
+        let presentation = {
+            let mut inner = self.inner.lock().await;
+            let state = inner
+                .displays
+                .get_mut(&display_id)
+                .expect("registered display missing before acceptance");
+            state.accepted = true;
+            state.presentation
+        };
         DisplayHandle {
             id: display_id,
             session_id: display_session_id,
-            presentation: initial_presentation,
+            presentation,
             rx,
         }
     }
@@ -1216,41 +1238,32 @@ impl Router {
         self.emit(RouterEvent::DisplayRemoved(display_id));
     }
 
-    /// Stash the consumer's modifier-negotiation caps on the
-    /// display state and re-run the picker. Later caps replace earlier ones.
-    pub async fn set_consumer_caps(
+    pub async fn on_consumer_import_failed(
         self: &Arc<Self>,
         display_id: DisplayId,
-        caps: crate::dma::negotiate::PeerCaps,
-    ) {
-        {
-            let mut inner = self.inner.lock().await;
-            if let Some(s) = inner.displays.get_mut(&display_id) {
-                s.consumer_caps = Some(caps);
-            } else {
-                return;
-            }
-        }
-        self.reconcile_buffer_flags().await;
-    }
-
-    /// Consumer reported `bind_failed` for `(fourcc, modifier)`.
-    /// Add the pair to this consumer's blacklist and retry negotiation.
-    pub async fn on_consumer_bind_failed(
-        self: &Arc<Self>,
-        display_id: DisplayId,
-        fourcc: u32,
-        modifier: u64,
-    ) {
-        let inserted = {
+        buffer_generation: u64,
+        kind: ConsumerImportFailureKind,
+    ) -> ConsumerImportFailureOutcome {
+        let (fourcc, modifier, inserted) = {
             let mut inner = self.inner.lock().await;
             let Some(state) = inner.displays.get_mut(&display_id) else {
-                return;
+                return ConsumerImportFailureOutcome::Stale;
             };
-            let Some(caps) = state.consumer_caps.as_mut() else {
-                return;
+            let Some(binding) = state.binding.as_ref() else {
+                return ConsumerImportFailureOutcome::Stale;
             };
-            caps.blacklist.insert((fourcc, modifier))
+            if binding.wire_generation != buffer_generation {
+                return ConsumerImportFailureOutcome::Stale;
+            }
+            let fourcc = binding.pool.fourcc;
+            let modifier = binding.pool.modifier;
+            state.failed_binding_generation = Some(buffer_generation);
+            state.invalidate_consumption();
+            if kind != ConsumerImportFailureKind::Unsupported {
+                return ConsumerImportFailureOutcome::Terminal;
+            }
+            let inserted = state.consumer_caps.blacklist.insert((fourcc, modifier));
+            (fourcc, modifier, inserted)
         };
         if inserted {
             log::info!(
@@ -1258,6 +1271,7 @@ impl Router {
             );
         }
         self.reconcile_buffer_flags().await;
+        ConsumerImportFailureOutcome::Retry { fourcc, modifier }
     }
 
     /// Renderer reported `bind_failed` for `(fourcc, modifier)`.
@@ -1316,37 +1330,37 @@ impl Router {
             affected
         };
         for did in affected {
-            self.resync_display_set_config(did).await;
+            self.resync_display_composition(did).await;
         }
     }
 
-    pub async fn update_display_size(
+    pub async fn set_display_metrics(
         self: &Arc<Self>,
         display_id: DisplayId,
-        width: u32,
-        height: u32,
+        metrics: DisplayMetrics,
     ) {
-        if width == 0 || height == 0 {
+        if metrics.width == 0 || metrics.height == 0 {
             log::warn!(
-                "update_display_size: ignoring zero dim ({width}x{height}) for display {display_id:?}",
+                "set_display_metrics: ignoring zero dim ({}x{}) for display {display_id:?}",
+                metrics.width,
+                metrics.height,
             );
             return;
         }
         let changed = {
             let mut inner = self.inner.lock().await;
             if let Some(s) = inner.displays.get_mut(&display_id) {
-                let differs = s.info.width != width || s.info.height != height;
-                s.info.width = width;
-                s.info.height = height;
+                let differs = s.info.metrics != metrics;
+                s.info.metrics = metrics;
                 differs
             } else {
                 return;
             }
         };
         // Layout depends on disp_w/disp_h, so any size change must
-        // trigger a fresh set_config under the resolved fillmode/align.
+        // trigger a fresh composition config under the resolved fillmode/align.
         if changed {
-            self.resync_display_set_config(display_id).await;
+            self.resync_display_composition(display_id).await;
         }
         if let Some(snap) = self.snapshot_display(display_id).await {
             self.emit(RouterEvent::DisplayUpsert(snap));
@@ -1354,7 +1368,7 @@ impl Router {
     }
 
     /// Update the per-display auto replay machine from a consumer's
-    /// `window_state` request.
+    /// `set_window_state` request.
     pub async fn update_display_window_state(self: &Arc<Self>, display_id: DisplayId, flags: u32) {
         let action = self.update_auto_state(display_id, Some(flags)).await;
         self.run_auto_state_action(action).await;
@@ -1366,7 +1380,7 @@ impl Router {
             return;
         };
         let desired_config = self.resolved_pause_effect(current.presentation_caps);
-        let desired_dynamic = PauseEffectDynamicConfig {
+        let desired_dynamic = PauseEffectState {
             active: Self::pause_effect_active(&inner, current, desired_config.kind),
         };
         let state = inner
@@ -1383,7 +1397,7 @@ impl Router {
                 .expect("presentation config generation exhausted");
             let dynamic_generation = state
                 .presentation
-                .dynamic_config
+                .state
                 .generation
                 .checked_add(1)
                 .expect("presentation dynamic generation exhausted");
@@ -1392,29 +1406,33 @@ impl Router {
                     generation: config_generation,
                     pause_effect: desired_config,
                 },
-                dynamic_config: PresentationDynamicConfig {
+                state: PresentationState {
                     generation: dynamic_generation,
                     config_generation,
                     pause_effect: desired_dynamic,
                 },
             };
-            let _ = state
-                .tx
-                .send(DisplayOutEvent::SetPresentationConfig(state.presentation));
-        } else if state.presentation.dynamic_config.pause_effect != desired_dynamic {
-            state.presentation.dynamic_config = PresentationDynamicConfig {
+            if state.accepted {
+                let _ = state
+                    .tx
+                    .send(DisplayOutEvent::SetPresentationSnapshot(state.presentation));
+            }
+        } else if state.presentation.state.pause_effect != desired_dynamic {
+            state.presentation.state = PresentationState {
                 generation: state
                     .presentation
-                    .dynamic_config
+                    .state
                     .generation
                     .checked_add(1)
                     .expect("presentation dynamic generation exhausted"),
                 config_generation: state.presentation.config.generation,
                 pause_effect: desired_dynamic,
             };
-            let _ = state.tx.send(DisplayOutEvent::SetPresentationDynamicConfig(
-                state.presentation.dynamic_config,
-            ));
+            if state.accepted {
+                let _ = state.tx.send(DisplayOutEvent::SetPresentationState(
+                    state.presentation.state,
+                ));
+            }
         }
     }
 
@@ -2100,9 +2118,9 @@ impl Router {
             id,
             name: s.info.name.clone(),
             instance_id: s.info.instance_id.clone(),
-            width: s.info.width,
-            height: s.info.height,
-            refresh_mhz: s.info.refresh_mhz,
+            width: s.info.metrics.width,
+            height: s.info.metrics.height,
+            refresh_mhz: s.info.metrics.refresh_mhz,
             links,
             drm_render_major: s.gpu.major,
             drm_render_minor: s.gpu.minor,
@@ -2222,9 +2240,9 @@ impl Router {
                     id,
                     name: s.info.name.clone(),
                     instance_id: s.info.instance_id.clone(),
-                    width: s.info.width,
-                    height: s.info.height,
-                    refresh_mhz: s.info.refresh_mhz,
+                    width: s.info.metrics.width,
+                    height: s.info.metrics.height,
+                    refresh_mhz: s.info.metrics.refresh_mhz,
                     links,
                     drm_render_major: s.gpu.major,
                     drm_render_minor: s.gpu.minor,
@@ -2323,7 +2341,7 @@ impl Router {
         for id in ids {
             if self.await_unbind_acks_for(id, ack_timeout).await.is_err() {
                 log::warn!(
-                    "router: stop_renderers_orderly: unbind_done ack timeout \
+                    "router: stop_renderers_orderly: ack_unbind timeout \
                      for renderer {id}; proceeding with kill anyway"
                 );
             }
@@ -2400,7 +2418,7 @@ impl Router {
         }
     }
 
-    /// Mutate a link's geometry/clear color and re-emit `SetConfig` to
+    /// Mutate a link's geometry/clear color and re-emit `SetCompositionConfig` to
     /// the affected display, without Bind or Unbind.
     pub async fn set_link_geometry(
         self: &Arc<Self>,
@@ -2411,7 +2429,7 @@ impl Router {
         clear_rgba: Option<[f32; 4]>,
         z_order: Option<i32>,
     ) -> bool {
-        let payload: Option<(DisplayId, ProjectedConfig)> = {
+        let payload: Option<(DisplayId, CompositionConfig)> = {
             let mut inner = self.inner.lock().await;
             let changed = inner
                 .table
@@ -2422,11 +2440,13 @@ impl Router {
             let Some(link) = inner.table.get_link(link_id).cloned() else {
                 return false;
             };
-            let (info, pool) = match inner.displays.get(&link.display_id) {
+            let (info, pool, buffer_generation) = match inner.displays.get(&link.display_id) {
                 Some(state) => match state.binding.as_ref() {
-                    Some(binding) if binding.renderer.id == link.renderer_id => {
-                        (state.info.clone(), Arc::clone(&binding.pool))
-                    }
+                    Some(binding) if binding.renderer.id == link.renderer_id => (
+                        state.info.clone(),
+                        Arc::clone(&binding.pool),
+                        binding.wire_generation,
+                    ),
                     _ => return true,
                 },
                 None => return false,
@@ -2434,14 +2454,14 @@ impl Router {
             inner.next_config_generation += 1;
             let cfg_gen = inner.next_config_generation;
             let layout = self.resolved_layout_for_renderer(&info, &link.renderer_id, &inner);
-            let cfg = project_link(&link, &pool, &info, cfg_gen, &layout);
+            let cfg = project_link(&link, &pool, &info, cfg_gen, buffer_generation, &layout);
             Some((link.display_id, cfg))
         };
         let affected_display = payload.as_ref().map(|(d, _)| *d);
         if let Some((did, cfg)) = payload {
             let inner = self.inner.lock().await;
             if let Some(state) = inner.displays.get(&did) {
-                let _ = state.tx.send(DisplayOutEvent::SetConfig(cfg));
+                let _ = state.tx.send(DisplayOutEvent::SetCompositionConfig(cfg));
             }
         }
         if let Some(did) = affected_display {
@@ -2466,13 +2486,11 @@ impl Router {
                 .map(|l| l.display_id)
                 .collect()
         };
+        self.reconcile_buffer_flags().await;
         for did in display_ids {
             self.sync_display(did).await;
             self.reconcile_presentation_config(did).await;
         }
-        // The first BindBuffers exposes the renderer's flags so the
-        // router can compare them against consumer caps.
-        self.reconcile_buffer_flags().await;
         // BindBuffers is also when the renderer's actual texture dims
         // become known; push a fresh renderer snapshot for the UI.
         if let Some(snap) = self.snapshot_renderer(renderer_id).await {
@@ -2504,7 +2522,9 @@ impl Router {
                 let binding = state.binding.as_ref()?;
                 (binding.pool.generation == producer_generation
                     && Arc::ptr_eq(&binding.renderer, &renderer))
-                .then_some((state, binding.wire_generation))
+                .then_some(binding)
+                .filter(|binding| state.failed_binding_generation != Some(binding.wire_generation))
+                .map(|binding| (state, binding.wire_generation))
             })
             .collect();
         let identity = crate::sync::FrameIdentity {
@@ -2910,14 +2930,11 @@ impl Router {
                     let Some(state) = inner.displays.get(&link.display_id) else {
                         continue;
                     };
-                    let Some(consumer_caps) = state.consumer_caps.clone() else {
-                        continue; // legacy consumer — skip silently
-                    };
                     out.push(Pair {
                         rid: rid.clone(),
                         did: link.display_id,
                         producer: producer_caps.clone(),
-                        consumer: consumer_caps,
+                        consumer: state.consumer_caps.clone(),
                     });
                 }
             }
@@ -2992,9 +3009,7 @@ impl Router {
         // When both producer and consumer have caps, only bind a snapshot
         // that satisfies the last negotiated scheme.
         if let Some((_, ref renderer, ref pool)) = target {
-            let state = inner.displays.get(&display_id).unwrap();
-            let v2_both = renderer.format_caps().is_some() && state.consumer_caps.is_some();
-            if v2_both && !renderer.scheme_satisfied_by(pool) {
+            if renderer.format_caps().is_some() && !renderer.scheme_satisfied_by(pool) {
                 log::debug!(
                     "router: sync_display({display_id}) gated — renderer {} \
                      published pool does not match last-dispatched scheme",
@@ -3045,7 +3060,6 @@ impl Router {
             inner.next_config_generation += 1;
             let cfg_gen = inner.next_config_generation;
             let layout = self.resolved_layout_for_renderer(&info, &link.renderer_id, &inner);
-            let cfg = project_link(&link, &pool, &info, cfg_gen, &layout);
             let replay = renderer
                 .wp_type
                 .eq_ignore_ascii_case("image")
@@ -3058,12 +3072,13 @@ impl Router {
                 .checked_add(1)
                 .expect("display buffer generation exhausted");
             let wire_generation = s.next_wire_buffer_generation;
+            let cfg = project_link(&link, &pool, &info, cfg_gen, wire_generation, &layout);
             let _ = s.tx.send(DisplayOutEvent::Bind {
                 renderer: renderer.clone(),
                 pool: Arc::clone(&pool),
                 buffer_generation: wire_generation,
+                initial_config: cfg,
             });
-            let _ = s.tx.send(DisplayOutEvent::SetConfig(cfg));
             if let Some(frame) = replay {
                 let _ = s.tx.send(DisplayOutEvent::Frame {
                     renderer: renderer.clone(),
@@ -3079,6 +3094,7 @@ impl Router {
                 pool,
                 wire_generation,
             });
+            s.failed_binding_generation = None;
         } else {
             let s = inner.displays.get_mut(&display_id).unwrap();
             s.binding = None;
@@ -3086,15 +3102,16 @@ impl Router {
     }
 }
 
-/// Resolve a `Link`'s geometry into a wire-ready `ProjectedConfig`.
+/// Resolve a `Link`'s geometry into a wire-ready `CompositionConfig`.
 ///
 fn project_link(
     link: &Link,
     pool: &PublishedPool,
     info: &DisplayInfo,
     config_generation: u64,
+    buffer_generation: u64,
     layout: &ResolvedLayout,
-) -> ProjectedConfig {
+) -> CompositionConfig {
     let src_full = link.src_rect == super::table::FULL_SRC;
     let dst_full = link.dst_rect == super::table::FULL_DST;
 
@@ -3104,9 +3121,9 @@ fn project_link(
         // display space, then rotates the rect onto the actual display.
         let (eff_disp_w, eff_disp_h) = match layout.rotation {
             crate::display::layout::Rotation::Cw90 | crate::display::layout::Rotation::Cw270 => {
-                (info.height as f32, info.width as f32)
+                (info.metrics.height as f32, info.metrics.width as f32)
             }
-            _ => (info.width as f32, info.height as f32),
+            _ => (info.metrics.width as f32, info.metrics.height as f32),
         };
         let out = crate::display::layout::compute(LayoutInput {
             tex_w: tex_w as f32,
@@ -3117,10 +3134,11 @@ fn project_link(
             location: layout.location,
             clear_rgba: link.clear_rgba,
         });
-        return ProjectedConfig {
-            config_generation,
-            display_w: info.width as f32,
-            display_h: info.height as f32,
+        return CompositionConfig {
+            generation: config_generation,
+            buffer_generation,
+            display_w: info.metrics.width as f32,
+            display_h: info.metrics.height as f32,
             source_x: out.source.0,
             source_y: out.source.1,
             source_w: out.source.2,
@@ -3152,12 +3170,12 @@ fn project_link(
     };
     let resolve_dst = |r: LinkDstRect| -> (f32, f32, f32, f32) {
         let w = if r.w.is_infinite() {
-            info.width as f32
+            info.metrics.width as f32
         } else {
             r.w
         };
         let h = if r.h.is_infinite() {
-            info.height as f32
+            info.metrics.height as f32
         } else {
             r.h
         };
@@ -3165,10 +3183,11 @@ fn project_link(
     };
     let (sx, sy, sw, sh) = resolve_src(link.src_rect);
     let (dx, dy, dw, dh) = resolve_dst(link.dst_rect);
-    ProjectedConfig {
-        config_generation,
-        display_w: info.width as f32,
-        display_h: info.height as f32,
+    CompositionConfig {
+        generation: config_generation,
+        buffer_generation,
+        display_w: info.metrics.width as f32,
+        display_h: info.metrics.height as f32,
         source_x: sx,
         source_y: sy,
         source_w: sw,
@@ -3323,16 +3342,18 @@ mod tests {
     }
 
     fn reg(name: &str, w: u32, h: u32) -> DisplayRegistration {
+        use crate::dma::negotiate as N;
         DisplayRegistration {
             name: name.into(),
             instance_id: None,
-            width: w,
-            height: h,
-            refresh_mhz: 60_000,
-            gpu: DrmNode::UNKNOWN,
-            properties: vec![],
+            metrics: DisplayMetrics {
+                width: w,
+                height: h,
+                refresh_mhz: 60_000,
+            },
             presentation_caps: 0,
-            consumer_caps: None,
+            consumer_caps: build_caps(N::DRM_FORMAT_ABGR8888, &[(N::DRM_FORMAT_MOD_LINEAR, 1)], 0),
+            window_state_flags: 0,
         }
     }
 
@@ -3410,17 +3431,9 @@ mod tests {
     }
 
     fn reg_iid(name: &str, iid: &str) -> DisplayRegistration {
-        DisplayRegistration {
-            name: name.into(),
-            instance_id: Some(iid.into()),
-            width: 1920,
-            height: 1080,
-            refresh_mhz: 60_000,
-            gpu: DrmNode::UNKNOWN,
-            properties: vec![],
-            presentation_caps: 0,
-            consumer_caps: None,
-        }
+        let mut registration = reg(name, 1920, 1080);
+        registration.instance_id = Some(iid.into());
+        registration
     }
 
     async fn test_settings_store() -> Arc<crate::settings::SettingsStore> {
@@ -3489,8 +3502,8 @@ mod tests {
         let mut h2 = router
             .register_display(reg_iid("KDE Screen", "iid-2"))
             .await;
-        let _ = last_set_config(&mut h1.rx);
-        let _ = last_set_config(&mut h2.rx);
+        let _ = last_composition_config(&mut h1.rx);
+        let _ = last_composition_config(&mut h2.rx);
 
         let target = router
             .set_display_layout(
@@ -3507,8 +3520,8 @@ mod tests {
             .await;
 
         assert_eq!(target, Some(h2.id));
-        assert!(last_set_config(&mut h1.rx).is_none());
-        assert!(last_set_config(&mut h2.rx).is_some());
+        assert!(last_composition_config(&mut h1.rx).is_none());
+        assert!(last_composition_config(&mut h2.rx).is_some());
 
         let snap = settings.snapshot();
         assert_eq!(
@@ -3906,31 +3919,88 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn consumer_bind_failed_inserts_blacklist() {
-        // Wire a v2 consumer + producer, then push a BindFailed via
-        // the router. The display blacklist must record the pair.
+    async fn consumer_import_failure_resolves_binding_and_inserts_blacklist() {
         use crate::dma::negotiate as N;
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
-        add_stub_renderer(&mgr, &router, "R1").await;
-        let h = router.register_display(reg("D1", 1920, 1080)).await;
-
-        let caps = build_caps(
+        let nl: u64 = 0x0100_0000_0000_0001;
+        let (renderer, _peer) = RendererHandle::test_stub_with_peer("R1", "scene");
+        renderer.test_set_format_caps(build_caps(
             N::DRM_FORMAT_ABGR8888,
-            &[(N::DRM_FORMAT_MOD_LINEAR, 1)],
+            &[(N::DRM_FORMAT_MOD_LINEAR, 1), (nl, 1)],
+            0xAA,
+        ));
+        let mut pool = fake_published_pool(1, 1920, 1080);
+        pool.fourcc = N::DRM_FORMAT_ABGR8888;
+        pool.modifier = nl;
+        renderer.test_publish_pool(pool);
+        mgr.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer).await;
+
+        let mut registration = reg("D1", 1920, 1080);
+        registration.consumer_caps = build_caps(
+            N::DRM_FORMAT_ABGR8888,
+            &[(N::DRM_FORMAT_MOD_LINEAR, 1), (nl, 1)],
             0xAA,
         );
-        router.set_consumer_caps(h.id, caps).await;
+        let h = router.register_display(registration).await;
+        let generation = router.inner.lock().await.displays[&h.id]
+            .binding
+            .as_ref()
+            .expect("display binding")
+            .wire_generation;
 
-        let nl: u64 = 0x0100_0000_0000_0001;
-        router
-            .on_consumer_bind_failed(h.id, N::DRM_FORMAT_ABGR8888, nl)
+        assert_eq!(
+            router
+                .on_consumer_import_failed(
+                    h.id,
+                    generation + 1,
+                    ConsumerImportFailureKind::Unsupported,
+                )
+                .await,
+            ConsumerImportFailureOutcome::Stale
+        );
+        assert_eq!(
+            router
+                .on_consumer_import_failed(
+                    h.id,
+                    generation,
+                    ConsumerImportFailureKind::BackendFailure,
+                )
+                .await,
+            ConsumerImportFailureOutcome::Terminal
+        );
+        assert_eq!(
+            router
+                .on_consumer_import_failed(
+                    h.id,
+                    generation,
+                    ConsumerImportFailureKind::ResourceExhausted,
+                )
+                .await,
+            ConsumerImportFailureOutcome::Terminal
+        );
+        assert!(router.inner.lock().await.displays[&h.id]
+            .consumer_caps
+            .blacklist
+            .is_empty());
+
+        let outcome = router
+            .on_consumer_import_failed(h.id, generation, ConsumerImportFailureKind::Unsupported)
             .await;
+        assert_eq!(
+            outcome,
+            ConsumerImportFailureOutcome::Retry {
+                fourcc: N::DRM_FORMAT_ABGR8888,
+                modifier: nl,
+            }
+        );
 
         let inner = router.inner.lock().await;
         let state = inner.displays.get(&h.id).unwrap();
-        let bl = &state.consumer_caps.as_ref().unwrap().blacklist;
+        let bl = &state.consumer_caps.blacklist;
         assert!(bl.contains(&(N::DRM_FORMAT_ABGR8888, nl)));
+        assert_eq!(state.failed_binding_generation, Some(generation));
     }
 
     #[tokio::test]
@@ -3939,7 +4009,7 @@ mod tests {
         use crate::dma::negotiate as N;
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
-        let h = RendererHandle::test_stub("R1", "scene");
+        let (h, _peer) = RendererHandle::test_stub_with_peer("R1", "scene");
         let nl: u64 = 0x0100_0000_0000_0001;
         h.test_set_format_caps(build_caps(
             N::DRM_FORMAT_ABGR8888,
@@ -3965,51 +4035,57 @@ mod tests {
         let router = Router::new(mgr.clone());
 
         let nl: u64 = 0x0100_0000_0000_0001;
-        let h = RendererHandle::test_stub("R1", "scene");
+        let (h, _peer) = RendererHandle::test_stub_with_peer("R1", "scene");
         h.test_set_format_caps(build_caps(
             N::DRM_FORMAT_ABGR8888,
             &[(N::DRM_FORMAT_MOD_LINEAR, 1), (nl, 1)],
             0xAA,
         ));
+        let mut pool = fake_published_pool(1, 1920, 1080);
+        pool.fourcc = N::DRM_FORMAT_ABGR8888;
+        pool.modifier = nl;
+        h.test_publish_pool(pool);
         mgr.register_test_handle(h.clone()).await;
         router.register_renderer(h.clone()).await;
 
-        let dh = router.register_display(reg("D1", 1920, 1080)).await;
-        router
-            .set_consumer_caps(
-                dh.id,
-                build_caps(
-                    N::DRM_FORMAT_ABGR8888,
-                    &[(N::DRM_FORMAT_MOD_LINEAR, 1), (nl, 1)],
-                    0xAA,
-                ),
-            )
-            .await;
+        let mut registration = reg("D1", 1920, 1080);
+        registration.consumer_caps = build_caps(
+            N::DRM_FORMAT_ABGR8888,
+            &[(N::DRM_FORMAT_MOD_LINEAR, 1), (nl, 1)],
+            0xAA,
+        );
+        let dh = router.register_display(registration).await;
 
         // Pre-blacklist pick must land on the non-LINEAR (same-device preference).
         {
             let inner = router.inner.lock().await;
             let prod = h.format_caps().expect("producer caps");
-            let cons = inner.displays[&dh.id]
-                .consumer_caps
-                .clone()
-                .expect("consumer caps");
+            let cons = inner.displays[&dh.id].consumer_caps.clone();
             let s = N::pick(&prod, &cons).expect("pick ok");
             assert_eq!(s.modifier, nl, "pre-blacklist must prefer non-LINEAR");
         }
 
         // Consumer reports the non-LINEAR is unimportable.
-        router
-            .on_consumer_bind_failed(dh.id, N::DRM_FORMAT_ABGR8888, nl)
-            .await;
+        let generation = router.inner.lock().await.displays[&dh.id]
+            .binding
+            .as_ref()
+            .expect("display binding")
+            .wire_generation;
+        assert!(matches!(
+            router
+                .on_consumer_import_failed(
+                    dh.id,
+                    generation,
+                    ConsumerImportFailureKind::Unsupported,
+                )
+                .await,
+            ConsumerImportFailureOutcome::Retry { .. }
+        ));
 
         // Post-blacklist pick must fall back to LINEAR.
         let inner = router.inner.lock().await;
         let prod = h.format_caps().expect("producer caps");
-        let cons = inner.displays[&dh.id]
-            .consumer_caps
-            .clone()
-            .expect("consumer caps");
+        let cons = inner.displays[&dh.id].consumer_caps.clone();
         let s = N::pick(&prod, &cons).expect("post-blacklist pick ok");
         assert_eq!(
             s.modifier,
@@ -4040,10 +4116,11 @@ mod tests {
             id: 1,
             name: name.into(),
             instance_id: None,
-            width: w,
-            height: h,
-            refresh_mhz: 60_000,
-            properties: vec![],
+            metrics: DisplayMetrics {
+                width: w,
+                height: h,
+                refresh_mhz: 60_000,
+            },
             bound: true,
         }
     }
@@ -4074,7 +4151,7 @@ mod tests {
             location: Default::default(),
             rotation: Default::default(),
         };
-        let cfg = project_link(&link, &pool, &info, 1, &layout);
+        let cfg = project_link(&link, &pool, &info, 1, 7, &layout);
         assert_eq!((cfg.display_w, cfg.display_h), (1280.0, 720.0));
         assert_eq!(
             (cfg.source_x, cfg.source_y, cfg.source_w, cfg.source_h),
@@ -4089,7 +4166,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // update_display_size resync
+    // Display metrics resync
 
     use crate::renderer_manager::{FrameSnapshot, PublishedPool};
 
@@ -4111,14 +4188,18 @@ mod tests {
     }
 
     /// Drain everything currently sitting on the rx and return only the
-    /// last `SetConfig` payload, matching what the consumer would use.
-    fn last_set_config(
+    /// last `SetCompositionConfig` payload, matching what the consumer would use.
+    fn last_composition_config(
         rx: &mut mpsc::UnboundedReceiver<DisplayOutEvent>,
-    ) -> Option<ProjectedConfig> {
+    ) -> Option<CompositionConfig> {
         let mut out = None;
         while let Ok(ev) = rx.try_recv() {
-            if let DisplayOutEvent::SetConfig(c) = ev {
-                out = Some(c);
+            match ev {
+                DisplayOutEvent::Bind { initial_config, .. }
+                | DisplayOutEvent::SetCompositionConfig(initial_config) => {
+                    out = Some(initial_config);
+                }
+                _ => {}
             }
         }
         out
@@ -4154,24 +4235,23 @@ mod tests {
 
         let events = drain_display_events(&mut display.rx);
         {
-            let bound_pool = events
+            let (bound_pool, config, wire_generation) = events
                 .iter()
                 .find_map(|event| match event {
-                    DisplayOutEvent::Bind { pool, .. } => Some(pool),
+                    DisplayOutEvent::Bind {
+                        pool,
+                        buffer_generation,
+                        initial_config,
+                        ..
+                    } => Some((pool, initial_config, buffer_generation)),
                     _ => None,
                 })
                 .expect("initial Bind");
-            let config = events
-                .iter()
-                .find_map(|event| match event {
-                    DisplayOutEvent::SetConfig(config) => Some(config),
-                    _ => None,
-                })
-                .expect("initial SetConfig");
 
             assert_eq!(bound_pool.generation, 1);
             assert_eq!((bound_pool.width, bound_pool.height), (1920, 1080));
             assert_eq!((config.source_w, config.source_h), (1920.0, 1080.0));
+            assert_eq!(config.buffer_generation, *wire_generation);
         }
         assert_eq!(renderer.published_pool().unwrap().generation, 2);
         drop(events);
@@ -4302,6 +4382,7 @@ mod tests {
                     renderer,
                     pool: _,
                     buffer_generation,
+                    initial_config: _,
                 } => {
                     assert_eq!(renderer.id, "r1");
                     assert!(buffer_generation > 1);
@@ -4331,34 +4412,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_display_size_resyncs_set_config() {
+    async fn update_display_metrics_resyncs_composition_config() {
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
 
-        // Renderer with a bind snapshot so resync_display_set_config can
+        // Renderer with a bind snapshot so resync_display_composition can
         // read a generation and texture size.
         let r = RendererHandle::test_stub("r1", "scene"); // 1920x1080
         r.test_publish_pool(fake_published_pool(1, 1920, 1080));
         mgr.register_test_handle(r.clone()).await;
         router.register_renderer(r.clone()).await;
 
-        // Register display 1920x1080 — auto-link + initial Bind/SetConfig.
+        // Register display 1920x1080 — auto-link + initial Bind/SetCompositionConfig.
         let mut h = router.register_display(reg("HDMI-A-1", 1920, 1080)).await;
-        let initial = last_set_config(&mut h.rx).expect("initial SetConfig");
+        let initial = last_composition_config(&mut h.rx).expect("initial composition config");
         assert_eq!((initial.display_w, initial.display_h), (1920.0, 1080.0));
         assert_eq!((initial.dest_w, initial.dest_h), (1920.0, 1080.0));
 
         // Resize to 1280x720 — Stretched + Center default → identity at new dims.
-        router.update_display_size(h.id, 1280, 720).await;
-        let resized = last_set_config(&mut h.rx).expect("SetConfig after resize");
+        router
+            .set_display_metrics(
+                h.id,
+                DisplayMetrics {
+                    width: 1280,
+                    height: 720,
+                    refresh_mhz: 75_000,
+                },
+            )
+            .await;
+        let resized = last_composition_config(&mut h.rx).expect("composition config after resize");
         assert_eq!((resized.display_w, resized.display_h), (1280.0, 720.0));
         assert_eq!((resized.dest_x, resized.dest_y), (0.0, 0.0));
         assert_eq!((resized.dest_w, resized.dest_h), (1280.0, 720.0));
-        assert!(resized.config_generation > initial.config_generation);
+        assert!(resized.generation > initial.generation);
+        assert_eq!(resized.buffer_generation, initial.buffer_generation);
+        assert_eq!(
+            router.snapshot_display(h.id).await.unwrap().refresh_mhz,
+            75_000
+        );
     }
 
     #[tokio::test]
-    async fn update_display_size_same_dims_no_resync() {
+    async fn update_display_metrics_same_values_no_resync() {
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
         let r = RendererHandle::test_stub("r1", "scene");
@@ -4368,11 +4463,20 @@ mod tests {
 
         let mut h = router.register_display(reg("HDMI-A-1", 1920, 1080)).await;
         // Drain initial events.
-        let _ = last_set_config(&mut h.rx);
+        let _ = last_composition_config(&mut h.rx);
 
-        router.update_display_size(h.id, 1920, 1080).await;
-        // No new SetConfig should land on the rx.
-        assert!(last_set_config(&mut h.rx).is_none());
+        router
+            .set_display_metrics(
+                h.id,
+                DisplayMetrics {
+                    width: 1920,
+                    height: 1080,
+                    refresh_mhz: 60_000,
+                },
+            )
+            .await;
+        // No new SetCompositionConfig should land on the rx.
+        assert!(last_composition_config(&mut h.rx).is_none());
     }
 
     // -----------------------------------------------------------------
@@ -4409,13 +4513,13 @@ mod tests {
         }
     }
 
-    fn last_presentation_dynamic(
+    fn last_presentation_state(
         rx: &mut mpsc::UnboundedReceiver<DisplayOutEvent>,
-    ) -> Option<PresentationDynamicConfig> {
+    ) -> Option<PresentationState> {
         drain_display_events(rx)
             .into_iter()
             .filter_map(|event| match event {
-                DisplayOutEvent::SetPresentationDynamicConfig(config) => Some(config),
+                DisplayOutEvent::SetPresentationState(config) => Some(config),
                 _ => None,
             })
             .last()
@@ -4427,7 +4531,7 @@ mod tests {
         drain_display_events(rx)
             .into_iter()
             .filter_map(|event| match event {
-                DisplayOutEvent::SetPresentationConfig(config) => Some(config),
+                DisplayOutEvent::SetPresentationSnapshot(config) => Some(config),
                 _ => None,
             })
             .last()
@@ -4444,7 +4548,7 @@ mod tests {
         mgr.register_test_handle(renderer.clone()).await;
         router.register_renderer(renderer).await;
         let mut registration = reg("HDMI-A-1", 1920, 1080);
-        registration.presentation_caps = PRESENTATION_CAP_BLUR;
+        registration.presentation_caps = PRESENTATION_CAP_PAUSE_BLUR;
         let mut display = router.register_display(registration).await;
 
         assert_eq!(
@@ -4457,17 +4561,17 @@ mod tests {
                         blur: BlurEffectConfig { radius: 42 },
                     },
                 },
-                dynamic_config: PresentationDynamicConfig {
+                state: PresentationState {
                     generation: 1,
                     config_generation: 1,
-                    pause_effect: PauseEffectDynamicConfig { active: false },
+                    pause_effect: PauseEffectState { active: false },
                 },
             }
         );
         drain_display_events(&mut display.rx);
 
         router.set_manual_pause(true).await;
-        let dynamic = last_presentation_dynamic(&mut display.rx)
+        let dynamic = last_presentation_state(&mut display.rx)
             .expect("manual pause should update presentation activity");
         assert_eq!(dynamic.generation, 2);
         assert_eq!(dynamic.config_generation, 1);
@@ -4479,9 +4583,9 @@ mod tests {
             .expect("radius update should send an atomic presentation snapshot");
         assert_eq!(snapshot.config.generation, 2);
         assert_eq!(snapshot.config.pause_effect.blur.radius, 55);
-        assert_eq!(snapshot.dynamic_config.generation, 3);
-        assert_eq!(snapshot.dynamic_config.config_generation, 2);
-        assert!(snapshot.dynamic_config.pause_effect.active);
+        assert_eq!(snapshot.state.generation, 3);
+        assert_eq!(snapshot.state.config_generation, 2);
+        assert!(snapshot.state.pause_effect.active);
 
         router.resync_presentation_configs().await;
         assert!(display.rx.try_recv().is_err());
@@ -4491,11 +4595,11 @@ mod tests {
         let snapshot = last_presentation_config(&mut display.rx)
             .expect("disabling the effect should send an atomic presentation snapshot");
         assert_eq!(snapshot.config.pause_effect.kind, PauseEffectKind::None);
-        assert!(!snapshot.dynamic_config.pause_effect.active);
+        assert!(!snapshot.state.pause_effect.active);
     }
 
     #[tokio::test]
-    async fn paused_binding_update_follows_initial_registration_snapshot() {
+    async fn paused_binding_is_reflected_in_initial_registration_snapshot() {
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
         router.attach_settings(settings_with_pause_effect(blur_pause_effect(30)).await);
@@ -4506,18 +4610,15 @@ mod tests {
         router.set_manual_pause(true).await;
 
         let mut registration = reg("HDMI-A-1", 1920, 1080);
-        registration.presentation_caps = PRESENTATION_CAP_BLUR;
+        registration.presentation_caps = PRESENTATION_CAP_PAUSE_BLUR;
         let mut display = router.register_display(registration).await;
 
-        assert!(!display.presentation.dynamic_config.pause_effect.active);
-        let dynamic = last_presentation_dynamic(&mut display.rx)
-            .expect("paused binding should follow the accepted snapshot");
-        assert!(dynamic.pause_effect.active);
+        assert!(display.presentation.state.pause_effect.active);
         assert_eq!(
-            dynamic.config_generation,
+            display.presentation.state.config_generation,
             display.presentation.config.generation
         );
-        assert!(dynamic.generation > display.presentation.dynamic_config.generation);
+        assert!(last_presentation_state(&mut display.rx).is_none());
     }
 
     #[tokio::test]
@@ -4530,9 +4631,9 @@ mod tests {
         mgr.register_test_handle(renderer.clone()).await;
         router.register_renderer(renderer).await;
         let mut a_registration = reg("A", 1920, 1080);
-        a_registration.presentation_caps = PRESENTATION_CAP_BLUR;
+        a_registration.presentation_caps = PRESENTATION_CAP_PAUSE_BLUR;
         let mut b_registration = reg("B", 1920, 1080);
-        b_registration.presentation_caps = PRESENTATION_CAP_BLUR;
+        b_registration.presentation_caps = PRESENTATION_CAP_PAUSE_BLUR;
         let mut a = router.register_display(a_registration).await;
         let mut b = router.register_display(b_registration).await;
         drain_display_events(&mut a.rx);
@@ -4540,24 +4641,20 @@ mod tests {
 
         router.set_manual_mute(true).await;
         assert!(router.is_muted("r1").await);
-        assert!(last_presentation_dynamic(&mut a.rx).is_none());
+        assert!(last_presentation_state(&mut a.rx).is_none());
         assert!(b.rx.try_recv().is_err());
 
         router.set_manual_mute(false).await;
         router.set_manual_pause(true).await;
-        assert!(
-            last_presentation_dynamic(&mut a.rx).is_some_and(|config| config.pause_effect.active)
-        );
-        assert!(
-            last_presentation_dynamic(&mut b.rx).is_some_and(|config| config.pause_effect.active)
-        );
+        assert!(last_presentation_state(&mut a.rx).is_some_and(|config| config.pause_effect.active));
+        assert!(last_presentation_state(&mut b.rx).is_some_and(|config| config.pause_effect.active));
 
         router.set_manual_pause(false).await;
         assert!(
-            last_presentation_dynamic(&mut a.rx).is_some_and(|config| !config.pause_effect.active)
+            last_presentation_state(&mut a.rx).is_some_and(|config| !config.pause_effect.active)
         );
         assert!(
-            last_presentation_dynamic(&mut b.rx).is_some_and(|config| !config.pause_effect.active)
+            last_presentation_state(&mut b.rx).is_some_and(|config| !config.pause_effect.active)
         );
     }
 
@@ -4604,7 +4701,7 @@ mod tests {
         mgr.register_test_handle(renderer.clone()).await;
         router.register_renderer(renderer).await;
         let mut registration = reg("HDMI-A-1", 1920, 1080);
-        registration.presentation_caps = PRESENTATION_CAP_BLUR;
+        registration.presentation_caps = PRESENTATION_CAP_PAUSE_BLUR;
         let mut display = router.register_display(registration).await;
         drain_display_events(&mut display.rx);
 
@@ -4613,8 +4710,35 @@ mod tests {
             .await;
 
         assert!(router.is_paused("r1").await);
-        assert!(last_presentation_dynamic(&mut display.rx)
+        assert!(last_presentation_state(&mut display.rx)
             .is_some_and(|config| config.pause_effect.active));
+    }
+
+    #[tokio::test]
+    async fn initial_window_state_is_reconciled_before_acceptance() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        let settings = settings_with_pause_effect(blur_pause_effect(30)).await;
+        settings.update(|s| {
+            s.global.auto_replay = Some(auto_replay(&[(
+                AutoCondition::Fullscreen,
+                AutoAction::Pause,
+            )]));
+        });
+        router.attach_settings(settings);
+
+        let renderer = RendererHandle::test_stub("r1", "scene");
+        renderer.test_publish_pool(fake_published_pool(1, 1920, 1080));
+        mgr.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer).await;
+        let mut registration = reg("HDMI-A-1", 1920, 1080);
+        registration.presentation_caps = PRESENTATION_CAP_PAUSE_BLUR;
+        registration.window_state_flags = ar::FLAG_NON_MINIMIZED | ar::FLAG_FULLSCREEN;
+        let mut display = router.register_display(registration).await;
+
+        assert!(router.is_paused("r1").await);
+        assert!(display.presentation.state.pause_effect.active);
+        assert!(last_presentation_state(&mut display.rx).is_none());
     }
 
     #[tokio::test]
@@ -4635,18 +4759,18 @@ mod tests {
         mgr.register_test_handle(renderer.clone()).await;
         router.register_renderer(renderer).await;
         let mut registration = reg("HDMI-A-1", 1920, 1080);
-        registration.presentation_caps = PRESENTATION_CAP_BLUR;
+        registration.presentation_caps = PRESENTATION_CAP_PAUSE_BLUR;
         let mut display = router.register_display(registration).await;
         drain_display_events(&mut display.rx);
 
         router.set_manual_pause(true).await;
-        assert!(last_presentation_dynamic(&mut display.rx)
+        assert!(last_presentation_state(&mut display.rx)
             .is_some_and(|config| config.pause_effect.active));
 
         router
             .update_display_window_state(display.id, ar::FLAG_NON_MINIMIZED | ar::FLAG_FULLSCREEN)
             .await;
-        assert!(last_presentation_dynamic(&mut display.rx)
+        assert!(last_presentation_state(&mut display.rx)
             .is_some_and(|config| !config.pause_effect.active));
     }
 
@@ -5230,7 +5354,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_display_size_zero_dim_ignored() {
+    async fn update_display_metrics_zero_dim_ignored() {
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
         let r = RendererHandle::test_stub("r1", "scene");
@@ -5239,12 +5363,30 @@ mod tests {
         router.register_renderer(r.clone()).await;
 
         let mut h = router.register_display(reg("HDMI-A-1", 1920, 1080)).await;
-        let _ = last_set_config(&mut h.rx);
+        let _ = last_composition_config(&mut h.rx);
 
         // Zero dim → drop on the floor; field stays at 1920x1080.
-        router.update_display_size(h.id, 0, 720).await;
-        router.update_display_size(h.id, 1280, 0).await;
-        assert!(last_set_config(&mut h.rx).is_none());
+        router
+            .set_display_metrics(
+                h.id,
+                DisplayMetrics {
+                    width: 0,
+                    height: 720,
+                    refresh_mhz: 60_000,
+                },
+            )
+            .await;
+        router
+            .set_display_metrics(
+                h.id,
+                DisplayMetrics {
+                    width: 1280,
+                    height: 0,
+                    refresh_mhz: 60_000,
+                },
+            )
+            .await;
+        assert!(last_composition_config(&mut h.rx).is_none());
         let snap = router.snapshot_display(h.id).await.unwrap();
         assert_eq!((snap.width, snap.height), (1920, 1080));
     }
