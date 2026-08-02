@@ -32,4 +32,44 @@ private:
     bool m_paused = false;
 };
 
+export class GlobalPauseSetQuery : public Query,
+                                   public QueryExtra<control::v1::Response, GlobalPauseSetQuery> {
+    Q_OBJECT
+    QML_ELEMENT
+
+    Q_PROPERTY(bool paused READ paused WRITE setPaused NOTIFY pausedChanged FINAL)
+
+public:
+    GlobalPauseSetQuery(QObject* parent = nullptr);
+
+    bool paused() const;
+    void setPaused(bool paused);
+    void reload() override;
+
+    Q_SIGNAL void pausedChanged();
+
+private:
+    bool m_paused = false;
+};
+
+export class GlobalMuteSetQuery : public Query,
+                                  public QueryExtra<control::v1::Response, GlobalMuteSetQuery> {
+    Q_OBJECT
+    QML_ELEMENT
+
+    Q_PROPERTY(bool muted READ muted WRITE setMuted NOTIFY mutedChanged FINAL)
+
+public:
+    GlobalMuteSetQuery(QObject* parent = nullptr);
+
+    bool muted() const;
+    void setMuted(bool muted);
+    void reload() override;
+
+    Q_SIGNAL void mutedChanged();
+
+private:
+    bool m_muted = false;
+};
+
 } // namespace waywallen

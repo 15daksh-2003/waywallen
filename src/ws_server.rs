@@ -209,10 +209,10 @@ impl WsSession {
                 }
                 tevt = self.task_rx.recv(), if task_events_open => {
                     match tevt {
-                        Ok(_) => self.frames.event(status_sync_event(&self.state))?,
+                        Ok(_) => self.frames.event(status_sync_event(&self.state).await)?,
                         Err(RecvError::Lagged(n)) => {
                             log::warn!("ws {}: task event lag {n}", self.peer);
-                            self.frames.event(status_sync_event(&self.state))?;
+                            self.frames.event(status_sync_event(&self.state).await)?;
                         }
                         Err(RecvError::Closed) => task_events_open = false,
                     }
@@ -255,7 +255,7 @@ impl WsSession {
         let snap = control::list_library_snapshots(&self.state.db).await;
         self.frames.event(libraries_replace_event(snap))?;
 
-        self.frames.event(status_sync_event(&self.state))?;
+        self.frames.event(status_sync_event(&self.state).await)?;
         self.frames
             .event(playlist_changed_event(&self.state).await)?;
         Ok(())
@@ -289,7 +289,7 @@ impl WsSession {
             self.frames.event(pe)?;
         }
         if matches!(e, GlobalEvent::StatusChanged) {
-            self.frames.event(status_sync_event(&self.state))?;
+            self.frames.event(status_sync_event(&self.state).await)?;
         }
         Ok(())
     }
@@ -298,7 +298,7 @@ impl WsSession {
         log::warn!("ws {}: global event lag {n}", self.peer);
         // Resync after lag; snapshots are authoritative, while transient
         // events are allowed to drop.
-        self.frames.event(status_sync_event(&self.state))?;
+        self.frames.event(status_sync_event(&self.state).await)?;
         self.frames
             .event(playlist_changed_event(&self.state).await)?;
         Ok(())
@@ -864,7 +864,7 @@ fn router_event_to_pb(e: RouterEvent, settings: &SettingsStore) -> pb::Event {
 
 /// Snapshot daemon-side runtime state into a `StatusSync` server event.
 /// Pushed on WS connect, status changes, and task lifecycle events.
-fn status_sync_event(state: &Arc<AppState>) -> pb::Event {
+async fn status_sync_event(state: &Arc<AppState>) -> pb::Event {
     use std::sync::atomic::Ordering;
     let scan_in_progress = state.scan_in_progress.load(Ordering::SeqCst);
     let active_task_count = state
@@ -879,12 +879,15 @@ fn status_sync_event(state: &Arc<AppState>) -> pb::Event {
         pb::DaemonPhase::Starting
     };
     let display_backend = state.display_backend_status.read().unwrap().clone();
+    let lifecycle = state.router.manual_lifecycle_state().await;
     pb::Event {
         payload: Some(pb::event::Payload::StatusSync(pb::StatusSync {
             scan_in_progress,
             active_task_count,
             phase: phase as i32,
             display_backend: Some(display_backend_status_to_pb(display_backend)),
+            global_paused: lifecycle.paused,
+            global_muted: lifecycle.muted,
         })),
     }
 }
@@ -1347,6 +1350,7 @@ async fn dispatch_inner(
         Req::Health(_) => Res::Health(pb::HealthResponse {
             service: "waywallen".into(),
             state: "healthy".into(),
+            os_name: state.system_info.os_name().to_owned(),
         }),
 
         Req::RendererSpawn(r) => {
@@ -1422,6 +1426,16 @@ async fn dispatch_inner(
         Req::GlobalPauseToggle(_) => {
             let paused = control::toggle_pause_all(state).await?;
             Res::GlobalPauseToggle(pb::GlobalPauseToggleResponse { paused })
+        }
+
+        Req::GlobalPauseSet(r) => {
+            let paused = control::set_pause_all(state, r.paused).await?;
+            Res::GlobalPauseSet(pb::GlobalPauseSetResponse { paused })
+        }
+
+        Req::GlobalMuteSet(r) => {
+            let muted = control::set_mute_all(state, r.muted).await?;
+            Res::GlobalMuteSet(pb::GlobalMuteSetResponse { muted })
         }
 
         Req::RendererMouse(r) => {
@@ -3189,6 +3203,7 @@ mod tests {
             pb::response::Payload::Health(pb::HealthResponse {
                 service: "waywallen".to_string(),
                 state: "ok".to_string(),
+                os_name: "Test Linux".to_string(),
             }),
         )
     }

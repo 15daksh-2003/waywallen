@@ -90,6 +90,8 @@ message Request {
     RemoteSettingsPatchRequest remote_settings_patch = 73;
     WallpaperUnsubscribeRequest wallpaper_unsubscribe = 74;
     GlobalPauseToggleRequest    global_pause_toggle = 75;
+    GlobalPauseSetRequest       global_pause_set = 76;
+    GlobalMuteSetRequest        global_mute_set = 77;
   }
 }
 
@@ -167,6 +169,8 @@ message Response {
     Empty                      remote_settings_patch = 73;
     WallpaperUnsubscribeResponse wallpaper_unsubscribe = 74;
     GlobalPauseToggleResponse  global_pause_toggle = 75;
+    GlobalPauseSetResponse     global_pause_set = 76;
+    GlobalMuteSetResponse      global_mute_set = 77;
   }
 }
 
@@ -238,6 +242,7 @@ message HealthRequest {}
 message HealthResponse {
   string service = 1;
   string state = 2;
+  string os_name = 3;
 }
 
 // ---------------------------------------------------------------------------
@@ -306,6 +311,10 @@ message RendererPlayRequest  { string renderer_id = 1; }
 message RendererPauseRequest { string renderer_id = 1; }
 message GlobalPauseToggleRequest {}
 message GlobalPauseToggleResponse { bool paused = 1; }
+message GlobalPauseSetRequest { bool paused = 1; }
+message GlobalPauseSetResponse { bool paused = 1; }
+message GlobalMuteSetRequest { bool muted = 1; }
+message GlobalMuteSetResponse { bool muted = 1; }
 
 message RendererMouseRequest {
   string renderer_id = 1;
@@ -1098,6 +1107,8 @@ message StatusSync {
   // Daemon lifecycle phase. UI gates the startup dialog on this.
   DaemonPhase phase = 3;
   DisplayBackendStatus display_backend = 4;
+  bool global_paused = 5;
+  bool global_muted = 6;
 }
 
 message TaskProgress {

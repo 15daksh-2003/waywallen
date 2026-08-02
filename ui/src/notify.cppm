@@ -62,6 +62,8 @@ public:
     Q_PROPERTY(DaemonPhase daemonPhase READ daemonPhase NOTIFY statusChanged FINAL)
     Q_PROPERTY(waywallen::control::v1::DisplayBackendStatus displayBackend READ displayBackend
                    NOTIFY statusChanged FINAL)
+    Q_PROPERTY(bool globalPaused READ globalPaused NOTIFY statusChanged FINAL)
+    Q_PROPERTY(bool globalMuted READ globalMuted NOTIFY statusChanged FINAL)
 
     Notify(QObject* parent);
     ~Notify() override;
@@ -78,6 +80,8 @@ public:
     auto displayBackend() const -> const control::v1::DisplayBackendStatus& {
         return m_display_backend;
     }
+    auto globalPaused() const -> bool { return m_global_paused; }
+    auto globalMuted() const -> bool { return m_global_muted; }
     auto taskProgressSnapshot(const QString& queryId, TaskProgressSnapshot& out) const -> bool;
     auto taskProgressSequence() const -> quint64 { return m_task_progress_sequence; }
 
@@ -134,6 +138,8 @@ private:
     quint32                              m_active_task_count { 0 };
     DaemonPhase                          m_daemon_phase { DaemonPhase::Starting };
     control::v1::DisplayBackendStatus    m_display_backend;
+    bool                                 m_global_paused { false };
+    bool                                 m_global_muted { false };
     QHash<QString, TaskProgressSnapshot> m_task_progress;
     quint64                              m_task_progress_sequence { 0 };
 };

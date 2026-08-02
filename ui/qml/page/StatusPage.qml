@@ -60,6 +60,14 @@ MD.Page {
         id: healthQuery
     }
 
+    W.GlobalPauseSetQuery {
+        id: globalPauseSetQuery
+    }
+
+    W.GlobalMuteSetQuery {
+        id: globalMuteSetQuery
+    }
+
     W.RendererListQuery {
         id: rendererQuery
     }
@@ -193,6 +201,11 @@ MD.Page {
                             color: MD.Token.color.on_surface
                         }
                         W.Tag {
+                            Layout.alignment: Qt.AlignVCenter
+                            visible: healthQuery.osName.length > 0
+                            text: healthQuery.osName
+                        }
+                        W.Tag {
                             readonly property string label: root.desktopLabel(W.Notify.displayBackend.desktop)
                             Layout.alignment: Qt.AlignVCenter
                             visible: label.length > 0
@@ -238,8 +251,41 @@ MD.Page {
                 contentItem: ColumnLayout {
                     spacing: 8
 
-                    SectionTitle {
-                        text: "Active Renderers"
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        SectionTitle {
+                            text: "Active Renderers"
+                        }
+
+                        Item {
+                            Layout.fillWidth: true
+                        }
+
+                        MD.FilterChip {
+                            text: qsTr("Mute all")
+                            checkable: false
+                            checked: W.Notify.globalMuted
+                            enabled: W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready
+                                     && !globalMuteSetQuery.querying
+                            onClicked: {
+                                globalMuteSetQuery.muted = !W.Notify.globalMuted;
+                                globalMuteSetQuery.reload();
+                            }
+                        }
+
+                        MD.FilterChip {
+                            text: qsTr("Pause all")
+                            checkable: false
+                            checked: W.Notify.globalPaused
+                            enabled: W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready
+                                     && !globalPauseSetQuery.querying
+                            onClicked: {
+                                globalPauseSetQuery.paused = !W.Notify.globalPaused;
+                                globalPauseSetQuery.reload();
+                            }
+                        }
                     }
 
                     SectionHint {
