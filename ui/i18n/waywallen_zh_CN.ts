@@ -95,15 +95,15 @@
     </message>
     <message>
         <source>Daemon not running</source>
-        <translation>守护进程未运行</translation>
+        <translation>后台未运行</translation>
     </message>
     <message>
         <source>Daemon too old</source>
-        <translation>守护进程版本过旧</translation>
+        <translation>后台版本过旧</translation>
     </message>
     <message>
         <source>Daemon version mismatch</source>
-        <translation>守护进程版本不匹配</translation>
+        <translation>后台版本不匹配</translation>
     </message>
     <message>
         <source>waywallen is initializing core services. This usually takes a few seconds.</source>
@@ -111,15 +111,15 @@
     </message>
     <message>
         <source>The waywallen daemon is not on the session bus.</source>
-        <translation>会话总线上没有 waywallen 守护进程。</translation>
+        <translation>会话总线上没有 waywallen 后台。</translation>
     </message>
     <message>
         <source>Daemon is online but does not advertise a version.</source>
-        <translation>守护进程在线，但未提供版本信息。</translation>
+        <translation>后台在线，但未提供版本信息。</translation>
     </message>
     <message>
         <source>Daemon version %1 + is incompatible.</source>
-        <translation>守护进程版本 %1+ 不兼容。</translation>
+        <translation>后台版本 %1+ 不兼容。</translation>
     </message>
     <message>
         <source>Kill</source>
@@ -412,11 +412,11 @@
     </message>
     <message>
         <source>%1 uses the &lt;b&gt;waywallen-layer-shell&lt;/b&gt; display backend. The daemon is running inside Flatpak%2, where layer-shell Wayland protocols are not available. Start and keep &lt;b&gt;waywallen-layer-shell&lt;/b&gt; running outside Flatpak.</source>
-        <translation>%1 使用 &lt;b&gt;waywallen-layer-shell&lt;/b&gt; 显示后端。守护进程运行在 Flatpak%2 中，无法使用 layer-shell Wayland 协议。请在 Flatpak 外部启动并保持 &lt;b&gt;waywallen-layer-shell&lt;/b&gt; 运行。</translation>
+        <translation>%1 使用 &lt;b&gt;waywallen-layer-shell&lt;/b&gt; 显示后端。后台运行在 Flatpak%2 中，无法使用 layer-shell Wayland 协议。请在 Flatpak 外部启动并保持 &lt;b&gt;waywallen-layer-shell&lt;/b&gt; 运行。</translation>
     </message>
     <message>
         <source>%1 uses the &lt;b&gt;waywallen-layer-shell&lt;/b&gt; display backend, but the daemon could not find its binary. Install it from GitHub:</source>
-        <translation>%1 使用 &lt;b&gt;waywallen-layer-shell&lt;/b&gt; 显示后端，但守护进程找不到其二进制文件。请从 GitHub 安装：</translation>
+        <translation>%1 使用 &lt;b&gt;waywallen-layer-shell&lt;/b&gt; 显示后端，但后台找不到其二进制文件。请从 GitHub 安装：</translation>
     </message>
     <message>
         <source>GitHub</source>
@@ -428,7 +428,7 @@
     </message>
     <message>
         <source>Put a binary named &lt;tt&gt;waywallen-layer-shell&lt;/tt&gt; in &lt;tt&gt;PATH&lt;/tt&gt; or next to the &lt;tt&gt;waywallen&lt;/tt&gt; daemon, then restart waywallen. Manual test: &lt;tt&gt;waywallen-layer-shell --socket $XDG_RUNTIME_DIR/waywallen/display.sock&lt;/tt&gt;</source>
-        <translation>将名为 &lt;tt&gt;waywallen-layer-shell&lt;/tt&gt; 的二进制文件放入 &lt;tt&gt;PATH&lt;/tt&gt; 或 &lt;tt&gt;waywallen&lt;/tt&gt; 守护进程旁，然后重启 waywallen。手动测试：&lt;tt&gt;waywallen-layer-shell --socket $XDG_RUNTIME_DIR/waywallen/display.sock&lt;/tt&gt;</translation>
+        <translation>将名为 &lt;tt&gt;waywallen-layer-shell&lt;/tt&gt; 的二进制文件放入 &lt;tt&gt;PATH&lt;/tt&gt; 或 &lt;tt&gt;waywallen&lt;/tt&gt; 后台旁，然后重启 waywallen。手动测试：&lt;tt&gt;waywallen-layer-shell --socket $XDG_RUNTIME_DIR/waywallen/display.sock&lt;/tt&gt;</translation>
     </message>
 </context>
 <context>
