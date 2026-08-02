@@ -20,6 +20,7 @@ use crate::ipc::uds::{recv_event, send_control};
 pub const SPAWN_VERSION: u32 = 8;
 use crate::plugin::renderer_registry::{RendererActivityMode, RendererDef, RendererRegistry};
 use crate::routing::Router;
+use crate::settings::SettingsStore;
 use crate::wallpaper::types::WallpaperType;
 
 // ---------------------------------------------------------------------------
@@ -857,6 +858,7 @@ pub struct RendererManager {
     /// Cached `/dev/dri` enumeration from startup. Used at spawn time to
     /// translate `gpu_drm_dev` settings into render-node paths.
     gpus: OnceLock<Arc<Vec<crate::gpu::GpuInfo>>>,
+    settings: OnceLock<Arc<SettingsStore>>,
     /// Dead-renderer signals queue here (from reader-thread exit or
     /// a send_control hitting EPIPE). One background task drains it.
     reap_tx: tokio::sync::mpsc::UnboundedSender<RendererId>,
@@ -904,6 +906,7 @@ impl RendererManager {
             registry: StdRwLock::new(registry),
             router: OnceLock::new(),
             gpus: OnceLock::new(),
+            settings: OnceLock::new(),
             reap_tx,
             reap_rx: StdMutex::new(Some(reap_rx)),
             subscriptions: Arc::new(RendererSubscriptionRegistry::new()),
@@ -916,6 +919,11 @@ impl RendererManager {
     /// resolve `gpu_drm_dev` selections into `render_node` paths.
     pub fn attach_gpus(&self, gpus: Arc<Vec<crate::gpu::GpuInfo>>) {
         let _ = self.gpus.set(gpus);
+    }
+
+    /// Wire the live settings store used by outbound renderer policy gates.
+    pub fn attach_settings(&self, settings: Arc<SettingsStore>) {
+        let _ = self.settings.set(settings);
     }
 
     /// Wire the manager to the router. Must be called once after both
@@ -1463,6 +1471,9 @@ impl RendererManager {
         timestamp_us: u64,
         modifiers: u32,
     ) -> Result<()> {
+        if !self.pointer_forwarding_enabled() {
+            return Ok(());
+        }
         if !self.subscribed_to(id, RendererEventKind::Pointer) {
             return Ok(());
         }
@@ -1490,6 +1501,9 @@ impl RendererManager {
         timestamp_us: u64,
         modifiers: u32,
     ) -> Result<()> {
+        if !self.pointer_forwarding_enabled() {
+            return Ok(());
+        }
         if !self.subscribed_to(id, RendererEventKind::Pointer) {
             return Ok(());
         }
@@ -1520,6 +1534,9 @@ impl RendererManager {
         timestamp_us: u64,
         modifiers: u32,
     ) -> Result<()> {
+        if !self.pointer_forwarding_enabled() {
+            return Ok(());
+        }
         if !self.subscribed_to(id, RendererEventKind::Pointer) {
             return Ok(());
         }
@@ -1536,6 +1553,12 @@ impl RendererManager {
             },
         )
         .await
+    }
+
+    fn pointer_forwarding_enabled(&self) -> bool {
+        self.settings
+            .get()
+            .is_none_or(|settings| settings.pointer_forwarding_enabled())
     }
 
     /// Forward an MPRIS media snapshot to a live renderer. Silently
@@ -2282,7 +2305,7 @@ impl RendererManager {
 #[cfg(test)]
 mod subscription_tests {
     use super::*;
-    use crate::ipc::uds::recv_control;
+    use crate::ipc::uds::{recv_control, CodecError};
 
     #[tokio::test]
     async fn failed_renderer_process_status_includes_exit_code() {
@@ -2294,6 +2317,57 @@ mod subscription_tests {
 
         let status = failed_renderer_process_status(&mut child).await;
         assert_eq!(status, "process_status=exit status: 23");
+    }
+
+    #[tokio::test]
+    async fn pointer_forwarding_setting_gates_renderer_control() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = SettingsStore::load_or_default(temp.path().join("settings.toml")).await;
+        let manager = RendererManager::new_default();
+        manager.attach_settings(settings.clone());
+
+        let (handle, peer) = RendererHandle::test_stub_with_peer("renderer", "scene");
+        manager.register_test_handle(handle).await;
+        let applied = manager
+            .subscriptions
+            .prepare("renderer", 1, &["pointer".to_string()]);
+        manager
+            .subscriptions
+            .commit("renderer".to_string(), applied.commit.unwrap());
+
+        settings.update(|state| state.global.pointer_forwarding_enabled = false);
+        peer.set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        manager
+            .send_pointer_motion("renderer", 1.0, 2.0, 3, 0)
+            .await
+            .unwrap();
+        let error = recv_control(&peer).unwrap_err();
+        match error {
+            CodecError::Nix(nix::errno::Errno::EAGAIN) => {}
+            CodecError::Io(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            other => panic!("expected a read timeout, got {other:?}"),
+        }
+
+        settings.update(|state| state.global.pointer_forwarding_enabled = true);
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        manager
+            .send_pointer_motion("renderer", 4.0, 5.0, 6, 0)
+            .await
+            .unwrap();
+        assert!(matches!(
+            recv_control(&peer).unwrap().0,
+            ControlMsg::PointerMotion {
+                x: 4.0,
+                y: 5.0,
+                timestamp_us: 6,
+                modifiers: 0,
+            }
+        ));
     }
 
     #[test]

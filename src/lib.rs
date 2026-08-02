@@ -16,5 +16,6 @@ pub mod routing;
 pub mod scheduler;
 pub mod settings;
 pub mod sync;
+pub mod system_info;
 pub mod tasks;
 pub mod wallpaper;

@@ -15,6 +15,12 @@ pub fn emit_c_header_from_xml(src: &str) -> Result<String, parser::ParseError> {
     Ok(codegen_c::emit_header(&proto))
 }
 
+/// Convenience: parse an XML source and emit only its public named C types.
+pub fn emit_c_types_header_from_xml(src: &str) -> Result<String, parser::ParseError> {
+    let proto = parser::parse_protocol(src)?;
+    Ok(codegen_c::emit_types_header(&proto))
+}
+
 /// Convenience: parse an XML source and emit the C source.
 pub fn emit_c_source_from_xml(src: &str) -> Result<String, parser::ParseError> {
     let proto = parser::parse_protocol(src)?;

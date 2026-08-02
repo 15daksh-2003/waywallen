@@ -31,6 +31,7 @@ mod scheduler;
 mod session_monitor;
 mod settings;
 mod sync;
+mod system_info;
 mod tasks;
 mod tray;
 mod wallpaper {
@@ -62,6 +63,7 @@ pub struct AppState {
     pub router: Arc<routing::Router>,
     pub display_backend_status: std::sync::RwLock<display::spawner::DisplayBackendStatus>,
     pub settings: Arc<settings::SettingsStore>,
+    pub system_info: system_info::SystemInfo,
     /// Snapshot of `/dev/dri` taken at startup. Read-only after construction;
     /// surfaced to UI and used by RendererManager spawn resolution.
     pub gpus: Arc<Vec<gpu::GpuInfo>>,
@@ -275,6 +277,7 @@ async fn async_main() -> anyhow::Result<()> {
     renderer_mgr.start_reaper();
     let settings_store =
         settings::SettingsStore::load_or_default(settings::default_config_path()).await;
+    renderer_mgr.attach_settings(settings_store.clone());
     router.attach_settings(settings_store.clone());
     let registry_snapshot = renderer_mgr.registry_snapshot();
     settings_store.reconcile(&registry_snapshot);
@@ -366,6 +369,7 @@ async fn async_main() -> anyhow::Result<()> {
             display::spawner::DisplayBackendStatus::default(),
         ),
         settings: settings_store,
+        system_info: system_info::SystemInfo::load(),
         gpus,
         db: db.clone(),
         queue: tokio::sync::Mutex::new(control::QueueState::default()),

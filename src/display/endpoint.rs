@@ -5,10 +5,8 @@ use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::display::proto::generated::Rect;
-use crate::display::proto::{
-    codec, error_code, opcode, Event, Request, PROTOCOL_NAME, PROTOCOL_VERSION,
-};
+use crate::display::proto::generated::{self as wire, Rect};
+use crate::display::proto::{codec, opcode, Event, Request, PROTOCOL_VERSION};
 use crate::events::GlobalEvent;
 // Display-protocol failures are daemon-internal; this layer talks to
 // display consumers over a UDS, not public WS or D-Bus surfaces.
@@ -16,27 +14,21 @@ use crate::display::layout::display_point_to_texture;
 use crate::error::{Error, Result, ResultExt};
 use crate::renderer_manager::{PublishedPool, RendererHandle};
 use crate::routing::{
-    DisplayConsumptionPermit, DisplayHandle, DisplayOutEvent, DisplayRegistration, Router,
+    ConsumerImportFailureKind, ConsumerImportFailureOutcome, DisplayConsumptionPermit,
+    DisplayHandle, DisplayOutEvent, DisplayRegistration, PresentationSnapshot, PresentationState,
+    Router,
 };
-use crate::scheduler::ProjectedConfig;
+use crate::scheduler::{CompositionConfig, DisplayMetrics};
 use crate::sync::drm_device;
 
 /// Server version string advertised in `welcome.server_version`.
 /// Free-form, informational; consumers do not gate on this.
 pub const SERVER_VERSION: &str = concat!("waywallen ", env!("CARGO_PKG_VERSION"));
 
-/// Inclusive range of `client_protocol_version` values this daemon
+/// Inclusive range of protocol versions this daemon
 /// accepts. Unsupported versions are rejected during handshake.
-pub const MIN_SUPPORTED_CLIENT_VERSION: u32 = 6;
+pub const MIN_SUPPORTED_CLIENT_VERSION: u32 = PROTOCOL_VERSION;
 pub const MAX_SUPPORTED_CLIENT_VERSION: u32 = PROTOCOL_VERSION;
-
-/// Advertised in `welcome.features`. Advisory in v3+ — clients MUST
-/// NOT gate on these; negotiated protocol version is authoritative.
-const ADVERTISED_FEATURES: &[&str] = &[
-    "explicit_sync_fd",
-    "drm_syncobj_release",
-    "modifier_negotiation_v1",
-];
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -129,10 +121,10 @@ async fn handle_client(
 ) -> Result<()> {
     log::info!("display client connected; performing handshake");
     let registration = do_handshake(&stream, &events_tx, &mut shutdown_rx).await?;
-    let client_protocol_version = registration.protocol_version;
     let DisplayHandle {
         id: display_id,
         session_id,
+        presentation,
         rx,
     } = router.register_display(registration).await;
     log::info!("display {display_id} registered with router");
@@ -141,7 +133,10 @@ async fn handle_client(
     tokio::task::spawn_blocking(move || {
         codec::send_event(
             &send_ack_stream,
-            &Event::DisplayAccepted { display_id },
+            &Event::DisplayAccepted {
+                display_id,
+                presentation: presentation_to_wire(presentation),
+            },
             &[],
         )
     })
@@ -154,7 +149,6 @@ async fn handle_client(
         router.clone(),
         display_id,
         session_id,
-        client_protocol_version,
         rx,
         shutdown_rx,
     )
@@ -175,69 +169,40 @@ async fn do_handshake(
         .await
         .context("recv hello")?;
     let Request::Hello {
-        protocol,
         client_name,
         client_version,
-        client_protocol_version,
+        protocol_version,
     } = hello
     else {
-        return Err(Error::Internal(anyhow!(
-            "expected hello, got opcode {}",
-            hello.opcode()
-        )));
-    };
-    if protocol != PROTOCOL_NAME {
-        let s = stream.try_clone().context("clone for error")?;
-        let msg = format!("unsupported protocol: {protocol:?} (expected {PROTOCOL_NAME:?})");
-        let err_msg = msg.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            codec::send_event(
-                &s,
-                &Event::Error {
-                    code: error_code::PROTO_NAME_MISMATCH,
-                    message: err_msg,
-                },
-                &[],
-            )
-        })
+        let message = format!("expected hello, got opcode {}", hello.opcode());
+        let _ = send_error(
+            stream,
+            wire::DisplayErrorCode::ProtocolViolation,
+            message.clone(),
+        )
         .await;
-        let _ = events_tx.send(GlobalEvent::DisplayConnectionFailed {
-            client_name: client_name.clone(),
-            client_protocol_version,
-            error_code: error_code::PROTO_NAME_MISMATCH,
-            reason: msg.clone(),
-        });
-        return Err(Error::Internal(anyhow!("bad protocol string: {msg}")));
-    }
-    if !(MIN_SUPPORTED_CLIENT_VERSION..=MAX_SUPPORTED_CLIENT_VERSION)
-        .contains(&client_protocol_version)
-    {
-        let s = stream.try_clone().context("clone for error")?;
+        return Err(Error::Internal(anyhow!(message)));
+    };
+    if !(MIN_SUPPORTED_CLIENT_VERSION..=MAX_SUPPORTED_CLIENT_VERSION).contains(&protocol_version) {
         let msg = format!(
-            "client protocol v{client_protocol_version} not supported; \
+            "client protocol v{protocol_version} not supported; \
              daemon accepts [{MIN_SUPPORTED_CLIENT_VERSION}..={MAX_SUPPORTED_CLIENT_VERSION}]"
         );
-        let err_msg = msg.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            codec::send_event(
-                &s,
-                &Event::Error {
-                    code: error_code::VERSION_UNSUPPORTED,
-                    message: err_msg,
-                },
-                &[],
-            )
-        })
+        let _ = send_error(
+            stream,
+            wire::DisplayErrorCode::VersionUnsupported,
+            msg.clone(),
+        )
         .await;
         let _ = events_tx.send(GlobalEvent::DisplayConnectionFailed {
             client_name: client_name.clone(),
-            client_protocol_version,
-            error_code: error_code::VERSION_UNSUPPORTED,
+            client_protocol_version: protocol_version,
+            error_code: wire::DisplayErrorCode::VersionUnsupported as u32,
             reason: msg.clone(),
         });
         return Err(Error::Internal(anyhow!("version mismatch: {msg}")));
     }
-    log::info!("display hello: {client_name} v{client_version} (proto v{client_protocol_version})");
+    log::info!("display hello: {client_name} v{client_version} (proto v{protocol_version})");
 
     let welcome_stream = stream.try_clone().context("clone for welcome")?;
     tokio::task::spawn_blocking(move || {
@@ -245,7 +210,6 @@ async fn do_handshake(
             &welcome_stream,
             &Event::Welcome {
                 server_version: SERVER_VERSION.to_string(),
-                features: ADVERTISED_FEATURES.iter().map(|s| s.to_string()).collect(),
             },
             &[],
         )
@@ -260,43 +224,119 @@ async fn do_handshake(
     let Request::RegisterDisplay {
         name,
         instance_id,
-        width,
-        height,
-        refresh_mhz,
-        drm_render_major,
-        drm_render_minor,
-        properties,
+        metrics,
+        consumer_caps,
+        presentation_caps,
+        window_state_flags,
     } = reg
     else {
-        return Err(Error::Internal(anyhow!(
-            "expected register_display, got opcode {}",
-            reg.opcode()
-        )));
+        let message = format!("expected register_display, got opcode {}", reg.opcode());
+        let _ = send_error(
+            stream,
+            wire::DisplayErrorCode::ProtocolViolation,
+            message.clone(),
+        )
+        .await;
+        return Err(Error::Internal(anyhow!(message)));
     };
     let instance_id = if instance_id.is_empty() {
         None
     } else {
         Some(instance_id)
     };
+    if metrics.width == 0 || metrics.height == 0 {
+        let msg = format!(
+            "register_display has invalid extent {}x{}",
+            metrics.width, metrics.height
+        );
+        let _ = send_error(
+            stream,
+            wire::DisplayErrorCode::ProtocolViolation,
+            msg.clone(),
+        )
+        .await;
+        return Err(Error::Internal(anyhow!(msg)));
+    }
+    if window_state_flags & !crate::routing::auto_replay::FLAGS_KNOWN != 0 {
+        let msg = format!("register_display has unknown window flags 0x{window_state_flags:x}");
+        let _ = send_error(
+            stream,
+            wire::DisplayErrorCode::ProtocolViolation,
+            msg.clone(),
+        )
+        .await;
+        return Err(Error::Internal(anyhow!(msg)));
+    }
+    if presentation_caps.flags & !crate::routing::PRESENTATION_CAP_PAUSE_BLUR != 0 {
+        let msg = format!(
+            "register_display has unknown presentation capability flags 0x{:x}",
+            presentation_caps.flags
+        );
+        let _ = send_error(
+            stream,
+            wire::DisplayErrorCode::ProtocolViolation,
+            msg.clone(),
+        )
+        .await;
+        return Err(Error::Internal(anyhow!(msg)));
+    }
+    let drm = crate::renderer_manager::DrmNode {
+        major: consumer_caps.drm_render_major,
+        minor: consumer_caps.drm_render_minor,
+    };
+    let consumer_caps = match crate::dma::negotiate::unflatten_caps(
+        &consumer_caps.fourccs,
+        &consumer_caps.mod_counts,
+        &consumer_caps.modifiers,
+        &consumer_caps.plane_counts,
+        &consumer_caps.device_uuid,
+        &consumer_caps.driver_uuid,
+        drm,
+        consumer_caps.sync_caps,
+        consumer_caps.color_caps,
+        consumer_caps.mem_hints,
+        (consumer_caps.extent_max_w, consumer_caps.extent_max_h),
+    ) {
+        Ok(capabilities) => capabilities,
+        Err(error) => {
+            let message = format!("malformed consumer capabilities: {error:?}");
+            let _ = send_error(
+                stream,
+                wire::DisplayErrorCode::ProtocolViolation,
+                message.clone(),
+            )
+            .await;
+            let _ = events_tx.send(GlobalEvent::DisplayConnectionFailed {
+                client_name,
+                client_protocol_version: protocol_version,
+                error_code: wire::DisplayErrorCode::ProtocolViolation as u32,
+                reason: message.clone(),
+            });
+            return Err(Error::Internal(anyhow!(message)));
+        }
+    };
+    let prefix = format!("display {name}: consumer capabilities");
+    consumer_caps.log_dump(&prefix);
     log::info!(
-        "display register: {name} (instance_id={}) {width}x{height}@{refresh_mhz}mHz drm_render={drm_render_major}:{drm_render_minor}",
-        instance_id.as_deref().unwrap_or("<none>")
+        "display register: {name} (instance_id={}) {}x{}@{}mHz drm_render={}:{}",
+        instance_id.as_deref().unwrap_or("<none>"),
+        metrics.width,
+        metrics.height,
+        metrics.refresh_mhz,
+        drm.major,
+        drm.minor,
     );
     Ok(DisplayRegistration {
         name,
         instance_id,
-        width,
-        height,
-        refresh_mhz,
-        gpu: crate::renderer_manager::DrmNode {
-            major: drm_render_major,
-            minor: drm_render_minor,
+        metrics: DisplayMetrics {
+            width: metrics.width,
+            height: metrics.height,
+            refresh_mhz: metrics.refresh_mhz,
         },
-        properties,
-        // consumer_caps arrives ASYNCHRONOUSLY in the frame loop's
-        // request handler; registration does not block on it.
-        consumer_caps: None,
-        protocol_version: client_protocol_version,
+        presentation_caps: presentation_caps.flags,
+        consumer_caps,
+        window_state_flags,
     })
 }
 
@@ -308,7 +348,6 @@ async fn run_frame_loop(
     router: Arc<Router>,
     display_id: crate::scheduler::DisplayId,
     display_session_id: crate::sync::DisplaySessionId,
-    client_protocol_version: u32,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<DisplayOutEvent>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
@@ -328,9 +367,9 @@ async fn run_frame_loop(
     // Most-recently-bound renderer, kept so inbound pointer events can
     // be forwarded without a routing-table walk.
     let mut bound_renderer: Option<Arc<RendererHandle>> = None;
-    // Latest SetConfig pushed to this display. Used to inverse-map
+    // Latest SetCompositionConfig pushed to this display. Used to inverse-map
     // pointer coords from display pixels into renderer texture pixels.
-    let mut latest_config: Option<ProjectedConfig> = None;
+    let mut latest_config: Option<CompositionConfig> = None;
     let mut pending_arms = HashMap::<(u64, u64), crate::sync::FrameConsumerArm>::new();
     let mut release_sessions = HashMap::<String, crate::sync::FrameConsumerSession>::new();
 
@@ -345,9 +384,20 @@ async fn run_frame_loop(
                     log::info!("display {display_id}: router rx closed");
                     break Ok(());
                 }
-                Some(DisplayOutEvent::Bind { renderer, pool, buffer_generation }) => {
+                Some(DisplayOutEvent::Bind {
+                    renderer,
+                    pool,
+                    buffer_generation,
+                    initial_config,
+                }) => {
                     bound_renderer = Some(Arc::clone(&renderer));
-                    if let Err(e) = send_bind(&stream, &pool, buffer_generation).await {
+                    latest_config = Some(initial_config.clone());
+                    if let Err(e) = send_bind(
+                        &stream,
+                        &pool,
+                        buffer_generation,
+                        &initial_config,
+                    ).await {
                         break Err(e);
                     }
                 }
@@ -358,9 +408,19 @@ async fn run_frame_loop(
                         break Err(e);
                     }
                 }
-                Some(DisplayOutEvent::SetConfig(cfg)) => {
+                Some(DisplayOutEvent::SetCompositionConfig(cfg)) => {
                     latest_config = Some(cfg.clone());
-                    if let Err(e) = send_set_config(&stream, &cfg).await {
+                    if let Err(e) = send_composition_config(&stream, &cfg).await {
+                        break Err(e);
+                    }
+                }
+                Some(DisplayOutEvent::SetPresentationSnapshot(presentation)) => {
+                    if let Err(e) = send_presentation_snapshot(&stream, presentation).await {
+                        break Err(e);
+                    }
+                }
+                Some(DisplayOutEvent::SetPresentationState(state)) => {
+                    if let Err(e) = send_presentation_state(&stream, state).await {
                         break Err(e);
                     }
                 }
@@ -370,7 +430,7 @@ async fn run_frame_loop(
                 }) => {
                     match forward_frame_ready(
                         &stream, &renderer, buffer_generation, buffer_index, seq,
-                        consumption, member, client_protocol_version >= 8,
+                        consumption, member, true,
                     ).await {
                         Ok(Some(forwarded)) => {
                             release_sessions
@@ -386,79 +446,119 @@ async fn run_frame_loop(
                 }
             },
             maybe_req = req_rx.recv() => match maybe_req {
-                Some(Ok(Request::UpdateDisplay { width, height, properties: _ })) => {
-                    router.update_display_size(display_id, width, height).await;
-                    log::info!("display {display_id}: resized to {width}x{height}");
+                Some(Ok(Request::SetDisplayMetrics { metrics })) => {
+                    if metrics.width == 0 || metrics.height == 0 {
+                        let message = format!(
+                            "invalid display metrics {}x{}",
+                            metrics.width, metrics.height,
+                        );
+                        let _ = send_error(
+                            &stream,
+                            wire::DisplayErrorCode::ProtocolViolation,
+                            message.clone(),
+                        ).await;
+                        break Err(Error::Internal(anyhow!(message)));
+                    }
+                    router
+                        .set_display_metrics(
+                            display_id,
+                            DisplayMetrics {
+                                width: metrics.width,
+                                height: metrics.height,
+                                refresh_mhz: metrics.refresh_mhz,
+                            },
+                        )
+                        .await;
+                    log::info!(
+                        "display {display_id}: metrics {}x{}@{}mHz",
+                        metrics.width,
+                        metrics.height,
+                        metrics.refresh_mhz,
+                    );
                 }
-                Some(Ok(Request::WindowState { flags })) => {
+                Some(Ok(Request::SetWindowState { flags })) => {
+                    if flags & !crate::routing::auto_replay::FLAGS_KNOWN != 0 {
+                        let message = format!("unknown window state flags 0x{flags:x}");
+                        let _ = send_error(
+                            &stream,
+                            wire::DisplayErrorCode::ProtocolViolation,
+                            message.clone(),
+                        ).await;
+                        break Err(Error::Internal(anyhow!(message)));
+                    }
                     log::debug!(
-                        "display {display_id}: window_state flags=0x{flags:x}"
+                        "display {display_id}: window state flags=0x{flags:x}"
                     );
                     router.update_display_window_state(display_id, flags).await;
                 }
-                Some(Ok(Request::FrameArmed { buffer_generation, seq })) => {
-                    if client_protocol_version < 8 {
-                        log::warn!(
-                            "display {display_id} session {display_session_id}: frame_armed from legacy protocol v{client_protocol_version}"
-                        );
-                        continue;
-                    }
+                Some(Ok(Request::FrameReleaseArmed { buffer_generation, seq })) => {
                     match pending_arms.remove(&(buffer_generation, seq)) {
                         Some(arm) => arm.arm(),
                         None => log::warn!(
-                            "display {display_id} session {display_session_id}: stale or unknown frame_armed gen={buffer_generation} seq={seq}"
+                            "display {display_id} session {display_session_id}: stale or unknown frame_release_armed gen={buffer_generation} seq={seq}"
                         ),
                     }
                 }
-                Some(Ok(Request::ConsumerCaps {
-                    fourccs, mod_counts, modifiers, plane_counts,
-                    device_uuid, driver_uuid, drm_render_major, drm_render_minor,
-                    mem_hints, sync_caps, color_caps, extent_max_w, extent_max_h,
+                Some(Ok(Request::BufferImportFailed {
+                    buffer_generation,
+                    kind,
+                    message,
                 })) => {
-                    let drm = crate::renderer_manager::DrmNode {
-                        major: drm_render_major, minor: drm_render_minor,
-                    };
-                    match crate::dma::negotiate::unflatten_caps(
-                        &fourccs, &mod_counts, &modifiers, &plane_counts,
-                        &device_uuid, &driver_uuid, drm,
-                        sync_caps, color_caps, mem_hints,
-                        (extent_max_w, extent_max_h),
-                    ) {
-                        Ok(caps) => {
-                            let prefix = format!("display {display_id}: consumer_caps");
-                            log::info!(
-                                "{prefix}: imported {} fourcc{}",
-                                caps.formats.by_fourcc.len(),
-                                if caps.formats.by_fourcc.len() == 1 { "" } else { "s" },
-                            );
-                            caps.log_dump(&prefix);
-                            router.set_consumer_caps(display_id, caps).await;
+                    let domain_kind = match kind {
+                        wire::BufferImportFailureKind::Unsupported => {
+                            ConsumerImportFailureKind::Unsupported
                         }
-                        Err(e) => {
+                        wire::BufferImportFailureKind::ResourceExhausted => {
+                            ConsumerImportFailureKind::ResourceExhausted
+                        }
+                        wire::BufferImportFailureKind::BackendFailure => {
+                            ConsumerImportFailureKind::BackendFailure
+                        }
+                    };
+                    match router
+                        .on_consumer_import_failed(display_id, buffer_generation, domain_kind)
+                        .await
+                    {
+                        ConsumerImportFailureOutcome::Retry { fourcc, modifier } => {
                             log::warn!(
-                                "display {display_id}: ConsumerCaps malformed: {e:?}"
+                                "display {display_id}: import failed gen={buffer_generation} \
+                                 fourcc=0x{fourcc:08x} modifier=0x{modifier:x}: {message}"
                             );
+                        }
+                        ConsumerImportFailureOutcome::Stale => {
+                            log::warn!(
+                                "display {display_id}: stale import failure gen={buffer_generation}: {message}"
+                            );
+                        }
+                        ConsumerImportFailureOutcome::Terminal => {
+                            let detail = format!(
+                                "display backend import failed for generation {buffer_generation}: {message}"
+                            );
+                            let _ = send_error(
+                                &stream,
+                                wire::DisplayErrorCode::NegotiationFailed,
+                                detail.clone(),
+                            ).await;
+                            break Err(Error::Internal(anyhow!(detail)));
                         }
                     }
                 }
-                Some(Ok(Request::BindFailed { fourcc, modifier, reason, message })) => {
-                    log::warn!(
-                        "display {display_id}: BindFailed fourcc=0x{fourcc:08x} \
-                         modifier=0x{modifier:x} reason={reason} msg={message:?}"
-                    );
-                    router.on_consumer_bind_failed(display_id, fourcc, modifier).await;
-                }
-                Some(Ok(Request::Bye)) => {
-                    log::info!("display {display_id}: bye");
-                    break Ok(());
-                }
-                Some(Ok(Request::UnbindDone { buffer_generation })) => {
+                Some(Ok(Request::AckUnbind { buffer_generation })) => {
                     log::debug!(
-                        "display {display_id}: unbind_done gen={buffer_generation}"
+                        "display {display_id}: ack_unbind gen={buffer_generation}"
                     );
-                    router.record_unbind_done(display_id, buffer_generation).await;
+                    router.record_ack_unbind(display_id, buffer_generation).await;
                 }
                 Some(Ok(Request::PointerMotion { x, y, timestamp_us, modifiers })) => {
+                    if !pointer_values_valid(&[x, y], modifiers) {
+                        let message = "invalid pointer_motion values".to_string();
+                        let _ = send_error(
+                            &stream,
+                            wire::DisplayErrorCode::ProtocolViolation,
+                            message.clone(),
+                        ).await;
+                        break Err(Error::Internal(anyhow!(message)));
+                    }
                     if let (Some(r), Some(cfg)) = (bound_renderer.as_ref(), latest_config.as_ref()) {
                         if let Some((tx, ty)) = display_point_to_texture(x, y, cfg) {
                             // RendererManager.send_pointer_motion gates on the
@@ -472,10 +572,19 @@ async fn run_frame_loop(
                     }
                 }
                 Some(Ok(Request::PointerButton { x, y, button, state, timestamp_us, modifiers })) => {
+                    if !pointer_values_valid(&[x, y], modifiers) {
+                        let message = "invalid pointer_button values".to_string();
+                        let _ = send_error(
+                            &stream,
+                            wire::DisplayErrorCode::ProtocolViolation,
+                            message.clone(),
+                        ).await;
+                        break Err(Error::Internal(anyhow!(message)));
+                    }
                     if let (Some(r), Some(cfg)) = (bound_renderer.as_ref(), latest_config.as_ref()) {
                         if let Some((tx, ty)) = display_point_to_texture(x, y, cfg) {
                             if let Err(e) = router.renderer_manager()
-                                .send_pointer_button(&r.id, tx, ty, button, state, timestamp_us, modifiers).await
+                                .send_pointer_button(&r.id, tx, ty, button, state as u32, timestamp_us, modifiers).await
                             {
                                 log::debug!("display {display_id}: pointer_button forward failed: {e}");
                             }
@@ -483,12 +592,21 @@ async fn run_frame_loop(
                     }
                 }
                 Some(Ok(Request::PointerAxis { x, y, delta_x, delta_y, source, timestamp_us, modifiers })) => {
+                    if !pointer_values_valid(&[x, y, delta_x, delta_y], modifiers) {
+                        let message = "invalid pointer_axis values".to_string();
+                        let _ = send_error(
+                            &stream,
+                            wire::DisplayErrorCode::ProtocolViolation,
+                            message.clone(),
+                        ).await;
+                        break Err(Error::Internal(anyhow!(message)));
+                    }
                     if let (Some(r), Some(cfg)) = (bound_renderer.as_ref(), latest_config.as_ref()) {
                         if let Some((tx, ty)) = display_point_to_texture(x, y, cfg) {
                             // delta_x/delta_y are scroll quantities, not
                             // spatial; forward unchanged.
                             if let Err(e) = router.renderer_manager()
-                                .send_pointer_axis(&r.id, tx, ty, delta_x, delta_y, source, timestamp_us, modifiers).await
+                                .send_pointer_axis(&r.id, tx, ty, delta_x, delta_y, source as u32, timestamp_us, modifiers).await
                             {
                                 log::debug!("display {display_id}: pointer_axis forward failed: {e}");
                             }
@@ -496,10 +614,16 @@ async fn run_frame_loop(
                     }
                 }
                 Some(Ok(other)) => {
-                    log::warn!(
-                        "display {display_id}: unexpected request opcode {}",
+                    let message = format!(
+                        "unexpected post-handshake request opcode {}",
                         other.opcode()
                     );
+                    let _ = send_error(
+                        &stream,
+                        wire::DisplayErrorCode::ProtocolViolation,
+                        message.clone(),
+                    ).await;
+                    break Err(Error::Internal(anyhow!(message)));
                 }
                 Some(Err(e)) => {
                     log::info!("display {display_id}: client recv error: {e}");
@@ -521,6 +645,10 @@ async fn run_frame_loop(
         session.close();
     }
     result
+}
+
+fn pointer_values_valid(values: &[f32], modifiers: u32) -> bool {
+    values.iter().all(|value| value.is_finite()) && modifiers & !0x0f == 0
 }
 
 /// Run `codec::recv_request` on the blocking pool but tear down the
@@ -554,6 +682,106 @@ async fn wait_shutdown(rx: &mut tokio::sync::watch::Receiver<bool>) {
 // ---------------------------------------------------------------------------
 // Wire-event senders
 
+fn presentation_to_wire(snapshot: PresentationSnapshot) -> wire::PresentationSnapshot {
+    let kind = match snapshot.config.pause_effect.kind {
+        crate::settings::PauseEffectKind::None => wire::PauseEffectKind::None,
+        crate::settings::PauseEffectKind::Blur => wire::PauseEffectKind::Blur,
+    };
+    wire::PresentationSnapshot {
+        config: wire::PresentationConfig {
+            generation: snapshot.config.generation,
+            pause_effect: wire::PauseEffectConfig {
+                kind,
+                blur: wire::BlurEffectConfig {
+                    radius: snapshot.config.pause_effect.blur.radius,
+                },
+            },
+        },
+        state: presentation_state_to_wire(snapshot.state),
+    }
+}
+
+fn presentation_state_to_wire(config: PresentationState) -> wire::PresentationState {
+    wire::PresentationState {
+        generation: config.generation,
+        config_generation: config.config_generation,
+        pause_effect: wire::PauseEffectState {
+            active: config.pause_effect.active,
+        },
+    }
+}
+
+fn composition_to_wire(config: &CompositionConfig) -> wire::CompositionConfig {
+    wire::CompositionConfig {
+        generation: config.generation,
+        buffer_generation: config.buffer_generation,
+        source_rect: Rect {
+            x: config.source_x,
+            y: config.source_y,
+            w: config.source_w,
+            h: config.source_h,
+        },
+        dest_rect: Rect {
+            x: config.dest_x,
+            y: config.dest_y,
+            w: config.dest_w,
+            h: config.dest_h,
+        },
+        transform: config.transform,
+        clear_color: wire::RgbaColor {
+            r: config.clear_rgba[0],
+            g: config.clear_rgba[1],
+            b: config.clear_rgba[2],
+            a: config.clear_rgba[3],
+        },
+    }
+}
+
+async fn send_error(
+    stream: &StdUnixStream,
+    code: wire::DisplayErrorCode,
+    message: String,
+) -> Result<()> {
+    let event = Event::Error { code, message };
+    let stream = stream.try_clone().context("clone for error")?;
+    tokio::task::spawn_blocking(move || codec::send_event(&stream, &event, &[]))
+        .await
+        .context("error join")?
+        .map_err(|error| Error::Internal(anyhow!("send error: {error}")))?;
+    Ok(())
+}
+
+async fn send_presentation_snapshot(
+    stream: &StdUnixStream,
+    presentation: PresentationSnapshot,
+) -> Result<()> {
+    let evt = Event::SetPresentationSnapshot {
+        presentation: presentation_to_wire(presentation),
+    };
+    let s = stream
+        .try_clone()
+        .context("clone for set_presentation_snapshot")?;
+    tokio::task::spawn_blocking(move || codec::send_event(&s, &evt, &[]))
+        .await
+        .context("set_presentation_snapshot join")?
+        .map_err(|e| Error::Internal(anyhow!("send set_presentation_snapshot: {e}")))?;
+    Ok(())
+}
+
+async fn send_presentation_state(stream: &StdUnixStream, state: PresentationState) -> Result<()> {
+    let evt = Event::SetPresentationState {
+        state: presentation_state_to_wire(state),
+    };
+    let s = stream
+        .try_clone()
+        .context("clone for set_presentation_state")?;
+    tokio::task::spawn_blocking(move || codec::send_event(&s, &evt, &[]))
+        .await
+        .context("set_presentation_state join")?
+        .map_err(|e| Error::Internal(anyhow!("send set_presentation_state: {e}")))?;
+    Ok(())
+}
+
 async fn send_unbind(stream: &StdUnixStream, buffer_generation: u64) -> Result<()> {
     let evt = Event::Unbind { buffer_generation };
     let s = stream.try_clone().context("clone for unbind")?;
@@ -564,32 +792,17 @@ async fn send_unbind(stream: &StdUnixStream, buffer_generation: u64) -> Result<(
     Ok(())
 }
 
-async fn send_set_config(stream: &StdUnixStream, cfg: &ProjectedConfig) -> Result<()> {
-    let evt = Event::SetConfig {
-        config_generation: cfg.config_generation,
-        source_rect: Rect {
-            x: cfg.source_x,
-            y: cfg.source_y,
-            w: cfg.source_w,
-            h: cfg.source_h,
-        },
-        dest_rect: Rect {
-            x: cfg.dest_x,
-            y: cfg.dest_y,
-            w: cfg.dest_w,
-            h: cfg.dest_h,
-        },
-        transform: cfg.transform,
-        clear_r: cfg.clear_rgba[0],
-        clear_g: cfg.clear_rgba[1],
-        clear_b: cfg.clear_rgba[2],
-        clear_a: cfg.clear_rgba[3],
+async fn send_composition_config(stream: &StdUnixStream, cfg: &CompositionConfig) -> Result<()> {
+    let evt = Event::SetCompositionConfig {
+        config: composition_to_wire(cfg),
     };
-    let s = stream.try_clone().context("clone for set_config")?;
+    let s = stream
+        .try_clone()
+        .context("clone for set_composition_config")?;
     tokio::task::spawn_blocking(move || codec::send_event(&s, &evt, &[]))
         .await
-        .context("set_config join")?
-        .map_err(|e| Error::Internal(anyhow!("send set_config: {e}")))?;
+        .context("set_composition_config join")?
+        .map_err(|e| Error::Internal(anyhow!("send set_composition_config: {e}")))?;
     Ok(())
 }
 
@@ -597,8 +810,9 @@ async fn send_bind(
     stream: &StdUnixStream,
     pool: &PublishedPool,
     buffer_generation: u64,
+    initial_config: &CompositionConfig,
 ) -> Result<()> {
-    let (event, dup_fds) = build_bind_event(pool, buffer_generation)?;
+    let (event, dup_fds) = build_bind_event(pool, buffer_generation, initial_config)?;
     let s = stream.try_clone().context("clone for bind")?;
     let event_for_send = event.clone();
     let dup_for_send = dup_fds.clone();
@@ -617,7 +831,19 @@ async fn send_bind(
 
 /// Translate one immutable renderer publication into a `BindBuffers`
 /// event. Both schemas use flattened parallel arrays per plane.
-fn build_bind_event(pool: &PublishedPool, buffer_generation: u64) -> Result<(Event, Vec<RawFd>)> {
+fn build_bind_event(
+    pool: &PublishedPool,
+    buffer_generation: u64,
+    initial_config: &CompositionConfig,
+) -> Result<(Event, Vec<RawFd>)> {
+    if initial_config.buffer_generation != buffer_generation {
+        return Err(Error::Internal(anyhow!(
+            "initial composition generation {} targets buffer generation {}, expected {}",
+            initial_config.generation,
+            initial_config.buffer_generation,
+            buffer_generation,
+        )));
+    }
     let count = pool.count;
     let planes_per_buffer = pool.planes_per_buffer;
     let n = (count as usize) * (planes_per_buffer as usize);
@@ -658,6 +884,7 @@ fn build_bind_event(pool: &PublishedPool, buffer_generation: u64) -> Result<(Eve
         stride: pool.stride.clone(),
         plane_offset: pool.plane_offset.clone(),
         size: pool.size.clone(),
+        initial_config: composition_to_wire(initial_config),
     };
     log::debug!(
         "display::endpoint: build_bind_event gen={} count={} planes={} {}x{} \
@@ -785,7 +1012,23 @@ mod tests {
             fds: vec![fd1, fd2],
         };
 
-        let (event, dup_fds) = build_bind_event(&pool, 11).unwrap();
+        let config = CompositionConfig {
+            generation: 3,
+            buffer_generation: 11,
+            display_w: 800.0,
+            display_h: 600.0,
+            source_x: 0.0,
+            source_y: 0.0,
+            source_w: 800.0,
+            source_h: 600.0,
+            dest_x: 0.0,
+            dest_y: 0.0,
+            dest_w: 800.0,
+            dest_h: 600.0,
+            transform: 0,
+            clear_rgba: [0.0, 0.0, 0.0, 1.0],
+        };
+        let (event, dup_fds) = build_bind_event(&pool, 11, &config).unwrap();
         assert_eq!(dup_fds.len(), 2);
         match event {
             Event::BindBuffers {
@@ -799,6 +1042,7 @@ mod tests {
                 stride,
                 plane_offset,
                 size,
+                initial_config,
             } => {
                 assert_eq!(buffer_generation, 11);
                 assert_eq!(count, 2);
@@ -810,6 +1054,8 @@ mod tests {
                 assert_eq!(stride, vec![3200, 3200]);
                 assert_eq!(plane_offset, vec![0, 0]);
                 assert_eq!(size, vec![1_920_000, 1_920_000]);
+                assert_eq!(initial_config.generation, 3);
+                assert_eq!(initial_config.buffer_generation, 11);
             }
             _ => panic!("expected BindBuffers"),
         }

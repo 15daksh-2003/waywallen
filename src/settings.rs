@@ -18,6 +18,9 @@ pub const MAX_AUDIO_FADE_MS: u32 = 2000;
 pub const RENDERER_ENABLE_AUDIO_KEY: &str = "enable_audio";
 pub const RENDERER_VOLUME_KEY: &str = "volume";
 pub const MAX_RENDERER_VOLUME: u32 = 100;
+pub const MIN_BLUR_EFFECT_RADIUS: u32 = 1;
+pub const MAX_BLUR_EFFECT_RADIUS: u32 = 64;
+pub const DEFAULT_BLUR_EFFECT_RADIUS: u32 = 30;
 
 /// Daemon-wide layout defaults applied to displays that have no
 /// `[displays.<name>]` override.
@@ -150,6 +153,53 @@ impl AutoReplayPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PauseEffectKind {
+    #[default]
+    None,
+    Blur,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BlurEffectConfig {
+    pub radius: u32,
+}
+
+impl Default for BlurEffectConfig {
+    fn default() -> Self {
+        Self {
+            radius: DEFAULT_BLUR_EFFECT_RADIUS,
+        }
+    }
+}
+
+impl BlurEffectConfig {
+    pub fn effective_radius(self) -> u32 {
+        self.radius
+            .clamp(MIN_BLUR_EFFECT_RADIUS, MAX_BLUR_EFFECT_RADIUS)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PauseEffectConfig {
+    pub kind: PauseEffectKind,
+    pub blur: BlurEffectConfig,
+}
+
+impl PauseEffectConfig {
+    pub fn effective(self) -> Self {
+        Self {
+            kind: self.kind,
+            blur: BlurEffectConfig {
+                radius: self.blur.effective_radius(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GlobalRendererSettings {
@@ -201,6 +251,7 @@ pub struct GlobalSettings {
         skip_serializing_if = "Option::is_none"
     )]
     pub auto_replay: Option<AutoReplayPolicy>,
+    pub pause_effect: PauseEffectConfig,
     /// Structured wallpaper-browser filter state.
     /// Kept typed in memory but serialized as a JSON string.
     #[serde(
@@ -235,6 +286,9 @@ pub struct GlobalSettings {
 
     pub duplicate_renderers_for_same_wallpaper: bool,
 
+    /// Forward pointer input received by the daemon to subscribed renderers.
+    pub pointer_forwarding_enabled: bool,
+
     /// Last autostart state successfully accepted by the Flatpak portal.
     pub autostart_enabled: bool,
 }
@@ -252,6 +306,7 @@ impl Default for GlobalSettings {
             manual_muted: false,
             layout: LayoutDefaults::default(),
             auto_replay: None,
+            pause_effect: PauseEffectConfig::default(),
             wallpaper_filter: WallpaperFilterState::default(),
             wallpaper_sorts: Vec::new(),
             wallpaper_skip_types: Vec::new(),
@@ -260,6 +315,7 @@ impl Default for GlobalSettings {
             auto_attach_playlist_id: None,
             plugin_update_notifications: true,
             duplicate_renderers_for_same_wallpaper: false,
+            pointer_forwarding_enabled: true,
             autostart_enabled: false,
         }
     }
@@ -762,6 +818,14 @@ impl SettingsStore {
         self.inner.read().expect("settings poisoned").global.clone()
     }
 
+    pub fn pointer_forwarding_enabled(&self) -> bool {
+        self.inner
+            .read()
+            .expect("settings poisoned")
+            .global
+            .pointer_forwarding_enabled
+    }
+
     /// Clone the value map for a single plugin, or `None` if the
     /// plugin has no recorded settings.
     pub fn plugin(&self, plugin_name: &str) -> Option<HashMap<String, String>> {
@@ -1070,6 +1134,7 @@ mod tests {
         assert!(!s.global.manual_muted);
         assert!(s.global.plugin_update_notifications);
         assert!(!s.global.duplicate_renderers_for_same_wallpaper);
+        assert!(s.global.pointer_forwarding_enabled);
         assert!(!s.global.autostart_enabled);
         assert!(s.plugins.is_empty());
     }
@@ -1098,6 +1163,19 @@ duplicate_renderers_for_same_wallpaper = true
         assert!(toml::to_string(&s)
             .unwrap()
             .contains("duplicate_renderers_for_same_wallpaper = true"));
+    }
+
+    #[test]
+    fn pointer_forwarding_setting_roundtrip() {
+        let src = r#"
+[global]
+pointer_forwarding_enabled = false
+"#;
+        let s: Settings = toml::from_str(src).unwrap();
+        assert!(!s.global.pointer_forwarding_enabled);
+        assert!(toml::to_string(&s)
+            .unwrap()
+            .contains("pointer_forwarding_enabled = false"));
     }
 
     #[test]
@@ -1206,6 +1284,22 @@ fillmode = "preserve_aspect_fit"
         assert_eq!(policy.fullscreen, AutoAction::Pause);
         assert_eq!(policy.session_locked, AutoAction::Stop);
         assert_eq!(policy.session_inactive, AutoAction::Stop);
+    }
+
+    #[test]
+    fn pause_effect_defaults_to_none_and_clamps_blur_radius() {
+        let config = PauseEffectConfig::default();
+        assert_eq!(config.kind, PauseEffectKind::None);
+        assert_eq!(config.blur.effective_radius(), DEFAULT_BLUR_EFFECT_RADIUS);
+
+        assert_eq!(
+            BlurEffectConfig { radius: 0 }.effective_radius(),
+            MIN_BLUR_EFFECT_RADIUS
+        );
+        assert_eq!(
+            BlurEffectConfig { radius: 100 }.effective_radius(),
+            MAX_BLUR_EFFECT_RADIUS
+        );
     }
 
     #[tokio::test]

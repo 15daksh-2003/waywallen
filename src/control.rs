@@ -1415,39 +1415,44 @@ async fn restore_auto_stopped_display(app: &Arc<AppState>, display_id: DisplayId
 }
 
 pub async fn pause_all(app: &Arc<AppState>) -> Result<()> {
-    app.router.set_manual_pause(true).await;
-    crate::tray::dbusmenu::notify_menu_changed(app).await;
+    set_pause_all(app, true).await?;
     Ok(())
 }
 
 pub async fn resume_all(app: &Arc<AppState>) -> Result<()> {
-    app.router.set_manual_pause(false).await;
-    crate::tray::dbusmenu::notify_menu_changed(app).await;
+    set_pause_all(app, false).await?;
     Ok(())
+}
+
+pub async fn set_pause_all(app: &Arc<AppState>, paused: bool) -> Result<bool> {
+    app.router.set_manual_pause(paused).await;
+    notify_lifecycle_changed(app).await;
+    Ok(paused)
 }
 
 pub async fn toggle_pause_all(app: &Arc<AppState>) -> Result<bool> {
     let paused = app.router.toggle_manual_pause().await;
-    crate::tray::dbusmenu::notify_menu_changed(app).await;
+    notify_lifecycle_changed(app).await;
     Ok(paused)
 }
 
 pub async fn mute_all(app: &Arc<AppState>) -> Result<()> {
-    app.router.set_manual_mute(true).await;
-    app.settings.update(|s| {
-        s.global.manual_muted = true;
-    });
-    crate::tray::dbusmenu::notify_menu_changed(app).await;
+    set_mute_all(app, true).await?;
     Ok(())
 }
 
 pub async fn unmute_all(app: &Arc<AppState>) -> Result<()> {
-    app.router.set_manual_mute(false).await;
-    app.settings.update(|s| {
-        s.global.manual_muted = false;
-    });
-    crate::tray::dbusmenu::notify_menu_changed(app).await;
+    set_mute_all(app, false).await?;
     Ok(())
+}
+
+pub async fn set_mute_all(app: &Arc<AppState>, muted: bool) -> Result<bool> {
+    app.router.set_manual_mute(muted).await;
+    app.settings.update(|s| {
+        s.global.manual_muted = muted;
+    });
+    notify_lifecycle_changed(app).await;
+    Ok(muted)
 }
 
 pub async fn toggle_mute_all(app: &Arc<AppState>) -> Result<bool> {
@@ -1455,8 +1460,14 @@ pub async fn toggle_mute_all(app: &Arc<AppState>) -> Result<bool> {
     app.settings.update(|s| {
         s.global.manual_muted = muted;
     });
-    crate::tray::dbusmenu::notify_menu_changed(app).await;
+    notify_lifecycle_changed(app).await;
     Ok(muted)
+}
+
+async fn notify_lifecycle_changed(app: &Arc<AppState>) {
+    crate::tray::dbusmenu::notify_menu_changed(app).await;
+    app.events
+        .publish(crate::events::GlobalEvent::StatusChanged);
 }
 
 pub async fn rescan(app: &Arc<AppState>) -> Result<usize> {

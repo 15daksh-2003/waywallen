@@ -17,6 +17,7 @@ HealthQuery::HealthQuery(QObject* parent): Query(parent) {}
 
 auto HealthQuery::service() const -> const QString& { return m_service; }
 auto HealthQuery::state() const -> const QString& { return m_state; }
+auto HealthQuery::osName() const -> const QString& { return m_os_name; }
 
 void HealthQuery::reload() {
     setStatus(Status::Querying);
@@ -34,8 +35,10 @@ void HealthQuery::reload() {
         self->inspect_set(result, [self](const proto::Response& rsp) {
             self->m_service = rsp.health().service();
             self->m_state   = rsp.health().state();
+            self->m_os_name = rsp.health().osName();
             Q_EMIT self->serviceChanged();
             Q_EMIT self->stateChanged();
+            Q_EMIT self->osNameChanged();
         });
         co_return;
     });

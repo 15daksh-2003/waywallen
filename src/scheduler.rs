@@ -4,6 +4,13 @@ use std::collections::HashMap;
 /// across the daemon's lifetime, never reused.
 pub type DisplayId = u64;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayMetrics {
+    pub width: u32,
+    pub height: u32,
+    pub refresh_mhz: u32,
+}
+
 /// Per-display bookkeeping visible to the scheduler.
 #[derive(Debug, Clone)]
 pub struct DisplayInfo {
@@ -12,10 +19,7 @@ pub struct DisplayInfo {
     /// Stable consumer-provided identifier. `None` means the client did
     /// not populate the v4 `instance_id` field.
     pub instance_id: Option<String>,
-    pub width: u32,
-    pub height: u32,
-    pub refresh_mhz: u32,
-    pub properties: Vec<(String, String)>,
+    pub metrics: DisplayMetrics,
     /// Has the scheduler sent (or is about to send) `bind_buffers` to
     /// this display for the current `active_renderer` buffer pool?
     pub bound: bool,
@@ -32,11 +36,12 @@ pub struct ActiveBinding {
     pub tex_height: u32,
 }
 
-/// Per-display presentation config. The geometry fields mirror `set_config`;
+/// Per-display composition config projected for a consumer surface.
 /// the display extent remains daemon-local for pointer mapping.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ProjectedConfig {
-    pub config_generation: u64,
+pub struct CompositionConfig {
+    pub generation: u64,
+    pub buffer_generation: u64,
     /// Actual post-transform surface coordinate extent reported by the consumer.
     pub display_w: f32,
     pub display_h: f32,
@@ -98,7 +103,7 @@ impl Scheduler {
         width: u32,
         height: u32,
         refresh_mhz: u32,
-        properties: Vec<(String, String)>,
+        _properties: Vec<(String, String)>,
     ) -> DisplayId {
         self.next_display_id += 1;
         let id = self.next_display_id;
@@ -108,10 +113,11 @@ impl Scheduler {
                 id,
                 name,
                 instance_id: None,
-                width,
-                height,
-                refresh_mhz,
-                properties,
+                metrics: DisplayMetrics {
+                    width,
+                    height,
+                    refresh_mhz,
+                },
                 // New displays are bound immediately when an active
                 // renderer already exists.
                 bound: self.active.is_some(),
@@ -141,12 +147,11 @@ impl Scheduler {
         self.displays.get(&id)
     }
 
-    /// Record a display size change. SetConfig is recomputed when the
+    /// Record a display size change. SetCompositionConfig is recomputed when the
     /// manager asks for projection.
-    pub fn update_display_size(&mut self, id: DisplayId, width: u32, height: u32) {
+    pub fn update_display_metrics(&mut self, id: DisplayId, metrics: DisplayMetrics) {
         if let Some(d) = self.displays.get_mut(&id) {
-            d.width = width;
-            d.height = height;
+            d.metrics = metrics;
         }
     }
 
@@ -189,24 +194,25 @@ impl Scheduler {
         self.active.as_ref()
     }
 
-    /// Compute the identity SetConfig for a display.
+    /// Compute the identity SetCompositionConfig for a display.
     /// Returns `None` when no renderer is currently bound.
-    pub fn project_config(&mut self, display_id: DisplayId) -> Option<ProjectedConfig> {
+    pub fn project_config(&mut self, display_id: DisplayId) -> Option<CompositionConfig> {
         let active = self.active.as_ref()?;
         let disp = self.displays.get(&display_id)?;
         self.next_config_generation += 1;
-        Some(ProjectedConfig {
-            config_generation: self.next_config_generation,
-            display_w: disp.width as f32,
-            display_h: disp.height as f32,
+        Some(CompositionConfig {
+            generation: self.next_config_generation,
+            buffer_generation: active.buffer_generation,
+            display_w: disp.metrics.width as f32,
+            display_h: disp.metrics.height as f32,
             source_x: 0.0,
             source_y: 0.0,
             source_w: active.tex_width as f32,
             source_h: active.tex_height as f32,
             dest_x: 0.0,
             dest_y: 0.0,
-            dest_w: disp.width as f32,
-            dest_h: disp.height as f32,
+            dest_w: disp.metrics.width as f32,
+            dest_h: disp.metrics.height as f32,
             transform: 0,
             clear_rgba: [0.0, 0.0, 0.0, 1.0],
         })

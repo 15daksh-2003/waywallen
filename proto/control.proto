@@ -89,6 +89,9 @@ message Request {
     QrLoginCancelRequest      qr_login_cancel = 72;
     RemoteSettingsPatchRequest remote_settings_patch = 73;
     WallpaperUnsubscribeRequest wallpaper_unsubscribe = 74;
+    GlobalPauseToggleRequest    global_pause_toggle = 75;
+    GlobalPauseSetRequest       global_pause_set = 76;
+    GlobalMuteSetRequest        global_mute_set = 77;
   }
 }
 
@@ -165,6 +168,9 @@ message Response {
     QrLoginCancelResponse      qr_login_cancel = 72;
     Empty                      remote_settings_patch = 73;
     WallpaperUnsubscribeResponse wallpaper_unsubscribe = 74;
+    GlobalPauseToggleResponse  global_pause_toggle = 75;
+    GlobalPauseSetResponse     global_pause_set = 76;
+    GlobalMuteSetResponse      global_mute_set = 77;
   }
 }
 
@@ -236,6 +242,7 @@ message HealthRequest {}
 message HealthResponse {
   string service = 1;
   string state = 2;
+  string os_name = 3;
 }
 
 // ---------------------------------------------------------------------------
@@ -302,6 +309,12 @@ message RendererInstance {
 
 message RendererPlayRequest  { string renderer_id = 1; }
 message RendererPauseRequest { string renderer_id = 1; }
+message GlobalPauseToggleRequest {}
+message GlobalPauseToggleResponse { bool paused = 1; }
+message GlobalPauseSetRequest { bool paused = 1; }
+message GlobalPauseSetResponse { bool paused = 1; }
+message GlobalMuteSetRequest { bool muted = 1; }
+message GlobalMuteSetResponse { bool muted = 1; }
 
 message RendererMouseRequest {
   string renderer_id = 1;
@@ -579,7 +592,7 @@ message DisplayLinkInfo {
 // TiledOnlyHorizontally / TiledOnlyVertically / Centered) so the daemon
 // API maps 1:1 onto a future Plasma plugin. Tile* variants used to
 // exist (tags 4, 5, 6) but were never wired through — the v1
-// set_config wire can't express texture wrap in a single rect, and
+// CompositionConfig can't express texture wrap in a single rect, and
 // the daemon was just degrading them to PRESERVE_ASPECT_FIT.
 enum FillMode {
   FILL_MODE_UNSPECIFIED          = 0;
@@ -969,7 +982,7 @@ message DisplayListResponse {
 
 // Mutate the per-display layout override for a single display. The
 // daemon writes through to its settings store and re-emits
-// `set_config` to the live consumer (if any) immediately. After the
+// composition config to the live consumer (if any) immediately. After the
 // write the daemon also broadcasts a `DisplayChanged` event so other
 // UIs see the new effective layout.
 //
@@ -1094,6 +1107,8 @@ message StatusSync {
   // Daemon lifecycle phase. UI gates the startup dialog on this.
   DaemonPhase phase = 3;
   DisplayBackendStatus display_backend = 4;
+  bool global_paused = 5;
+  bool global_muted = 6;
 }
 
 message TaskProgress {
@@ -1215,6 +1230,8 @@ message GlobalRendererSettings {
 }
 
 message GlobalSettings {
+  reserved 23;
+  reserved "background_blur";
   // Tag 1 / 2 used to be `default_width`/`default_height`; replaced by
   // `target_extent` + `render_size_policy` in v7. Both were dropped in
   // the post-extent refactor — render size is now a per-renderer
@@ -1280,6 +1297,12 @@ message GlobalSettings {
 
   // Allow audio-response wallpapers to capture the system output spectrum.
   bool audio_capture_enabled = 22;
+
+  // Presentation effect applied while a display's bound renderer is paused.
+  PauseEffectConfig pause_effect = 24;
+
+  // Allow the daemon to forward display pointer input to subscribed renderers.
+  bool pointer_forwarding_enabled = 25;
 }
 
 enum AutoAction {
@@ -1297,6 +1320,20 @@ message AutoReplayPolicy {
   AutoAction fullscreen = 13;
   AutoAction session_locked = 14;
   AutoAction session_inactive = 15;
+}
+
+enum PauseEffectKind {
+  PAUSE_EFFECT_KIND_NONE = 0;
+  PAUSE_EFFECT_KIND_BLUR = 1;
+}
+
+message BlurEffectConfig {
+  uint32 radius = 1;
+}
+
+message PauseEffectConfig {
+  PauseEffectKind kind = 1;
+  BlurEffectConfig blur = 2;
 }
 
 // One plugin's settings table. Wire format is string→string for

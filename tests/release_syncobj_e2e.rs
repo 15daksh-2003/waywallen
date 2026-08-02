@@ -6,7 +6,7 @@ use std::time::Duration;
 
 mod common;
 
-use waywallen::ipc::generated::{Event as EventMsg, EventIn as ControlMsg};
+use waywallen::ipc::generated::{Event as EventMsg, EventIn as ControlMsg, PROTOCOL_VERSION};
 use waywallen::ipc::uds::{recv_event, send_control};
 use waywallen::sync::DrmDevice;
 
@@ -80,6 +80,7 @@ fn release_syncobj_round_trip() {
     send_control(
         &stream,
         &ControlMsg::Init {
+            protocol_version: PROTOCOL_VERSION,
             spawn_version: 4,
             settings: Vec::new(),
             user_properties: String::new(),

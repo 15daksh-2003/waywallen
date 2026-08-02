@@ -29,7 +29,7 @@ MD.Dialog {
     implicitWidth: Math.min(440, parent ? parent.width - 48 : 440)
     standardButtons: T.Dialog.Close
     property var filterTagDialog: null
-    readonly property var popupParent: root.Window.window ? root.Window.window : root.parent
+    readonly property Item popupParent: T.Overlay.overlay ?? root.parent
 
     // Tag names for the tag-filter picker; refreshed each time the
     // dialog opens so newly-scanned tags show up.

@@ -235,7 +235,7 @@ int ww_bridge_send_error(int sock, const char* msg);
  *
  * Recognised keys (v1):
  *   `clear_color` — `"r,g,b,a"`, four floats in 0..=1, comma-separated;
- *                   feeds the daemon's display `set_config.clear_*`.
+ *                   feeds the daemon's display composition clear color.
  *
  * Caller owns the `ww_kv_list_t` storage; the bridge reads it and
  * encodes — no ownership transfer. */
