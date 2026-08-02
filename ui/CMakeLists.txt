@@ -325,6 +325,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE waywallen-qml)
 # LinguistTools is optional: without it the UI still builds, English only.
 # ---------------------------------------------------------------------------
 set(WAYWALLEN_TS_FILES
+  i18n/waywallen_zh_CN.ts
   i18n/waywallen_ru.ts
 )
 find_package(Qt6 QUIET COMPONENTS LinguistTools)
