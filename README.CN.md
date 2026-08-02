@@ -42,7 +42,8 @@ Waywallen 是一个为 Linux 桌面打造的动态壁纸方案
 | **KDE Plasma** | [waywallen-display](https://github.com/waywallen/waywallen-display/) | ✅ | ✅ |
 | **GNOME** | [waywallen-display](https://github.com/waywallen/waywallen-display/) | ✅ | ✅ |
 | **Hyprland** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ✅ |
-| **Niri** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ❌ |
+| **Niri** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ✅ |
+| **Wayfire** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ✅ |
 | **Sway** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ❌ |
 | **COSMIC** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ❌ |
 
@@ -66,12 +67,17 @@ Waywallen 是一个为 Linux 桌面打造的动态壁纸方案
 > 安装完成后，后续该插件的更新 waywallen 会自己提示和处理。
 
 ## FAQ
+- 如何获取日志：必须先退出已经启动的 waywallen daemon。
+  ```bash
+  export RSTD_LOG=debug RUST_LOG=debug,zbus=warn
+  ./waywallen
+  ```
 - 如何在 flatpak 中调试
   ```bash
   flatpak install org.waywallen.waywallen.Debug
   flatpak run --devel --command=bash org.waywallen.waywallen
   # 1. 直接运行
-  [📦 org.waywallen.waywallen ~]$ gdb Qcm
+  [📦 org.waywallen.waywallen ~]$ gdb waywallen
   (gdb) run
   Enable debuginfod for this session? (y or [n]) n
   ...
@@ -81,6 +87,6 @@ Waywallen 是一个为 Linux 桌面打造的动态壁纸方案
   # 2. 或使用 coredump 文件
   coredumpctl dump <id> -o core.save
   flatpak run --devel --filesystem=host --command=bash org.waywallen.waywallen
-  [📦 org.waywallen.waywallen ~]$ gdb Qcm core.save
+  [📦 org.waywallen.waywallen ~]$ gdb waywallen core.save
   ...
   ```
