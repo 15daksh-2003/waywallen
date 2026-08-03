@@ -3,14 +3,18 @@ import QtQuick.Window
 import QtQuick.Templates as T
 
 import Qcm.Material as MD
+import waywallen.ui as W
 
 MD.Popup {
     id: root
     property bool fillHeight: false
     property bool fillWidth: false
     property var props: ({})
+    property var initialRequest: null
+    property var pendingRequest: null
     required property string source
 
+    readyForOpen: false
     parent: T.Overlay.overlay
     width: Math.min(400, parent.width)
     height: Math.min(implicitHeight, parent.height * 0.8)
@@ -42,10 +46,93 @@ MD.Popup {
         root.verticalPadding: 0
     }
 
+    function acceptPage(request, operation) {
+        const object = request.object;
+        const item = m_stack.push(object, operation) as Item;
+        if (item !== object)
+            return null;
+
+        const attach = item.T.StackView;
+        attach.removed.connect(request, function() {
+            request.release();
+        });
+        attach.statusChanged.connect(item, function() {
+            if (!attach || !m_stack)
+                return;
+
+            if (attach.status === T.StackView.Active) {
+                m_stack.lastImplicitHeight = 0;
+            } else if (attach.status === T.StackView.Deactivating) {
+                m_stack.lastImplicitHeight = Qt.binding(function() {
+                    return item.implicitHeight;
+                });
+            }
+        });
+        m_stack.lastImplicitHeight = m_stack.implicitHeight;
+        return item;
+    }
+
+    function rejectInitialRequest(request, error) {
+        root.initialRequest = null;
+        W.Global.toastError(error);
+        request.release();
+        root.rejectOpen(error);
+    }
+
+    function handleInitialRequest() {
+        const request = root.initialRequest;
+        if (!request)
+            return;
+
+        if (request.status === MD.PoolRequest.Ready) {
+            root.initialRequest = null;
+            const item = root.acceptPage(request, T.StackView.Immediate);
+            if (!item) {
+                root.rejectInitialRequest(request, qsTr("Failed to open page"));
+                return;
+            }
+
+            Qt.callLater(function() {
+                if (m_stack.currentItem === item)
+                    root.readyForOpen = true;
+            });
+        } else if (request.status === MD.PoolRequest.Error) {
+            root.rejectInitialRequest(request,
+                                      request.errorString || qsTr("Failed to load page"));
+        }
+    }
+
+    function handlePendingRequest() {
+        const request = root.pendingRequest;
+        if (!request)
+            return;
+
+        if (request.status === MD.PoolRequest.Ready) {
+            root.pendingRequest = null;
+            if (!root.acceptPage(request, T.StackView.PushTransition)) {
+                W.Global.toastError(qsTr("Failed to open page"));
+                request.release();
+            }
+        } else if (request.status === MD.PoolRequest.Error) {
+            root.pendingRequest = null;
+            W.Global.toastError(request.errorString || qsTr("Failed to load page"));
+            request.release();
+        } else if (request.status === MD.PoolRequest.Cancelled) {
+            root.pendingRequest = null;
+        }
+    }
+
+    function pushPage(source, properties) {
+        if (root.pendingRequest)
+            root.pendingRequest.cancel();
+        root.pendingRequest = m_pool.request(source, properties, null,
+                                             MD.Pool.AsynchronousIfNested);
+        root.handlePendingRequest();
+    }
+
     MD.PageContext {
         id: m_page_context
         showHeader: true
-        // headerBackgroundOpacity: 0
         backgroundRadius: root.radius
         radius: root.radius
         leadingAction: MD.Action {
@@ -65,35 +152,34 @@ MD.Popup {
 
     MD.Pool {
         id: m_pool
-        onObjectAdded: function (obj, key) {
-            const item = m_stack.push(obj, T.StackView.PushTransition) as Item;
-            if (item) {
-                const attach = item.T.StackView;
-                attach.removed.connect(m_pool, function () {
-                    if (!m_pool.removeObject(obj)) {
-                        console.error('remove failed: ', obj);
-                    }
-                });
-                attach.statusChanged.connect(item, function () {
-                    if (!attach || !m_stack)
-                        return;
+    }
 
-                    if (attach.status == T.StackView.Active) {
-                        m_stack.lastImplicitHeight = 0;
-                    } else if (attach.status == T.StackView.Deactivating) {
-                        m_stack.lastImplicitHeight = Qt.binding(function () {
-                            return item.implicitHeight;
-                        });
-                    }
-                });
+    Connections {
+        target: root.initialRequest
 
-                m_stack.lastImplicitHeight = m_stack.implicitHeight;
-            }
+        function onStatusChanged() {
+            root.handleInitialRequest();
         }
     }
 
-    onSourceChanged: {
-        m_pool.add(source, props);
+    Connections {
+        target: root.pendingRequest
+
+        function onStatusChanged() {
+            root.handlePendingRequest();
+        }
+    }
+
+    Component.onCompleted: {
+        root.initialRequest = m_pool.request(source, props, null, MD.Pool.Asynchronous);
+        root.handleInitialRequest();
+    }
+
+    Component.onDestruction: {
+        if (root.initialRequest)
+            root.initialRequest.cancel();
+        if (root.pendingRequest)
+            root.pendingRequest.cancel();
     }
 
     function preparePageClose(page) {
@@ -101,9 +187,7 @@ MD.Popup {
             page.prepareClose();
     }
 
-    onAboutToHide: {
-        root.preparePageClose(m_stack.currentItem);
-    }
+    onAboutToHide: root.preparePageClose(m_stack.currentItem)
 
     contentItem: MD.StackView {
         id: m_stack
@@ -112,14 +196,15 @@ MD.Popup {
 
         MD.MProp.page: m_page_context
         Connections {
-            function onPushItem(comp, props) {
-                m_pool.add(comp, props);
-            }
-            function onPop() {
-                const item = m_stack.pop();
-                m_pool.removeObject(item);
-            }
             target: m_page_context
+
+            function onPushItem(comp, props) {
+                root.pushPage(comp, props);
+            }
+
+            function onPop() {
+                m_stack.pop();
+            }
         }
     }
     closePolicy: T.Popup.CloseOnEscape | T.Popup.CloseOnPressOutside
