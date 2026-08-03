@@ -10,16 +10,12 @@ MD.BottomSheet {
     required property Item popupParent
     required property var sheetState
 
-    signal released(var sheet)
-
     parent: popupParent
     anchors.fill: parent
     z: 30
     sheetType: MD.Enum.BottomSheetModal
     dismissOnDragDown: true
     maxSheetWidth: 560
-
-    onClosed: released(control)
 
     ColumnLayout {
         width: control.sheetWidth
@@ -44,9 +40,7 @@ MD.BottomSheet {
                 id: playlistDisplayChip
 
                 Layout.maximumWidth: 280
-                text: control.sheetState.selectedDisplay
-                    ? control.sheetState.displayLabel(control.sheetState.selectedDisplay)
-                    : qsTr("No displays")
+                text: control.sheetState.selectedDisplay ? control.sheetState.displayLabel(control.sheetState.selectedDisplay) : qsTr("No displays")
                 enabled: control.sheetState.playDisplays.length > 0
                 icon.name: MD.Token.icon.monitor
                 trailingIconName: MD.Token.icon.expand_more
@@ -63,9 +57,7 @@ MD.BottomSheet {
                     contentDelegate: MD.MenuItem {
                         required property var modelData
                         text: control.sheetState.displayLabel(modelData)
-                        icon.name: String(modelData.id) === String(control.sheetState.selectedDisplayId)
-                            ? MD.Token.icon.check
-                            : " "
+                        icon.name: String(modelData.id) === String(control.sheetState.selectedDisplayId) ? MD.Token.icon.check : " "
                         onClicked: {
                             control.sheetState.selectDisplay(modelData);
                             playlistDisplayMenu.close();
@@ -89,8 +81,7 @@ MD.BottomSheet {
             Layout.preferredHeight: 96
             Layout.leftMargin: 16
             Layout.rightMargin: 16
-            visible: !control.sheetState.listLoading
-                  && control.sheetState.playlists.length === 0
+            visible: !control.sheetState.listLoading && control.sheetState.playlists.length === 0
             text: qsTr("No playlists found")
             typescale: MD.Token.typescale.body_large
             color: MD.Token.color.on_surface_variant
@@ -119,16 +110,10 @@ MD.BottomSheet {
                 radius: 12
                 text: modelData.name || qsTr("Untitled")
                 supportText: qsTr("%n wallpaper(s)", "", (modelData.entryIds || []).length)
-                heightMode: playingDisplayLabels.length > 0
-                    ? MD.Enum.ListItemThreeLine
-                    : MD.Enum.ListItemTwoLine
-                readonly property bool playingOnSelectedDisplay:
-                    control.sheetState.playlistIsPlayingOnSelectedDisplay(modelData)
-                readonly property var playingDisplayLabels:
-                    control.sheetState.playlistDisplayLabels(modelData)
-                mdState.backgroundColor: control.sheetState.isEditingPlaylist(modelData)
-                    ? MD.Token.color.primary_container
-                    : MD.Token.color.surface_container
+                heightMode: playingDisplayLabels.length > 0 ? MD.Enum.ListItemThreeLine : MD.Enum.ListItemTwoLine
+                readonly property bool playingOnSelectedDisplay: control.sheetState.playlistIsPlayingOnSelectedDisplay(modelData)
+                readonly property var playingDisplayLabels: control.sheetState.playlistDisplayLabels(modelData)
+                mdState.backgroundColor: control.sheetState.isEditingPlaylist(modelData) ? MD.Token.color.primary_container : MD.Token.color.surface_container
 
                 below: Item {
                     implicitHeight: tagFlow.visible ? tagFlow.implicitHeight + 6 : 0
@@ -159,12 +144,9 @@ MD.BottomSheet {
                     spacing: 4
 
                     MD.BusyIconButton {
-                        enabled: control.sheetState.selectedDisplay !== null
-                              && !control.sheetState.playlistPlaybackMutation.querying
+                        enabled: control.sheetState.selectedDisplay !== null && !control.sheetState.playlistPlaybackMutation.querying
                         busy: control.sheetState.playlistPlaybackMutation.querying
-                        icon.name: playlistSheetItem.playingOnSelectedDisplay
-                            ? MD.Token.icon.pause
-                            : MD.Token.icon.play_arrow
+                        icon.name: playlistSheetItem.playingOnSelectedDisplay ? MD.Token.icon.pause : MD.Token.icon.play_arrow
                         onClicked: control.sheetState.togglePlayback(playlistSheetItem.modelData)
                         MD.ToolTip.visible: hovered && !enabled
                         MD.ToolTip.text: qsTr("No displays")

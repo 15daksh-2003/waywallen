@@ -18,6 +18,8 @@ MD.Page {
     property var sortOptions: []
     property int sortIndex: 0
     property var discoverTweakSheet: null
+    property var infoPresentation: null
+    property var managePresentation: null
     readonly property var discoverTweakState: discoverTweakStateLoader.item
 
     Loader {
@@ -103,15 +105,12 @@ MD.Page {
 
     function tweakSettingsCategory(id) {
         const source = String(id ?? "");
-        return source.length > 0
-            ? "DiscoverView/" + encodeURIComponent(source) + "/Tweak"
-            : "DiscoverView";
+        return source.length > 0 ? "DiscoverView/" + encodeURIComponent(source) + "/Tweak" : "DiscoverView";
     }
 
     function loadDiscoverTweakState(id) {
         const category = tweakSettingsCategory(id);
-        if (discoverTweakStateLoader.item
-                && discoverTweakStateLoader.settingsCategory === category)
+        if (discoverTweakStateLoader.item && discoverTweakStateLoader.settingsCategory === category)
             return;
         if (isSheetActive(discoverTweakSheet))
             discoverTweakSheet.close();
@@ -142,9 +141,7 @@ MD.Page {
         }
         const canBrowse = currentSourceLoginAction() === null;
         searchQuery.browsingEnabled = canBrowse;
-        const candidateTags = sourceChanged
-            ? discoverState.filterValuesFor(id)
-            : searchQuery.tags;
+        const candidateTags = sourceChanged ? discoverState.filterValuesFor(id) : searchQuery.tags;
         const nextTags = pruneTags(candidateTags, s.filters ?? []);
         if (!sameList(searchQuery.tags, nextTags))
             searchQuery.tags = nextTags;
@@ -184,7 +181,9 @@ MD.Page {
     function openInfo() {
         if (!root.detailRow)
             return;
-        MD.Util.showPopup('waywallen.ui/PagePopup', {
+        if (root.infoPresentation?.active)
+            return;
+        root.infoPresentation = root.Window.window.presentPopup('waywallen.ui/PagePopup', {
             source: 'waywallen.ui/RemoteInfoPage',
             props: {
                 itemStore: detailStore,
@@ -193,7 +192,7 @@ MD.Page {
                 remoteCapability: root.sourceCapability(root.detailRow.sourceId),
                 remoteHint: root.sourceRemoteHint(root.detailRow.sourceId)
             }
-        }, root.Window.window);
+        });
     }
 
     function setDetailSubscription(subscribed) {
@@ -213,18 +212,23 @@ MD.Page {
     }
 
     function isSheetActive(sheet) {
-        return !!sheet && (sheet.opened || sheet.entering);
+        return !!sheet && (sheet.status === MD.PopupPresentation.Opening || sheet.status === MD.PopupPresentation.Open);
     }
 
     function ensureDiscoverTweakSheet() {
         if (!root.discoverTweakState)
             return null;
-        if (root.discoverTweakSheet)
+        if (root.discoverTweakSheet?.active)
             return root.discoverTweakSheet;
 
-        const sheet = MD.Util.showPopup(discoverTweakSheetComponent, {}, root.Window.window);
-        if (sheet)
+        const sheet = root.Window.window.presentPopup(discoverTweakSheetComponent);
+        if (sheet.active) {
             root.discoverTweakSheet = sheet;
+            sheet.activeChanged.connect(sheet, function () {
+                if (!sheet.active)
+                    root.releaseDiscoverTweakSheet(sheet);
+            });
+        }
         return sheet;
     }
 
@@ -234,13 +238,11 @@ MD.Page {
     }
 
     function toggleDiscoverTweakSheet() {
-        if (root.isSheetActive(root.discoverTweakSheet)) {
+        if (root.discoverTweakSheet?.active) {
             root.discoverTweakSheet.close();
             return;
         }
-        const sheet = root.ensureDiscoverTweakSheet();
-        if (sheet && !sheet.opened && !sheet.entering)
-            sheet.open();
+        root.ensureDiscoverTweakSheet();
     }
 
     MD.Action {
@@ -313,8 +315,7 @@ MD.Page {
         const actions = c && c.actions ? c.actions : [];
         for (let i = 0; i < actions.length; ++i) {
             const kind = Number(actions[i].kind);
-            if ((kind === 2 || kind === 3) && actions[i].requiredForBrowsing === true
-                && (actions[i].visible === undefined || actions[i].visible))
+            if ((kind === 2 || kind === 3) && actions[i].requiredForBrowsing === true && (actions[i].visible === undefined || actions[i].visible))
                 return actions[i];
         }
         return null;
@@ -324,13 +325,15 @@ MD.Page {
         const c = root.currentSourceConfig();
         if (!c)
             return;
-        MD.Util.showPopup('waywallen.ui/PagePopup', {
+        if (root.managePresentation?.active)
+            return;
+        root.managePresentation = root.Window.window.presentPopup('waywallen.ui/PagePopup', {
             source: 'waywallen.ui/RemoteManagePage',
             props: {
                 sourceId: c.id,
                 displayName: (c.displayName && c.displayName.length > 0) ? c.displayName : (c.name || c.id)
             }
-        }, root.Window.window);
+        });
     }
 
     W.RemoteSearchQuery {
@@ -341,6 +344,7 @@ MD.Page {
         id: m_filter_dialog
         parent: T.Overlay.overlay
         anchors.centerIn: parent
+        popupWindow: root.Window.window
         filters: root.sourceFilters(root.sourceId)
         selectedValues: searchQuery.tags
         onApply: function (values) {
@@ -579,18 +583,14 @@ MD.Page {
                             return label.length > 0 ? label : qsTr("Log in to %1").arg(root.sourceName(root.sourceId));
                         }
                         readonly property string loginDescription: {
-                            const browseDescription = loginAction
-                                ? String(loginAction.browseDescription ?? "").trim() : "";
+                            const browseDescription = loginAction ? String(loginAction.browseDescription ?? "").trim() : "";
                             if (browseDescription.length > 0)
                                 return browseDescription;
-                            const description = loginAction
-                                ? String(loginAction.description ?? "").trim() : "";
-                            return description.length > 0
-                                ? description : qsTr("Log in to start browsing.");
+                            const description = loginAction ? String(loginAction.description ?? "").trim() : "";
+                            return description.length > 0 ? description : qsTr("Log in to start browsing.");
                         }
                         readonly property string loginButtonLabel: {
-                            const label = loginAction
-                                ? String(loginAction.browseButtonLabel ?? "").trim() : "";
+                            const label = loginAction ? String(loginAction.browseButtonLabel ?? "").trim() : "";
                             return label.length > 0 ? label : qsTr("Log in");
                         }
 
@@ -638,8 +638,7 @@ MD.Page {
 
                         MD.Label {
                             Layout.alignment: Qt.AlignHCenter
-                            visible: !searchQuery.querying && !parent.needsLogin
-                                     && searchQuery.errorText.length === 0
+                            visible: !searchQuery.querying && !parent.needsLogin && searchQuery.errorText.length === 0
                             text: qsTr("No wallpapers found")
                             typescale: MD.Token.typescale.body_large
                             color: MD.Token.color.on_surface_variant
@@ -661,10 +660,8 @@ MD.Page {
             contentItem: RemoteDetailPanel {
                 item: root.detailRow
                 details: detailsQuery
-                remoteCapability: root.detailRow
-                    ? root.sourceCapability(root.detailRow.sourceId) : 0
-                remoteHint: root.detailRow
-                    ? root.sourceRemoteHint(root.detailRow.sourceId) : ""
+                remoteCapability: root.detailRow ? root.sourceCapability(root.detailRow.sourceId) : 0
+                remoteHint: root.detailRow ? root.sourceRemoteHint(root.detailRow.sourceId) : ""
                 downloadState: Number(root.detailRow?.acquisitionState ?? 0)
                 subscriptionState: Number(root.detailRow?.acquisitionState ?? 0)
 
@@ -691,9 +688,6 @@ MD.Page {
         W.TweakSheet {
             popupParent: root
             tweak: root.discoverTweakState
-            onReleased: function (sheet) {
-                root.releaseDiscoverTweakSheet(sheet);
-            }
         }
     }
 }

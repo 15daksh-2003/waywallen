@@ -24,6 +24,23 @@ MD.ApplicationWindow {
     width: 948
     title: "waywallen"
 
+    readonly property alias popupPresenter: m_popup_presenter
+
+    function presentPopup(source, properties) {
+        const presentation = m_popup_presenter.present(source, properties || {});
+        presentation.failed.connect(presentation, function (error) {
+            W.Global.toastError(error);
+        });
+        if (presentation.status === MD.PopupPresentation.Error)
+            W.Global.toastError(presentation.errorString);
+        return presentation;
+    }
+
+    MD.PopupPresenter {
+        id: m_popup_presenter
+        host: win.contentItem
+    }
+
     // Persist the window size across runs. Wayland doesn't let clients
     // restore their own position, so only width/height are stored.
     Settings {
@@ -44,8 +61,7 @@ MD.ApplicationWindow {
     Shortcut {
         sequence: "Ctrl+P"
         context: Qt.ApplicationShortcut
-        enabled: W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready
-                 && !globalPauseToggleQuery.querying
+        enabled: W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready && !globalPauseToggleQuery.querying
         onActivated: globalPauseToggleQuery.reload()
     }
 
@@ -61,12 +77,23 @@ MD.ApplicationWindow {
     readonly property bool isCompact: MD.MProp.size.isCompact
 
     readonly property var pageModel: [
-        { icon: MD.Token.icon.wallpaper, name: qsTr("Wallpapers") },
-        { icon: MD.Token.icon.explore, name: qsTr("Discover") },
-        { icon: MD.Token.icon.monitor, name: qsTr("Displays") },
-        { icon: MD.Token.icon.monitor_heart, name: qsTr("Status") }
+        {
+            icon: MD.Token.icon.wallpaper,
+            name: qsTr("Wallpapers")
+        },
+        {
+            icon: MD.Token.icon.explore,
+            name: qsTr("Discover")
+        },
+        {
+            icon: MD.Token.icon.monitor,
+            name: qsTr("Displays")
+        },
+        {
+            icon: MD.Token.icon.monitor_heart,
+            name: qsTr("Status")
+        }
     ]
-
 
     readonly property var pageComponents: ["qrc:/waywallen/ui/qml/page/WallpaperPage.qml", "qrc:/waywallen/ui/qml/page/DiscoverPage.qml", "qrc:/waywallen/ui/qml/page/DisplaysPage.qml", "qrc:/waywallen/ui/qml/page/StatusPage.qml"]
 
@@ -155,7 +182,8 @@ MD.ApplicationWindow {
                     autoExpand: W.Global.sidebarAutoExpand
                     // The rail only re-syncs `expanded` on window-class
                     // changes; apply a runtime toggle of the setting at once.
-                    onAutoExpandChanged: if (autoExpand) expanded = useEmbed
+                    onAutoExpandChanged: if (autoExpand)
+                        expanded = useEmbed
 
                     onClicked: function (model) {
                         win.currentPage = model.index;
@@ -226,9 +254,14 @@ MD.ApplicationWindow {
                                 icon.name: MD.Token.icon.extension
                                 iconStyle: m_rail.useLarge ? MD.Enum.IconAndText : MD.Enum.IconOnly
                                 text: qsTr("Plugins")
-                                onClicked: MD.Util.showPopup('waywallen.ui/PagePopup', {
-                                    source: 'waywallen.ui/PluginManagePage'
-                                }, win)
+                                property var presentation: null
+                                onClicked: {
+                                    if (presentation?.active)
+                                        return;
+                                    presentation = win.presentPopup('waywallen.ui/PagePopup', {
+                                        source: 'waywallen.ui/PluginManagePage'
+                                    });
+                                }
                             }
 
                             MD.RailItem {
@@ -238,9 +271,14 @@ MD.ApplicationWindow {
                                 icon.name: MD.Token.icon.settings
                                 iconStyle: m_rail.useLarge ? MD.Enum.IconAndText : MD.Enum.IconOnly
                                 text: qsTr("Settings")
-                                onClicked: MD.Util.showPopup('waywallen.ui/PagePopup', {
-                                    source: 'waywallen.ui/SettingsPage'
-                                }, win)
+                                property var presentation: null
+                                onClicked: {
+                                    if (presentation?.active)
+                                        return;
+                                    presentation = win.presentPopup('waywallen.ui/PagePopup', {
+                                        source: 'waywallen.ui/SettingsPage'
+                                    });
+                                }
                             }
 
                             MD.RailItem {
@@ -250,9 +288,14 @@ MD.ApplicationWindow {
                                 checked: false
                                 icon.name: MD.Token.icon.info
                                 text: qsTr("About")
-                                onClicked: MD.Util.showPopup('waywallen.ui/PagePopup', {
-                                    source: 'waywallen.ui/AboutPage'
-                                }, win)
+                                property var presentation: null
+                                onClicked: {
+                                    if (presentation?.active)
+                                        return;
+                                    presentation = win.presentPopup('waywallen.ui/PagePopup', {
+                                        source: 'waywallen.ui/AboutPage'
+                                    });
+                                }
                             }
                         }
                     }

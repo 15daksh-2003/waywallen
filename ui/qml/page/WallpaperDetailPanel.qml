@@ -12,14 +12,13 @@ Item {
     property var fallbackWallpaper: null
     property bool showApply: true
     property bool unsubscribeAccepted: false
+    property var infoPresentation: null
 
     onWallpaperIdChanged: unsubscribeAccepted = false
 
     signal back
 
-    readonly property var wp: (wallpaperGetQuery.wallpaper?.id_proto ?? "") !== ""
-                              ? wallpaperGetQuery.wallpaper
-                              : root.fallbackWallpaper
+    readonly property var wp: (wallpaperGetQuery.wallpaper?.id_proto ?? "") !== "" ? wallpaperGetQuery.wallpaper : root.fallbackWallpaper
 
     property var applyTargetIds: []
     property int rendererIndex: 0
@@ -28,11 +27,17 @@ Item {
     readonly property var kRotationValues: [1, 2, 3, 4]
     readonly property var kRotationLabels: ["0°", "90°", "180°", "270°"]
     readonly property bool wallpaperLayoutOverrideSet: root.wp?.wallpaperLayoutOverrideSet ?? false
-    readonly property var wallpaperLayout: wallpaperLayoutOverrideSet
-        ? (root.wp?.wallpaperLayoutOverride ?? ({}))
-        : ({ fillmode: 3, locationX: 50, locationY: 50, rotation: 1, locationSet: true })
+    readonly property var wallpaperLayout: wallpaperLayoutOverrideSet ? (root.wp?.wallpaperLayoutOverride ?? ({})) : ({
+            fillmode: 3,
+            locationX: 50,
+            locationY: 50,
+            rotation: 1,
+            locationSet: true
+        })
 
-    function isTargetAll() { return root.applyTargetIds.length === 0; }
+    function isTargetAll() {
+        return root.applyTargetIds.length === 0;
+    }
     function fillmodeIndex(value) {
         const i = root.kFillModeValues.indexOf(value);
         return i < 0 ? 2 : i;
@@ -61,8 +66,10 @@ Item {
     function toggleTarget(id) {
         const next = root.applyTargetIds.slice();
         const i = next.indexOf(id);
-        if (i >= 0) next.splice(i, 1);
-        else next.push(id);
+        if (i >= 0)
+            next.splice(i, 1);
+        else
+            next.push(id);
         root.applyTargetIds = next;
     }
     function infoSizeOf(w) {
@@ -71,13 +78,15 @@ Item {
     function openInfo() {
         if (!root.wp)
             return;
-        MD.Util.showPopup('waywallen.ui/PagePopup', {
+        if (root.infoPresentation?.active)
+            return;
+        root.infoPresentation = root.Window.window.presentPopup('waywallen.ui/PagePopup', {
             source: 'waywallen.ui/WallpaperInfoPage',
             props: {
                 wallpaper: root.wp,
                 sizeBytes: root.infoSizeOf(root.wp)
             }
-        }, root.Window.window);
+        });
     }
     function containerFolderUrl(resource) {
         let path = String(resource || "");
@@ -98,9 +107,11 @@ Item {
 
     readonly property var rendererCandidates: {
         const w = root.wp;
-        if (!w) return [];
+        if (!w)
+            return [];
         const t = w.wpType || "";
-        if (!t) return [];
+        if (!t)
+            return [];
         const list = (pluginQuery.renderers || []).filter(r => (r.types || []).indexOf(t) >= 0);
         list.sort((a, b) => (b.priority || 0) - (a.priority || 0));
         return list;
@@ -112,8 +123,12 @@ Item {
         wallpaperId: root.wallpaperId
     }
 
-    W.WallpaperListQuery { id: m_list }
-    W.RendererPluginListQuery { id: pluginQuery }
+    W.WallpaperListQuery {
+        id: m_list
+    }
+    W.RendererPluginListQuery {
+        id: pluginQuery
+    }
     W.WallpaperApplyQuery {
         id: applyQuery
         forwardError: false
@@ -139,9 +154,7 @@ Item {
             if (applyQuery.status === 2) {
                 wallpaperGetQuery.reload();
             } else if (applyQuery.status === 3) {
-                const message = applyQuery.error && applyQuery.error.length > 0
-                    ? applyQuery.error
-                    : qsTr("Apply failed");
+                const message = applyQuery.error && applyQuery.error.length > 0 ? applyQuery.error : qsTr("Apply failed");
                 W.Global.toastError(message);
             }
         }
@@ -165,9 +178,7 @@ Item {
         }
         function onStatusChanged() {
             if (removeQuery.status === 3) {
-                const message = removeQuery.error && removeQuery.error.length > 0
-                    ? removeQuery.error
-                    : qsTr("Remove failed");
+                const message = removeQuery.error && removeQuery.error.length > 0 ? removeQuery.error : qsTr("Remove failed");
                 W.Action.toast(message, 6000, 1, null);
             }
         }
@@ -181,9 +192,7 @@ Item {
         }
         function onStatusChanged() {
             if (unsubscribeQuery.status === 3) {
-                const message = unsubscribeQuery.error && unsubscribeQuery.error.length > 0
-                    ? unsubscribeQuery.error
-                    : qsTr("Unsubscribe failed");
+                const message = unsubscribeQuery.error && unsubscribeQuery.error.length > 0 ? unsubscribeQuery.error : qsTr("Unsubscribe failed");
                 W.Action.toast(message, 6000, 1, null);
             }
         }
@@ -231,7 +240,10 @@ Item {
 
         function queue(key, value, reset) {
             const e = entries;
-            e[key] = { value: value, reset: reset };
+            e[key] = {
+                value: value,
+                reset: reset
+            };
             entries = e;
             if (!restartFlush())
                 entries = {};
@@ -281,8 +293,10 @@ Item {
         busy: applyQuery.querying
         enabled: (W.App.displayManager.displays || []).length > 0
         onTriggered: {
-            if (busy) return;
-            if (!root.wp) return;
+            if (busy)
+                return;
+            if (!root.wp)
+                return;
             applyQuery.wallpaper = root.wp;
             applyQuery.displayIds = root.applyTargetIds;
             if (root.rendererCandidates.length >= 2) {
@@ -300,8 +314,10 @@ Item {
         text: qsTr("Apply via desktop portal")
         busy: portalApplyQuery.querying
         onTriggered: {
-            if (busy) return;
-            if (!root.wp) return;
+            if (busy)
+                return;
+            if (!root.wp)
+                return;
             portalApplyQuery.wallpaperId = root.wallpaperId;
             portalApplyQuery.reload();
         }
@@ -348,9 +364,7 @@ Item {
         text: root.unsubscribeAccepted ? qsTr("Unsubscribed") : qsTr("Unsubscribe")
         icon.name: "unsubscribe"
         busy: unsubscribeQuery.querying
-        enabled: (root.wp?.supportsItemUnsubscribe ?? false)
-                 && !root.unsubscribeAccepted
-                 && (root.wp?.id_proto ?? "") !== ""
+        enabled: (root.wp?.supportsItemUnsubscribe ?? false) && !root.unsubscribeAccepted && (root.wp?.id_proto ?? "") !== ""
         onTriggered: {
             if (busy)
                 return;
@@ -358,17 +372,9 @@ Item {
         }
     }
 
-    readonly property MD.Action activeApplyAction:
-        ((root.wp?.wpType ?? "") === "image"
-            && (W.App.displayManager.displays || []).length === 0)
-        ? applyViaPortalAction : applyAction
+    readonly property MD.Action activeApplyAction: ((root.wp?.wpType ?? "") === "image" && (W.App.displayManager.displays || []).length === 0) ? applyViaPortalAction : applyAction
 
-    readonly property list<MD.Action> detailActions:
-        (root.wp?.supportsItemUnsubscribe ?? false)
-        ? [unsubscribeAction, openContainerFolderAction, infoAction, closeAction]
-        : (root.wp?.supportsItemRemove ?? false)
-        ? [removeAction, openContainerFolderAction, infoAction, closeAction]
-        : [openContainerFolderAction, infoAction, closeAction]
+    readonly property list<MD.Action> detailActions: (root.wp?.supportsItemUnsubscribe ?? false) ? [unsubscribeAction, openContainerFolderAction, infoAction, closeAction] : (root.wp?.supportsItemRemove ?? false) ? [removeAction, openContainerFolderAction, infoAction, closeAction] : [openContainerFolderAction, infoAction, closeAction]
 
     ColumnLayout {
         anchors.fill: parent
@@ -376,13 +382,13 @@ Item {
 
         MD.VerticalListView {
             id: m_detail_view
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    clip: true
-                    model: propertyModel
-                    spacing: 8
-                    leftMargin: 16
-                    rightMargin: 16
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            clip: true
+            model: propertyModel
+            spacing: 8
+            leftMargin: 16
+            rightMargin: 16
             topMargin: 0
             bottomMargin: 8
 
@@ -394,9 +400,7 @@ Item {
                     Layout.fillWidth: true
                     Layout.preferredHeight: visible ? 200 : 0
                     Layout.topMargin: 4
-                    visible: (root.wp?.preview ?? "") !== ""
-                             || (["video", "image"].indexOf(root.wp?.wpType ?? "") >= 0
-                                 && (root.wp?.resource ?? "") !== "")
+                    visible: (root.wp?.preview ?? "") !== "" || (["video", "image"].indexOf(root.wp?.wpType ?? "") >= 0 && (root.wp?.resource ?? "") !== "")
                     source: root.wp?.preview ?? ""
                     resource: root.wp?.resource ?? ""
                     wpType: root.wp?.wpType ?? ""
@@ -438,9 +442,7 @@ Item {
                     columnSpacing: 12
                     rowSpacing: 4
 
-                    readonly property real sizeBytes: m_list.data && root.wp
-                                                      ? m_list.data.sizeOf(root.wp)
-                                                      : 0
+                    readonly property real sizeBytes: m_list.data && root.wp ? m_list.data.sizeOf(root.wp) : 0
                     readonly property bool hasPath: (root.wp?.resource ?? "") !== ""
                     readonly property bool hasResolution: Number(root.wp?.width ?? 0) > 0 && Number(root.wp?.height ?? 0) > 0
                     readonly property bool hasSize: sizeBytes > 0
@@ -452,10 +454,14 @@ Item {
                     }
                     function formatSize(b) {
                         let v = Number(b ?? 0);
-                        if (!(v > 0)) return "";
+                        if (!(v > 0))
+                            return "";
                         const u = ["B", "KB", "MB", "GB", "TB"];
                         let i = 0;
-                        while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+                        while (v >= 1024 && i < u.length - 1) {
+                            v /= 1024;
+                            i++;
+                        }
                         return v.toFixed(i === 0 ? 0 : 1) + " " + u[i];
                     }
 
@@ -538,7 +544,9 @@ Item {
                     property bool expanded: false
                     readonly property int collapsedLines: 3
 
-                    MD.Divider { Layout.fillWidth: true }
+                    MD.Divider {
+                        Layout.fillWidth: true
+                    }
 
                     RowLayout {
                         Layout.fillWidth: true
@@ -575,7 +583,9 @@ Item {
                     spacing: 8
                     visible: (root.wp?.id_proto ?? "") !== ""
 
-                    MD.Divider { Layout.fillWidth: true }
+                    MD.Divider {
+                        Layout.fillWidth: true
+                    }
 
                     RowLayout {
                         Layout.fillWidth: true
@@ -625,11 +635,7 @@ Item {
                                 model: root.kFillModeLabels
                                 currentIndex: root.fillmodeIndex(m_wallpaper_layout_flow.currentFillmode)
                                 onActivated: idx => {
-                                    root.applyWallpaperLayout(
-                                        root.kFillModeValues[idx],
-                                        m_wallpaper_layout_flow.currentX,
-                                        m_wallpaper_layout_flow.currentY,
-                                        m_wallpaper_layout_flow.currentRotation);
+                                    root.applyWallpaperLayout(root.kFillModeValues[idx], m_wallpaper_layout_flow.currentX, m_wallpaper_layout_flow.currentY, m_wallpaper_layout_flow.currentRotation);
                                 }
                             }
                         }
@@ -656,11 +662,7 @@ Item {
                                 valueText: root.clampPercent(value)
                                 valueMaxText: root.clampPercent(to).toString()
                                 valueHorizontalAlignment: Text.AlignLeft
-                                onMoved: root.applyWallpaperLayout(
-                                    m_wallpaper_layout_flow.currentFillmode,
-                                    value,
-                                    wallpaperVerticalLocation.value,
-                                    m_wallpaper_layout_flow.currentRotation)
+                                onMoved: root.applyWallpaperLayout(m_wallpaper_layout_flow.currentFillmode, value, wallpaperVerticalLocation.value, m_wallpaper_layout_flow.currentRotation)
                             }
                         }
 
@@ -686,11 +688,7 @@ Item {
                                 valueText: root.clampPercent(value)
                                 valueMaxText: root.clampPercent(to).toString()
                                 valueHorizontalAlignment: Text.AlignLeft
-                                onMoved: root.applyWallpaperLayout(
-                                    m_wallpaper_layout_flow.currentFillmode,
-                                    wallpaperHorizontalLocation.value,
-                                    value,
-                                    m_wallpaper_layout_flow.currentRotation)
+                                onMoved: root.applyWallpaperLayout(m_wallpaper_layout_flow.currentFillmode, wallpaperHorizontalLocation.value, value, m_wallpaper_layout_flow.currentRotation)
                             }
                         }
 
@@ -709,11 +707,7 @@ Item {
                                 size: MD.Enum.XS
 
                                 function applyRotation(rotationValue) {
-                                    root.applyWallpaperLayout(
-                                        m_wallpaper_layout_flow.currentFillmode,
-                                        m_wallpaper_layout_flow.currentX,
-                                        m_wallpaper_layout_flow.currentY,
-                                        rotationValue);
+                                    root.applyWallpaperLayout(m_wallpaper_layout_flow.currentFillmode, m_wallpaper_layout_flow.currentX, m_wallpaper_layout_flow.currentY, rotationValue);
                                 }
                                 function isChecked(rotationValue) {
                                     return m_wallpaper_layout_flow.currentRotation === rotationValue;
@@ -773,9 +767,7 @@ Item {
                     MD.IconButton {
                         icon.name: MD.Token.icon.restart_alt
                         mdState.size: MD.Enum.XS
-                        enabled: m_prop_section.section === "Properties"
-                            ? propertyModel.hasPredefinedPropertyOverrides
-                            : propertyModel.hasUserPropertyOverrides
+                        enabled: m_prop_section.section === "Properties" ? propertyModel.hasPredefinedPropertyOverrides : propertyModel.hasUserPropertyOverrides
                         onClicked: {
                             if (m_prop_section.section === "Properties")
                                 propertyModel.resetPredefinedProperties();
@@ -795,13 +787,13 @@ Item {
                 required property string type
                 required property string section
                 required property string kind
-                required property bool   supported
-                required property real   minVal
-                required property real   maxVal
+                required property bool supported
+                required property real minVal
+                required property real maxVal
                 required property string currentValue
-                required property bool   hasAlpha
-                required property var    optionLabels
-                required property var    optionValues
+                required property bool hasAlpha
+                required property var optionLabels
+                required property var optionValues
 
                 width: ListView.view ? (ListView.view.width - ListView.view.leftMargin - ListView.view.rightMargin) : 0
                 spacing: 2

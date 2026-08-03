@@ -14,7 +14,8 @@ MD.Popup {
     property var pendingRequest: null
     required property string source
 
-    readyForOpen: false
+    MD.Presentation.ready: false
+    readyForOpen: MD.Presentation.ready
     parent: T.Overlay.overlay
     width: Math.min(400, parent.width)
     height: Math.min(implicitHeight, parent.height * 0.8)
@@ -53,17 +54,17 @@ MD.Popup {
             return null;
 
         const attach = item.T.StackView;
-        attach.removed.connect(request, function() {
+        attach.removed.connect(request, function () {
             request.release();
         });
-        attach.statusChanged.connect(item, function() {
+        attach.statusChanged.connect(item, function () {
             if (!attach || !m_stack)
                 return;
 
             if (attach.status === T.StackView.Active) {
                 m_stack.lastImplicitHeight = 0;
             } else if (attach.status === T.StackView.Deactivating) {
-                m_stack.lastImplicitHeight = Qt.binding(function() {
+                m_stack.lastImplicitHeight = Qt.binding(function () {
                     return item.implicitHeight;
                 });
             }
@@ -74,8 +75,8 @@ MD.Popup {
 
     function rejectInitialRequest(request, error) {
         root.initialRequest = null;
-        W.Global.toastError(error);
         request.release();
+        root.MD.Presentation.fail(error);
         root.rejectOpen(error);
     }
 
@@ -92,13 +93,12 @@ MD.Popup {
                 return;
             }
 
-            Qt.callLater(function() {
+            Qt.callLater(function () {
                 if (m_stack.currentItem === item)
-                    root.readyForOpen = true;
+                    root.MD.Presentation.ready = true;
             });
         } else if (request.status === MD.PoolRequest.Error) {
-            root.rejectInitialRequest(request,
-                                      request.errorString || qsTr("Failed to load page"));
+            root.rejectInitialRequest(request, request.errorString || qsTr("Failed to load page"));
         }
     }
 
@@ -125,8 +125,7 @@ MD.Popup {
     function pushPage(source, properties) {
         if (root.pendingRequest)
             root.pendingRequest.cancel();
-        root.pendingRequest = m_pool.request(source, properties, null,
-                                             MD.Pool.AsynchronousIfNested);
+        root.pendingRequest = m_pool.request(source, properties, null, MD.Pool.AsynchronousIfNested);
         root.handlePendingRequest();
     }
 

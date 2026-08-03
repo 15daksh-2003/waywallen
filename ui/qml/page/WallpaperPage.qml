@@ -41,9 +41,7 @@ MD.Page {
         }
         onStatusChanged: {
             if (selectionRemoveQuery.status === 3) {
-                const message = selectionRemoveQuery.error && selectionRemoveQuery.error.length > 0
-                    ? selectionRemoveQuery.error
-                    : qsTr("Remove failed");
+                const message = selectionRemoveQuery.error && selectionRemoveQuery.error.length > 0 ? selectionRemoveQuery.error : qsTr("Remove failed");
                 W.Action.toast(message, 6000, 1, null);
             }
         }
@@ -278,16 +276,25 @@ MD.Page {
         icon.name: MD.Token.icon.filter_list
         text: qsTr("Filters")
         checked: wallpaperQuery.hasActiveFilters
-        onTriggered: MD.Util.showPopup(filterDialogComponent, {}, root.Window.window)
+        onTriggered: {
+            if (root.filterPresentation?.active)
+                return;
+            root.filterPresentation = root.Window.window.presentPopup(filterDialogComponent);
+        }
     }
 
     MD.Action {
         id: sourcesAction
         icon.name: MD.Token.icon.hard_drive
         text: qsTr("Library Manager")
-        onTriggered: MD.Util.showPopup('waywallen.ui/PagePopup', {
-            source: 'waywallen.ui/SourceManagePage'
-        }, root.Window.window)
+        property var presentation: null
+        onTriggered: {
+            if (presentation?.active)
+                return;
+            presentation = root.Window.window.presentPopup('waywallen.ui/PagePopup', {
+                source: 'waywallen.ui/SourceManagePage'
+            });
+        }
     }
 
     MD.Action {
@@ -365,8 +372,7 @@ MD.Page {
         id: filterDialogComponent
 
         W.WallpaperFilterDialog {
-            id: dynamicFilterDialog
-            parent: T.Overlay.overlay
+            popupWindow: root.Window.window
             model: wallpaperFilterModel
             supportedTypes: pluginQuery.supportedTypes || []
             skipTypes: wallpaperQuery.skipTypes
@@ -503,6 +509,8 @@ MD.Page {
     property var wallpaperSelectSheet: null
     property var wallpaperTweakSheet: null
     property var playlistListSheet: null
+    property var filterPresentation: null
+    Component.onDestruction: root.filterPresentation?.cancel()
     readonly property int selectionSheetReserve: wallpaperSelectSheetRelay.currentComponent ? 360 : 160
     readonly property int selectedWallpaperCount: root.currentWallpaperSelect ? root.currentWallpaperSelect.selectedCount : 0
     readonly property int removableSelectedWallpaperCount: root.currentWallpaperSelect ? root.currentWallpaperSelect.removableSelectedCount : 0
@@ -535,12 +543,20 @@ MD.Page {
     }
 
     function ensureWallpaperSelectSheet() {
-        if (root.wallpaperSelectSheet)
+        if (root.wallpaperSelectSheet?.active)
             return root.wallpaperSelectSheet;
 
-        const sheet = MD.Util.showPopup(wallpaperSelectSheetComponent, {}, root.Window.window);
-        if (sheet)
+        const sheet = root.Window.window.presentPopup(wallpaperSelectSheetComponent);
+        if (sheet.active) {
             root.wallpaperSelectSheet = sheet;
+            sheet.activeChanged.connect(sheet, function () {
+                if (!sheet.active) {
+                    root.releaseWallpaperSelectSheet(sheet);
+                    if (root.selectionActionSheetActive)
+                        root.syncWallpaperSelectSheet();
+                }
+            });
+        }
         return sheet;
     }
 
@@ -552,25 +568,22 @@ MD.Page {
             root.wallpaperSelectSheet = null;
     }
 
-    function destroyWallpaperSelectSheet(sheet) {
-        const target = sheet || root.wallpaperSelectSheet;
-        root.releaseWallpaperSelectSheet(target);
-        Qt.callLater(function () {
-            target.destroy();
-        });
-    }
-
     function isSheetActive(sheet) {
-        return !!sheet && (sheet.opened || sheet.entering);
+        return !!sheet && (sheet.status === MD.PopupPresentation.Opening || sheet.status === MD.PopupPresentation.Open);
     }
 
     function ensureWallpaperTweakSheet() {
-        if (root.wallpaperTweakSheet)
+        if (root.wallpaperTweakSheet?.active)
             return root.wallpaperTweakSheet;
 
-        const sheet = MD.Util.showPopup(wallpaperTweakSheetComponent, {}, root.Window.window);
-        if (sheet)
+        const sheet = root.Window.window.presentPopup(wallpaperTweakSheetComponent);
+        if (sheet.active) {
             root.wallpaperTweakSheet = sheet;
+            sheet.activeChanged.connect(sheet, function () {
+                if (!sheet.active)
+                    root.releaseWallpaperTweakSheet(sheet);
+            });
+        }
         return sheet;
     }
 
@@ -580,12 +593,17 @@ MD.Page {
     }
 
     function ensurePlaylistListSheet() {
-        if (root.playlistListSheet)
+        if (root.playlistListSheet?.active)
             return root.playlistListSheet;
 
-        const sheet = MD.Util.showPopup(playlistListSheetComponent, {}, root.Window.window);
-        if (sheet)
+        const sheet = root.Window.window.presentPopup(playlistListSheetComponent);
+        if (sheet.active) {
             root.playlistListSheet = sheet;
+            sheet.activeChanged.connect(sheet, function () {
+                if (!sheet.active)
+                    root.releasePlaylistListSheet(sheet);
+            });
+        }
         return sheet;
     }
 
@@ -598,19 +616,12 @@ MD.Page {
         root.configureWallpaperSelectSheetDefault();
 
         if (root.selectionActionSheetActive) {
-            const sheet = root.ensureWallpaperSelectSheet();
-            if (sheet && !sheet.opened && !sheet.entering)
-                sheet.open();
+            root.ensureWallpaperSelectSheet();
             return;
         }
 
-        if (root.wallpaperSelectSheet && (root.wallpaperSelectSheet.opened || root.wallpaperSelectSheet.entering)) {
+        if (root.wallpaperSelectSheet?.active)
             root.wallpaperSelectSheet.close();
-            return;
-        }
-
-        if (root.wallpaperSelectSheet && !root.wallpaperSelectSheet.closing)
-            root.destroyWallpaperSelectSheet(root.wallpaperSelectSheet);
     }
 
     function adoptWallpaperSelect(storage) {
@@ -760,28 +771,24 @@ MD.Page {
     }
 
     function togglePlaylistListSheet() {
-        if (root.isSheetActive(root.playlistListSheet)) {
+        if (root.playlistListSheet?.active) {
             root.playlistListSheet.close();
             return;
         }
-        if (root.isSheetActive(root.wallpaperTweakSheet))
+        if (root.wallpaperTweakSheet?.active)
             root.wallpaperTweakSheet.close();
         playlistListQuery.reload();
-        const sheet = root.ensurePlaylistListSheet();
-        if (sheet && !sheet.opened && !sheet.entering)
-            sheet.open();
+        root.ensurePlaylistListSheet();
     }
 
     function toggleWallpaperTweakSheet() {
-        if (root.isSheetActive(root.wallpaperTweakSheet)) {
+        if (root.wallpaperTweakSheet?.active) {
             root.wallpaperTweakSheet.close();
             return;
         }
-        if (root.isSheetActive(root.playlistListSheet))
+        if (root.playlistListSheet?.active)
             root.playlistListSheet.close();
-        const sheet = root.ensureWallpaperTweakSheet();
-        if (sheet && !sheet.opened && !sheet.entering)
-            sheet.open();
+        root.ensureWallpaperTweakSheet();
     }
 
     function isEditingPlaylist(playlist) {
@@ -1079,10 +1086,7 @@ MD.Page {
 
                         ColumnLayout {
                             spacing: 16
-                            readonly property bool showLibraryHint: !wallpaperQuery.querying
-                                && !wallpaperQuery.hasActiveFilters
-                                && wallpaperQuery.searchText.trim().length === 0
-                                && W.App.libraryManager.count === 0
+                            readonly property bool showLibraryHint: !wallpaperQuery.querying && !wallpaperQuery.hasActiveFilters && wallpaperQuery.searchText.trim().length === 0 && W.App.libraryManager.count === 0
                             readonly property int libraryHintSize: 22
                             readonly property string libraryHintIcon: '<font face="' + MD.Token.font.icon_family + '" style="font-size: ' + libraryHintSize + 'px;">' + sourcesAction.icon.name + '</font>'
 
@@ -1160,9 +1164,6 @@ MD.Page {
             popupParent: root
             relay: wallpaperSelectSheetRelay
             currentWallpaperSelect: root.currentWallpaperSelect
-            onReleased: function (sheet) {
-                root.releaseWallpaperSelectSheet(sheet);
-            }
         }
     }
 
@@ -1172,9 +1173,6 @@ MD.Page {
         W.TweakSheet {
             popupParent: root
             tweak: wallpaperTweakState
-            onReleased: function (sheet) {
-                root.releaseWallpaperTweakSheet(sheet);
-            }
         }
     }
 
@@ -1184,9 +1182,6 @@ MD.Page {
         W.PlaylistListSheet {
             popupParent: root
             sheetState: playlistListSheetState
-            onReleased: function (sheet) {
-                root.releasePlaylistListSheet(sheet);
-            }
         }
     }
 

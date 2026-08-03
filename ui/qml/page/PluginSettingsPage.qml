@@ -5,10 +5,8 @@ import QtQuick.Templates as T
 import Qcm.Material as MD
 import waywallen.ui as W
 
-// Renderer/plugin settings, hosted inside PagePopup. Opened via
-// MD.Util.showPopup('waywallen.ui/PagePopup', { source:
-// 'waywallen.ui/PluginSettingsPage', props: {...} }). Props are an
-// open-time snapshot; edits stay pending until Apply.
+// Renderer/plugin settings hosted inside PagePopup. Props are an open-time
+// snapshot; edits stay pending until Apply.
 MD.Page {
     id: root
     title: qsTr("Configure %1").arg(displayName.length > 0 ? displayName : pluginName)
@@ -24,7 +22,7 @@ MD.Page {
     W.PluginActionQuery {
         id: actionQuery
         forwardError: false
-        onCompleted: function(accepted, error, sessionId) {
+        onCompleted: function (accepted, error, sessionId) {
             if (!accepted)
                 W.Global.toastError(error.length > 0 ? error : qsTr("Action failed"));
         }

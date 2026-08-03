@@ -10,8 +10,6 @@ MD.BottomSheet {
     required property var relay
     property var currentWallpaperSelect: null
 
-    signal released(var sheet)
-
     parent: popupParent
     anchors.fill: parent
     z: 20
@@ -20,8 +18,6 @@ MD.BottomSheet {
     dismissOnDragDown: false
     collapsedHeight: 48
 
-    onClosed: released(control)
-
     ColumnLayout {
         width: control.sheetWidth
         spacing: 0
@@ -29,9 +25,7 @@ MD.BottomSheet {
         MD.SheetActionBar {
             Layout.fillWidth: true
             delegateWidth: 88
-            actions: control.currentWallpaperSelect
-                ? (control.currentWallpaperSelect.actions || [])
-                : []
+            actions: control.currentWallpaperSelect ? (control.currentWallpaperSelect.actions || []) : []
         }
 
         MD.Divider {

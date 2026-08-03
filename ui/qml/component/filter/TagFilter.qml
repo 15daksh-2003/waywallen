@@ -10,6 +10,7 @@ import Qcm.Material as MD
 // daemon matches "has any" (IS) / "has none" (IS_NOT) against item tags.
 QtObject {
     id: root
+    required property var popupWindow
     property var filter: null
     property var values: []
     property int condition: WC.StringCondition.STRING_CONDITION_UNSPECIFIED
@@ -21,9 +22,18 @@ QtObject {
     property bool _syncing: false
 
     readonly property var conditionModel: [
-        { name: qsTr("has any"),  value: WC.StringCondition.STRING_CONDITION_IS },
-        { name: qsTr("has none"), value: WC.StringCondition.STRING_CONDITION_IS_NOT },
-        { name: qsTr("any"),      value: WC.StringCondition.STRING_CONDITION_UNSPECIFIED }
+        {
+            name: qsTr("has any"),
+            value: WC.StringCondition.STRING_CONDITION_IS
+        },
+        {
+            name: qsTr("has none"),
+            value: WC.StringCondition.STRING_CONDITION_IS_NOT
+        },
+        {
+            name: qsTr("any"),
+            value: WC.StringCondition.STRING_CONDITION_UNSPECIFIED
+        }
     ]
 
     function toggleValue(tag) {
@@ -39,6 +49,7 @@ QtObject {
     readonly property Component valueDelegate: Component {
         Flow {
             id: valueFlow
+            property var tagPresentation: null
             visible: root.condition !== WC.StringCondition.STRING_CONDITION_UNSPECIFIED
             width: root.availableWidth > 0 ? root.availableWidth : implicitWidth
             spacing: 6
@@ -53,14 +64,17 @@ QtObject {
 
             MD.SmallIconButton {
                 icon.name: MD.Token.icon.edit
-                onClicked: MD.Util.showPopup(tagDialogComponent, {}, valueFlow)
+                onClicked: {
+                    if (valueFlow.tagPresentation?.active)
+                        return;
+                    valueFlow.tagPresentation = root.popupWindow.presentPopup(tagDialogComponent);
+                }
             }
 
             Component {
                 id: tagDialogComponent
 
                 W.TagPickerDialog {
-                    id: dynamicTagDialog
                     allTags: root.allTags
                     selected: root.values
                     onCommit: function (tags) {
@@ -68,6 +82,8 @@ QtObject {
                     }
                 }
             }
+
+            Component.onDestruction: valueFlow.tagPresentation?.cancel()
         }
     }
 

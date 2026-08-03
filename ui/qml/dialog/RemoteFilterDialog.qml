@@ -8,16 +8,16 @@ import Qcm.Material as MD
 MD.Dialog {
     id: root
     title: qsTr("Filters")
+    required property var popupWindow
     horizontalPadding: 0
     implicitWidth: Math.min(440, parent ? parent.width - 48 : 440)
     standardButtons: T.Dialog.Close
 
     property var filters: []
     property var selectedValues: []
-    property var valueDialog: null
+    property var valuePresentation: null
     property var activeFilter: null
     property var confirmationFilter: null
-    readonly property Item popupParent: T.Overlay.overlay ?? root.parent
 
     signal apply(var values)
 
@@ -89,10 +89,21 @@ MD.Dialog {
         return Math.max(0, filterValues(filter).indexOf(selected[0]) + 1);
     }
     function openValueDialog(filter) {
-        if (valueDialog && (valueDialog.opened || valueDialog.entering || valueDialog.closing))
+        if (root.valuePresentation?.active)
             return;
-        activeFilter = filter;
-        valueDialog = MD.Util.showPopup(valueDialogComponent, {}, root.popupParent);
+        root.activeFilter = filter;
+        const presentation = root.popupWindow.presentPopup(valueDialogComponent);
+        root.valuePresentation = presentation;
+        presentation.activeChanged.connect(presentation, function () {
+            if (!presentation.active && root.valuePresentation === presentation) {
+                root.valuePresentation = null;
+                root.activeFilter = null;
+            }
+        });
+        if (!presentation.active) {
+            root.valuePresentation = null;
+            root.activeFilter = null;
+        }
     }
     function requestToggle(filter, enabled) {
         if (!enabled) {
@@ -108,22 +119,18 @@ MD.Dialog {
         setFilterValues(filter, filterValues(filter).slice(0, 1));
     }
 
+    onClosed: root.valuePresentation?.close()
+    Component.onDestruction: root.valuePresentation?.cancel()
+
     Component {
         id: valueDialogComponent
 
         W.TagPickerDialog {
-            id: dynamicValueDialog
             dialogTitle: root.activeFilter ? String(root.activeFilter.title ?? "") : qsTr("Select values")
             allTags: root.filterValues(root.activeFilter)
             selected: root.selectedFor(root.activeFilter)
             onCommit: function (values) {
                 root.setFilterValues(root.activeFilter, values);
-            }
-            onClosed: {
-                if (root.valueDialog === dynamicValueDialog) {
-                    root.valueDialog = null;
-                    root.activeFilter = null;
-                }
             }
         }
     }
@@ -253,8 +260,7 @@ MD.Dialog {
                             id: toggleControl
                             checked: root.hasFilterValue(filterRow.modelData)
                             onClicked: {
-                                root.requestToggle(filterRow.modelData,
-                                                   !root.hasFilterValue(filterRow.modelData));
+                                root.requestToggle(filterRow.modelData, !root.hasFilterValue(filterRow.modelData));
                                 checked = Qt.binding(() => root.hasFilterValue(filterRow.modelData));
                             }
                         }
@@ -271,8 +277,7 @@ MD.Dialog {
         anchors.centerIn: T.Overlay.overlay
         standardButtons: T.Dialog.Cancel | T.Dialog.Ok
         onAccepted: {
-            root.setFilterValues(root.confirmationFilter,
-                                 root.filterValues(root.confirmationFilter).slice(0, 1));
+            root.setFilterValues(root.confirmationFilter, root.filterValues(root.confirmationFilter).slice(0, 1));
             root.confirmationFilter = null;
         }
         onRejected: root.confirmationFilter = null

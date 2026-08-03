@@ -11,8 +11,6 @@ MD.BottomSheet {
     required property Item popupParent
     required property var tweak
 
-    signal released(var sheet)
-
     parent: popupParent
     anchors.fill: parent
     z: 25
@@ -20,8 +18,6 @@ MD.BottomSheet {
     dim: false
     dismissOnDragDown: true
     maxSheetWidth: 560
-
-    onClosed: released(control)
 
     ColumnLayout {
         width: control.sheetWidth
@@ -96,7 +92,6 @@ MD.BottomSheet {
                         typescale: MD.Token.typescale.label_medium
                         color: MD.Token.color.on_surface_variant
                     }
-
                 }
 
                 W.ValueSlider {

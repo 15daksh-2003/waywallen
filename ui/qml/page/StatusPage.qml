@@ -17,23 +17,35 @@ MD.Page {
         MD.Action {
             icon.name: MD.Token.icon.extension
             text: qsTr("Plugins")
-            onTriggered: MD.Util.showPopup('waywallen.ui/PagePopup', {
-                source: 'waywallen.ui/PluginManagePage'
-            }, root.Window.window)
+            property var presentation: null
+            onTriggered: {
+                if (!presentation?.active)
+                    presentation = root.Window.window.presentPopup('waywallen.ui/PagePopup', {
+                        source: 'waywallen.ui/PluginManagePage'
+                    });
+            }
         },
         MD.Action {
             icon.name: MD.Token.icon.settings
             text: qsTr("Settings")
-            onTriggered: MD.Util.showPopup('waywallen.ui/PagePopup', {
-                source: 'waywallen.ui/SettingsPage'
-            }, root.Window.window)
+            property var presentation: null
+            onTriggered: {
+                if (!presentation?.active)
+                    presentation = root.Window.window.presentPopup('waywallen.ui/PagePopup', {
+                        source: 'waywallen.ui/SettingsPage'
+                    });
+            }
         },
         MD.Action {
             icon.name: MD.Token.icon.info
             text: qsTr("About")
-            onTriggered: MD.Util.showPopup('waywallen.ui/PagePopup', {
-                source: 'waywallen.ui/AboutPage'
-            }, root.Window.window)
+            property var presentation: null
+            onTriggered: {
+                if (!presentation?.active)
+                    presentation = root.Window.window.presentPopup('waywallen.ui/PagePopup', {
+                        source: 'waywallen.ui/AboutPage'
+                    });
+            }
         }
     ]
 
@@ -267,8 +279,7 @@ MD.Page {
                             text: qsTr("Mute all")
                             checkable: false
                             checked: W.Notify.globalMuted
-                            enabled: W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready
-                                     && !globalMuteSetQuery.querying
+                            enabled: W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready && !globalMuteSetQuery.querying
                             onClicked: {
                                 globalMuteSetQuery.muted = !W.Notify.globalMuted;
                                 globalMuteSetQuery.reload();
@@ -279,8 +290,7 @@ MD.Page {
                             text: qsTr("Pause all")
                             checkable: false
                             checked: W.Notify.globalPaused
-                            enabled: W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready
-                                     && !globalPauseSetQuery.querying
+                            enabled: W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready && !globalPauseSetQuery.querying
                             onClicked: {
                                 globalPauseSetQuery.paused = !W.Notify.globalPaused;
                                 globalPauseSetQuery.reload();
@@ -314,8 +324,7 @@ MD.Page {
                             radius: 12
                             text: root.rendererLabel(modelData)
                             font.family: "monospace"
-                            supportText: (modelData.status || "") + " · " + (modelData.fps || 0) + " fps"
-                                + (modelData.textureWidth ? " · " + modelData.textureWidth + "×" + modelData.textureHeight : "")
+                            supportText: (modelData.status || "") + " · " + (modelData.fps || 0) + " fps" + (modelData.textureWidth ? " · " + modelData.textureWidth + "×" + modelData.textureHeight : "")
                             leader: MD.Icon {
                                 name: modelData.status === "paused" ? MD.Token.icon.pause : MD.Token.icon.play_arrow
                                 size: 24
@@ -384,6 +393,7 @@ MD.Page {
                             required property var modelData
 
                             readonly property bool hasSettings: (modelData.settings && modelData.settings.length > 0) === true
+                            property var settingsPresentation: null
 
                             width: ListView.view.width
                             radius: 12
@@ -404,9 +414,11 @@ MD.Page {
                                     visible: componentItem.hasSettings
                                     icon.name: MD.Token.icon.settings
                                     onClicked: {
+                                        if (componentItem.settingsPresentation?.active)
+                                            return;
                                         const name = componentItem.modelData.name;
                                         const p = settingsQuery.plugins ? settingsQuery.plugins[name] : undefined;
-                                        MD.Util.showPopup('waywallen.ui/PagePopup', {
+                                        componentItem.settingsPresentation = root.Window.window.presentPopup('waywallen.ui/PagePopup', {
                                             source: 'waywallen.ui/PluginSettingsPage',
                                             props: {
                                                 pluginName: name,
@@ -415,7 +427,7 @@ MD.Page {
                                                 currentGlobal: settingsQuery.global || ({}),
                                                 currentValues: p || ({})
                                             }
-                                        }, root.Window.window);
+                                        });
                                     }
                                 }
                             }
