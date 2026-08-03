@@ -1,6 +1,5 @@
 module;
 #include "QExtra/macro_qt.hpp"
-#include <QtCore/QStringList>
 
 #ifdef Q_MOC_RUN
 #    include "waywallen/query/wallpaper_query.moc"

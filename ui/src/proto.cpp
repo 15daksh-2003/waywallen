@@ -1,9 +1,7 @@
-module;
-#include <QString>
-#include <QVariant>
-
 module waywallen;
 import :proto;
+
+using namespace Qt::Literals::StringLiterals;
 
 namespace waywallen
 {
@@ -13,36 +11,30 @@ auto runtimeConditionsFromPb(const QList<proto::RuntimeCondition>& conditions) -
     for (const auto& condition : conditions) {
         QString kind;
         switch (condition.kind()) {
-        case proto::RuntimeConditionKind::RUNTIME_CONDITION_LOADING:
-            kind = QStringLiteral("loading");
-            break;
-        case proto::RuntimeConditionKind::RUNTIME_CONDITION_WAITING:
-            kind = QStringLiteral("waiting");
-            break;
-        case proto::RuntimeConditionKind::RUNTIME_CONDITION_HANG:
-            kind = QStringLiteral("hang");
-            break;
-        default: kind = QStringLiteral("issue"); break;
+        case proto::RuntimeConditionKind::RUNTIME_CONDITION_LOADING: kind = u"loading"_s; break;
+        case proto::RuntimeConditionKind::RUNTIME_CONDITION_WAITING: kind = u"waiting"_s; break;
+        case proto::RuntimeConditionKind::RUNTIME_CONDITION_HANG: kind = u"hang"_s; break;
+        default: kind = u"issue"_s; break;
         }
         QString origin;
         switch (condition.origin()) {
         case proto::RuntimeConditionOrigin::RUNTIME_CONDITION_ORIGIN_RENDERER:
-            origin = QStringLiteral("renderer");
+            origin = u"renderer"_s;
             break;
         case proto::RuntimeConditionOrigin::RUNTIME_CONDITION_ORIGIN_DISPLAY:
-            origin = QStringLiteral("display");
+            origin = u"display"_s;
             break;
         case proto::RuntimeConditionOrigin::RUNTIME_CONDITION_ORIGIN_RELEASE:
-            origin = QStringLiteral("release");
+            origin = u"release"_s;
             break;
-        default: origin = QStringLiteral("unknown"); break;
+        default: origin = u"unknown"_s; break;
         }
         QVariantMap value;
-        value[QStringLiteral("kind")]              = kind;
-        value[QStringLiteral("origin")]            = origin;
-        value[QStringLiteral("reason")]            = condition.reason();
-        value[QStringLiteral("relatedRendererId")] = condition.relatedRendererId();
-        value[QStringLiteral("relatedDisplayId")] =
+        value[u"kind"_s]              = kind;
+        value[u"origin"_s]            = origin;
+        value[u"reason"_s]            = condition.reason();
+        value[u"relatedRendererId"_s] = condition.relatedRendererId();
+        value[u"relatedDisplayId"_s] =
             QVariant::fromValue<qulonglong>(condition.relatedDisplayId());
         out.append(value);
     }

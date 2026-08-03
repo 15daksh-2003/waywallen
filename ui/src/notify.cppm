@@ -1,5 +1,4 @@
 module;
-#include <QHash>
 #include "QExtra/macro_qt.hpp"
 
 #ifdef Q_MOC_RUN

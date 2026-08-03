@@ -1,6 +1,5 @@
 module;
 #include "waywallen/query/wallpaper_query.moc.h"
-#include <qtprotobuftypes.h>
 #include <algorithm>
 #undef assert
 #include <rstd/macro.hpp>

@@ -1,7 +1,5 @@
 module;
 #include "QExtra/macro_qt.hpp"
-#include <QtCore/qnamespace.h>
-#include <QtCore/qtypes.h>
 
 #ifdef Q_MOC_RUN
 #    include "waywallen/model/user_property_model.moc"

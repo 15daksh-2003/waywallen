@@ -1,6 +1,5 @@
 module;
 #include "QExtra/macro_qt.hpp"
-#include <QtCore/QVariant>
 
 #ifdef Q_MOC_RUN
 #    include "waywallen/query/remote_query.moc"

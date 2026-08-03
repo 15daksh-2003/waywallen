@@ -1,7 +1,5 @@
 module;
 #include "waywallen/action.moc.h"
-#include <QtGui/QClipboard>
-#include <QtGui/QGuiApplication>
 
 module waywallen;
 import :action;

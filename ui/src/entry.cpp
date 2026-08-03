@@ -1,7 +1,5 @@
 module;
 
-#include <QCommandLineParser>
-#include <QGuiApplication>
 #include <QtQml/QQmlExtensionPlugin>
 
 Q_IMPORT_QML_PLUGIN(waywallen_uiPlugin)

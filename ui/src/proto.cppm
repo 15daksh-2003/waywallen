@@ -1,8 +1,8 @@
 module;
 #include "control.qpb.h"
-#include <QVariantList>
 
 export module waywallen:proto;
+export import qextra;
 
 namespace proto = waywallen::control::v1;
 

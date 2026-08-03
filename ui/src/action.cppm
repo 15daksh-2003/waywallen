@@ -1,6 +1,5 @@
 module;
 #include "QExtra/macro_qt.hpp"
-#include <QtCore/QPointer>
 
 #ifdef Q_MOC_RUN
 #    include "waywallen/action.moc"

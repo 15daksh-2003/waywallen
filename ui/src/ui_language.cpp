@@ -1,10 +1,5 @@
 module;
-
-#include <QCoreApplication>
-#include <QDir>
-#include <QLibraryInfo>
-#include <QSettings>
-#include <QVariantMap>
+#include <QtCore/QDebug>
 
 module waywallen;
 import :ui_language;

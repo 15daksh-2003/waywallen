@@ -1,6 +1,5 @@
 module;
 #include "control.qpb.h"
-#include <QString>
 
 export module waywallen:msg.backend_msg;
 export import :proto;

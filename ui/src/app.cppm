@@ -3,8 +3,6 @@ module;
 #    include "waywallen/app.moc"
 #endif
 
-#include <QEvent>
-#include <QVariantList>
 #include "QExtra/macro_qt.hpp"
 
 export module waywallen:app;

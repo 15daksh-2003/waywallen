@@ -5,13 +5,6 @@ module;
 #    include "waywallen/daemon_dbus.moc"
 #endif
 
-#include <QtCore/QVariantList>
-#include <QtCore/QVariantMap>
-#include <QtDBus/QDBusConnection>
-#include <QtDBus/QDBusMessage>
-#include <QtDBus/QDBusServiceWatcher>
-#include <QtDBus/QDBusVariant>
-
 export module waywallen:daemon_dbus;
 export import qextra;
 

@@ -1,6 +1,5 @@
 module;
 #include "QExtra/macro_qt.hpp"
-#include <QtCore/QChar>
 
 #ifdef Q_MOC_RUN
 #    include "waywallen/model/remote_model.moc"

@@ -5,8 +5,6 @@ module waywallen;
 import :util;
 import :app;
 
-using namespace Qt::ops;
-
 namespace waywallen
 {
 

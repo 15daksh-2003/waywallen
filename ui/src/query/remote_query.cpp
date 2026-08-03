@@ -2,7 +2,6 @@ module;
 #include "waywallen/query/remote_query.moc.h"
 #undef assert
 #include <rstd/macro.hpp>
-#include <QtCore/QVariant>
 
 module waywallen;
 import :query.remote;

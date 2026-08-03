@@ -1,14 +1,7 @@
 module;
 
-#include <QGuiApplication>
-#include <QList>
-#include <QLocale>
-#include <QString>
-#include <QTranslator>
-#include <QVariantList>
-#include <QtQml/QQmlApplicationEngine>
-
 export module waywallen:ui_language;
+export import qextra;
 import rstd;
 
 using rstd::boxed::Box;

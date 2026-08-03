@@ -1,9 +1,5 @@
 module;
 #include "QExtra/macro_qt.hpp"
-#include <QtCore/QStringList>
-#include <QtCore/QVariant>
-#include <QtCore/QVariantList>
-#include <QtCore/qtypes.h>
 
 #ifdef Q_MOC_RUN
 #    include "waywallen/model/wallpaper_select_storage.moc"
