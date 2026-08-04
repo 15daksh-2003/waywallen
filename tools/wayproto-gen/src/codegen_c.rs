@@ -10,6 +10,7 @@ pub fn emit_header(p: &Protocol) -> String {
     emit_header_prologue(&mut out, p);
     emit_common_types(&mut out);
     emit_named_types(&mut out, &p.enums, &p.structs);
+    emit_named_free_decls(&mut out, &p.structs);
     emit_opcodes(&mut out, p, inbound);
     for m in &p.requests {
         emit_message_struct(&mut out, m, inbound);
@@ -20,6 +21,24 @@ pub fn emit_header(p: &Protocol) -> String {
     emit_function_decls(&mut out, p, inbound);
     emit_header_epilogue(&mut out);
     out
+}
+
+fn emit_named_free_decls(out: &mut String, structs: &[NamedStruct]) {
+    if structs.is_empty() {
+        return;
+    }
+    writeln!(out, "/* --- Named value lifecycle --- */").unwrap();
+    writeln!(out).unwrap();
+    for item in structs {
+        let type_name = named_c_type(&item.name);
+        writeln!(
+            out,
+            "void waywallen_{}_free({type_name} *value);",
+            item.name
+        )
+        .unwrap();
+    }
+    writeln!(out).unwrap();
 }
 
 pub fn emit_types_header(p: &Protocol) -> String {
@@ -927,6 +946,13 @@ fn emit_named_helpers(out: &mut String, structs: &[NamedStruct]) {
         }
         writeln!(out, "}}").unwrap();
         writeln!(out).unwrap();
+
+        writeln!(out, "void waywallen_{}_free({c_name} *value) {{", item.name).unwrap();
+        writeln!(out, "    if (!value) return;").unwrap();
+        writeln!(out, "    free_{}(value);", item.name).unwrap();
+        writeln!(out, "    memset(value, 0, sizeof(*value));").unwrap();
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
     }
 }
 
@@ -1034,7 +1060,14 @@ fn emit_message_impl(out: &mut String, m: &Message, kind: MsgKind) {
         FdSpec::Product(fields) => {
             let expr = fields
                 .iter()
-                .map(|f| format!("(uint64_t)m->{}", c_field_name(f)))
+                .map(|path| {
+                    let field_path = path
+                        .split('.')
+                        .map(c_field_name)
+                        .collect::<Vec<_>>()
+                        .join(".");
+                    format!("(uint64_t)m->{field_path}")
+                })
                 .collect::<Vec<_>>()
                 .join(" * ");
             writeln!(out, "    return (uint32_t)({expr});").unwrap();
@@ -1269,9 +1302,31 @@ mod tests {
         assert!(h.contains("typedef struct waywallen_config"));
         assert!(h.contains("bool enabled;"));
         assert!(h.contains("waywallen_config_t config;"));
+        assert!(h.contains("void waywallen_config_free(waywallen_config_t *value);"));
+
+        let source = emit_source(&p);
+        assert!(source.contains("void waywallen_config_free(waywallen_config_t *value)"));
 
         let types = emit_types_header(&p);
         assert!(types.contains("waywallen_config_t"));
         assert!(!types.contains("ww_evt_configured_t"));
+    }
+
+    #[test]
+    fn nested_struct_fields_drive_fd_count() {
+        let p = parse(
+            r#"<protocol name="t" version="1">
+                <struct name="pool">
+                    <field name="count" type="u32"/>
+                    <field name="planes" type="u32"/>
+                </struct>
+                <event name="bind" opcode="1">
+                    <arg name="pool" type="pool"/>
+                    <fds count_expr="pool.count * pool.planes"/>
+                </event>
+            </protocol>"#,
+        );
+        let source = emit_source(&p);
+        assert!(source.contains("(uint64_t)m->pool.count * (uint64_t)m->pool.planes"));
     }
 }

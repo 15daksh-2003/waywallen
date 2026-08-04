@@ -294,15 +294,16 @@ static int alloc_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_layout_
     vk_state_t* st = (vk_state_t*)pool->backend_data;
     if (slot_index >= WW_POOL_MAX_SLOTS) return -EINVAL;
 
-    const ww_pool_directive_t* d = &pool->cur;
+    const waywallen_buffer_directive_t* d      = &pool->cur.directive;
+    const waywallen_extent_t*           extent = &pool->cur.extent;
 
     /* For the COMPAT_LINEAR path we override the modifier to LINEAR
      * regardless of what the directive says, since GPU_LINEAR is the
      * Vulkan analogue of `gbm_bo_create(USE_LINEAR)`. For OPTIMIZED
      * paths we use whatever modifier the daemon picked. */
-    bool linear_path =
-        (d->category == WW_PATH_COMPAT_LINEAR) || (d->mem_source == WW_MEM_SRC_GPU_LINEAR);
-    uint64_t modifiers[1] = { linear_path ? DRM_FORMAT_MOD_LINEAR : d->modifier };
+    bool     linear_path  = (d->path == WAYWALLEN_BUFFER_PATH_COMPAT_LINEAR) ||
+                            (d->memory_source == WAYWALLEN_BUFFER_MEMORY_SOURCE_GPU_LINEAR);
+    uint64_t modifiers[1] = { linear_path ? DRM_FORMAT_MOD_LINEAR : d->format.modifier };
 
     VkImageDrmFormatModifierListCreateInfoEXT mod_list = { 0 };
     mod_list.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT;
@@ -314,11 +315,11 @@ static int alloc_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_layout_
     ext_img.pNext                           = &mod_list;
     ext_img.handleTypes                     = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
 
-    VkFormat vk_format = fourcc_to_vk_format(d->fourcc);
+    VkFormat vk_format = fourcc_to_vk_format(d->format.fourcc);
     if (vk_format == VK_FORMAT_UNDEFINED) {
         ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
                        "ww_pool[vulkan]: directive fourcc 0x%08x has no VkFormat mapping",
-                       d->fourcc);
+                       d->format.fourcc);
         return -EINVAL;
     }
 
@@ -327,8 +328,8 @@ static int alloc_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_layout_
     img_ci.pNext             = &ext_img;
     img_ci.imageType         = VK_IMAGE_TYPE_2D;
     img_ci.format            = vk_format;
-    img_ci.extent.width      = d->width;
-    img_ci.extent.height     = d->height;
+    img_ci.extent.width      = extent->width;
+    img_ci.extent.height     = extent->height;
     img_ci.extent.depth      = 1;
     img_ci.mipLevels         = 1;
     img_ci.arrayLayers       = 1;
@@ -446,7 +447,7 @@ static int alloc_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_layout_
     mod_props.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_PROPERTIES_EXT;
     st->vkGetImageDrmFormatModifierPropertiesEXT(st->device, image, &mod_props);
 
-    uint32_t plane_count = linear_path ? 1u : d->plane_count;
+    uint32_t plane_count = linear_path ? 1u : d->format.plane_count;
     if (plane_count == 0) plane_count = 1;
     if (plane_count > WW_POOL_MAX_PLANES) {
         ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
@@ -484,9 +485,9 @@ static int alloc_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_layout_
                    "ww_pool[vulkan]: alloc_slot[%u] %ux%u fourcc=0x%08x "
                    "mod=0x%016llx linear=%d planes=%u mem_size=%llu",
                    slot_index,
-                   d->width,
-                   d->height,
-                   d->fourcc,
+                   extent->width,
+                   extent->height,
+                   d->format.fourcc,
                    (unsigned long long)mod_props.drmFormatModifier,
                    linear_path ? 1 : 0,
                    plane_count,

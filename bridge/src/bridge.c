@@ -318,23 +318,24 @@ int ww_bridge_recv_frame(int sock, uint16_t* opcode_out, uint8_t** body_out, siz
         return rc;                                                                           \
     } while (0)
 
-int ww_bridge_send_ready(int sock, uint32_t drm_render_major, uint32_t drm_render_minor) {
-    ww_evt_ready_t m   = { 0 };
-    m.drm_render_major = drm_render_major;
-    m.drm_render_minor = drm_render_minor;
+int ww_bridge_send_ready(int sock, const waywallen_drm_node_t* drm_node) {
+    if (! drm_node) return -EINVAL;
+    ww_evt_ready_t m = { .drm_node = *drm_node };
     WW_SEND_EVENT(sock, WW_EVT_READY, ww_evt_ready_encode, &m, NULL, 0);
 }
 
-int ww_bridge_send_bind_buffers(int sock, const ww_evt_bind_buffers_t* m, const int* fds) {
-    if (! m || ! fds) return -EINVAL;
-    uint32_t n_fds = ww_evt_bind_buffers_expected_fds(m);
+int ww_bridge_send_bind_buffers(int sock, const waywallen_buffer_pool_t* pool, const int* fds) {
+    if (! pool || ! fds) return -EINVAL;
+    ww_evt_bind_buffers_t m     = { .pool = *pool };
+    uint32_t              n_fds = ww_evt_bind_buffers_expected_fds(&m);
     if (n_fds > WW_BRIDGE_MAX_FDS) return -E2BIG;
-    WW_SEND_EVENT(sock, WW_EVT_BIND_BUFFERS, ww_evt_bind_buffers_encode, m, fds, n_fds);
+    WW_SEND_EVENT(sock, WW_EVT_BIND_BUFFERS, ww_evt_bind_buffers_encode, &m, fds, n_fds);
 }
 
-int ww_bridge_send_frame_ready(int sock, const ww_evt_frame_ready_t* m, int sync_fd) {
-    if (! m || sync_fd < 0) return -EINVAL;
-    WW_SEND_EVENT(sock, WW_EVT_FRAME_READY, ww_evt_frame_ready_encode, m, &sync_fd, 1);
+int ww_bridge_send_frame_ready(int sock, const waywallen_frame_t* frame, int sync_fd) {
+    if (! frame || sync_fd < 0) return -EINVAL;
+    ww_evt_frame_ready_t m = { .frame = *frame };
+    WW_SEND_EVENT(sock, WW_EVT_FRAME_READY, ww_evt_frame_ready_encode, &m, &sync_fd, 1);
 }
 
 int ww_bridge_send_release_syncobj(int sock, int release_syncobj_fd) {
@@ -345,67 +346,29 @@ int ww_bridge_send_release_syncobj(int sock, int release_syncobj_fd) {
         sock, WW_EVT_RELEASE_SYNCOBJ, ww_evt_release_syncobj_encode, &m, &release_syncobj_fd, 1);
 }
 
-int ww_bridge_send_format_caps(int sock, const ww_evt_format_caps_t* m) {
-    if (! m) return -EINVAL;
-    WW_SEND_EVENT(sock, WW_EVT_FORMAT_CAPS, ww_evt_format_caps_encode, m, NULL, 0);
+int ww_bridge_send_format_caps(int sock, const waywallen_producer_capabilities_t* capabilities) {
+    if (! capabilities) return -EINVAL;
+    ww_evt_format_caps_t m = { .capabilities = *capabilities };
+    WW_SEND_EVENT(sock, WW_EVT_FORMAT_CAPS, ww_evt_format_caps_encode, &m, NULL, 0);
 }
 
-int ww_bridge_send_format_caps_v2(int sock, const ww_format_caps_caller_t* m) {
-    if (! m) return -EINVAL;
-
-    /* Pack the two 16-byte UUIDs as 4 LE u32s each. memcpy preserves
-     * byte order so on little-endian Linux the wire bytes are
-     * identical to the input. NULL → 16 zero bytes. */
-    uint32_t dev_uuid_w[4] = { 0, 0, 0, 0 };
-    uint32_t drv_uuid_w[4] = { 0, 0, 0, 0 };
-    if (m->device_uuid) memcpy(dev_uuid_w, m->device_uuid, 16);
-    if (m->driver_uuid) memcpy(drv_uuid_w, m->driver_uuid, 16);
-
-    ww_evt_format_caps_t e;
-    memset(&e, 0, sizeof(e));
-    e.fourccs.count      = m->fourccs_count;
-    e.fourccs.data       = (uint32_t*)m->fourccs;
-    e.mod_counts.count   = m->mod_counts_count;
-    e.mod_counts.data    = (uint32_t*)m->mod_counts;
-    e.modifiers.count    = m->modifiers_count;
-    e.modifiers.data     = (uint64_t*)m->modifiers;
-    e.plane_counts.count = m->plane_counts_count;
-    e.plane_counts.data  = (uint32_t*)m->plane_counts;
-    e.device_uuid.count  = 4;
-    e.device_uuid.data   = dev_uuid_w;
-    e.driver_uuid.count  = 4;
-    e.driver_uuid.data   = drv_uuid_w;
-    e.drm_render_major   = m->drm_render_major;
-    e.drm_render_minor   = m->drm_render_minor;
-    e.mem_hints          = m->mem_hints;
-    e.sync_caps          = m->sync_caps;
-    e.color_caps         = m->color_caps;
-    e.extent_max_w       = m->extent_max_w;
-    e.extent_max_h       = m->extent_max_h;
-    return ww_bridge_send_format_caps(sock, &e);
-}
-
-int ww_bridge_send_bind_failed(int sock, uint32_t fourcc, uint64_t modifier, uint32_t reason,
-                               const char* message) {
-    ww_evt_bind_failed_t m;
-    memset(&m, 0, sizeof(m));
-    m.fourcc   = fourcc;
-    m.modifier = modifier;
-    m.reason   = reason;
-    m.message  = (char*)(message ? message : "");
+int ww_bridge_send_bind_failed(int sock, const waywallen_bind_failure_t* failure) {
+    if (! failure) return -EINVAL;
+    ww_evt_bind_failed_t m = { .failure = *failure };
     WW_SEND_EVENT(sock, WW_EVT_BIND_FAILED, ww_evt_bind_failed_encode, &m, NULL, 0);
 }
 
 int ww_bridge_send_error(int sock, const char* msg) {
     if (! msg) return -EINVAL;
     ww_evt_error_t m;
-    m.msg = (char*)msg; /* encoder doesn't mutate */
+    m.message = (char*)msg; /* encoder doesn't mutate */
     WW_SEND_EVENT(sock, WW_EVT_ERROR, ww_evt_error_encode, &m, NULL, 0);
 }
 
-int ww_bridge_send_report_state(int sock, const ww_evt_report_state_t* m) {
-    if (! m) return -EINVAL;
-    WW_SEND_EVENT(sock, WW_EVT_REPORT_STATE, ww_evt_report_state_encode, m, NULL, 0);
+int ww_bridge_send_report_state(int sock, const waywallen_renderer_state_t* state) {
+    if (! state) return -EINVAL;
+    ww_evt_report_state_t m = { .state = *state };
+    WW_SEND_EVENT(sock, WW_EVT_REPORT_STATE, ww_evt_report_state_encode, &m, NULL, 0);
 }
 
 static float clamp01_(float v) {
@@ -415,37 +378,29 @@ static float clamp01_(float v) {
 }
 
 int ww_bridge_send_report_state_clear_color(int sock, float r, float g, float b, float a) {
-    char value[96];
-    int  n = snprintf(value,
-                      sizeof(value),
-                      "%.6f,%.6f,%.6f,%.6f",
-                      clamp01_(r),
-                      clamp01_(g),
-                      clamp01_(b),
-                      clamp01_(a));
-    if (n < 0 || (size_t)n >= sizeof(value)) return -EINVAL;
-
-    ww_kv_t kv = {
-        .key   = (char*)"clear_color",
-        .value = value,
+    waywallen_renderer_state_t state = {
+        .clear_color = {
+            .r = clamp01_(r),
+            .g = clamp01_(g),
+            .b = clamp01_(b),
+            .a = clamp01_(a),
+        },
     };
-    ww_evt_report_state_t m = {
-        .state = { .count = 1, .data = &kv },
-    };
-    return ww_bridge_send_report_state(sock, &m);
+    return ww_bridge_send_report_state(sock, &state);
 }
 
-int ww_bridge_set_event_subscriptions(int sock, uint64_t revision, const char* const* kinds,
-                                      uint32_t count) {
-    if (revision == 0 || count > WW_BRIDGE_MAX_EVENT_SUBSCRIPTIONS) return -EINVAL;
-    if (count > 0 && ! kinds) return -EINVAL;
-    for (uint32_t i = 0; i < count; ++i) {
-        if (! kinds[i] || kinds[i][0] == '\0') return -EINVAL;
+int ww_bridge_set_event_subscriptions(int                                   sock,
+                                      const waywallen_event_subscription_t* subscription) {
+    if (! subscription || subscription->revision == 0 ||
+        subscription->kinds.count > WW_BRIDGE_MAX_EVENT_SUBSCRIPTIONS)
+        return -EINVAL;
+    if (subscription->kinds.count > 0 && ! subscription->kinds.data) return -EINVAL;
+    for (uint32_t i = 0; i < subscription->kinds.count; ++i) {
+        if (! subscription->kinds.data[i] || subscription->kinds.data[i][0] == '\0') return -EINVAL;
     }
 
     ww_evt_set_event_subscriptions_t m = {
-        .revision = revision,
-        .kinds    = { .count = count, .data = (char**)kinds },
+        .subscription = *subscription,
     };
     WW_SEND_EVENT(
         sock, WW_EVT_SET_EVENT_SUBSCRIPTIONS, ww_evt_set_event_subscriptions_encode, &m, NULL, 0);
@@ -530,7 +485,6 @@ int ww_bridge_recv_control(int sock, ww_bridge_control_t* out) {
     case WW_EVT_IN_AUDIO_WINDOW:
         rc = ww_evt_in_audio_window_decode(body, body_len, &out->u.audio_window);
         break;
-    case WW_EVT_IN_SET_FPS: rc = ww_evt_in_set_fps_decode(body, body_len, &out->u.set_fps); break;
     case WW_EVT_IN_SHUTDOWN:
         rc = ww_evt_in_shutdown_decode(body, body_len, &out->u.shutdown);
         break;
@@ -561,7 +515,6 @@ void ww_bridge_control_free(ww_bridge_control_t* msg) {
         ww_evt_in_event_subscriptions_applied_free(&msg->u.event_subscriptions_applied);
         break;
     case WW_EVT_IN_AUDIO_WINDOW: ww_evt_in_audio_window_free(&msg->u.audio_window); break;
-    case WW_EVT_IN_SET_FPS: ww_evt_in_set_fps_free(&msg->u.set_fps); break;
     case WW_EVT_IN_SHUTDOWN: ww_evt_in_shutdown_free(&msg->u.shutdown); break;
     case WW_EVT_IN_NEGOTIATE_BUFFERS:
         ww_evt_in_negotiate_buffers_free(&msg->u.negotiate_buffers);
@@ -589,9 +542,9 @@ int ww_bridge_negotiation_contains(const ww_negotiation_state_t* neg, uint32_t f
 
 void ww_bridge_negotiation_fill_format_caps(const ww_negotiation_state_t* neg,
                                             uint32_t* scratch_fourccs, uint32_t* scratch_mod_counts,
-                                            uint64_t*                scratch_modifiers,
-                                            uint32_t*                scratch_plane_counts,
-                                            ww_format_caps_caller_t* out) {
+                                            uint64_t*                          scratch_modifiers,
+                                            uint32_t*                          scratch_plane_counts,
+                                            waywallen_producer_capabilities_t* out) {
     if (! neg || ! out) return;
 
     const uint32_t n            = (uint32_t)neg->advertised_count;
@@ -614,21 +567,17 @@ void ww_bridge_negotiation_fill_format_caps(const ww_negotiation_state_t* neg,
         }
     }
 
-    out->fourccs            = scratch_fourccs;
-    out->fourccs_count      = fourcc_count;
-    out->mod_counts         = scratch_mod_counts;
-    out->mod_counts_count   = fourcc_count;
-    out->modifiers          = scratch_modifiers;
-    out->modifiers_count    = n;
-    out->plane_counts       = scratch_plane_counts;
-    out->plane_counts_count = n;
+    out->fourccs      = (ww_array_u32_t) { .count = fourcc_count, .data = scratch_fourccs };
+    out->mod_counts   = (ww_array_u32_t) { .count = fourcc_count, .data = scratch_mod_counts };
+    out->modifiers    = (ww_array_u64_t) { .count = n, .data = scratch_modifiers };
+    out->plane_counts = (ww_array_u32_t) { .count = n, .data = scratch_plane_counts };
 }
 
 /* -----------------------------------------------------------------------
- * Init handshake (v4)
+ * Init handshake
  * ----------------------------------------------------------------------- */
 
-int ww_bridge_recv_init(int sock, ww_bridge_init_t* out) {
+int ww_bridge_recv_init(int sock, waywallen_renderer_init_t* out) {
     if (! out) return -EINVAL;
     memset(out, 0, sizeof(*out));
 
@@ -641,18 +590,12 @@ int ww_bridge_recv_init(int sock, ww_bridge_init_t* out) {
         return -EPROTO;
     }
 
-    /* Transfer ownership of every heap allocation from the decoded
-     * `ww_evt_in_init_t` into the caller-facing `ww_bridge_init_t`.
-     * After this point the union is logically empty so calling
-     * `ww_bridge_control_free` on it would double-free; we skip it. */
-    out->protocol_version = ctl.u.init.protocol_version;
-    out->spawn_version    = ctl.u.init.spawn_version;
-    out->settings         = ctl.u.init.settings;
-    out->user_properties  = ctl.u.init.user_properties;
+    /* Move the generated payload out of the control union. */
+    *out = ctl.u.init.config;
 
     /* Zero the union members we just stole so `ww_bridge_control_free`
      * is safe even if a future refactor calls it. */
-    memset(&ctl.u.init, 0, sizeof(ctl.u.init));
+    memset(&ctl.u.init.config, 0, sizeof(ctl.u.init.config));
 
     if (out->protocol_version != WW_BRIDGE_SUPPORTED_PROTOCOL_VERSION ||
         out->spawn_version != WW_BRIDGE_SUPPORTED_SPAWN_VERSION) {
@@ -661,86 +604,10 @@ int ww_bridge_recv_init(int sock, ww_bridge_init_t* out) {
     return 0;
 }
 
-void ww_bridge_init_free(ww_bridge_init_t* out) {
-    if (! out) return;
-    /* `ww_kv_list_t` cleanup mirrors what the auto-generated
-     * `free_kv_list` does in ipc_v3.c — but that helper is `static`
-     * inside the generated TU. Replicate the freeing pattern locally
-     * (free key+value strings, then the `data` array). */
-    if (out->settings.data) {
-        for (uint32_t i = 0; i < out->settings.count; ++i) {
-            free(out->settings.data[i].key);
-            free(out->settings.data[i].value);
-        }
-        free(out->settings.data);
-    }
-    free(out->user_properties);
-    memset(out, 0, sizeof(*out));
-}
-
-int ww_bridge_send_init_nack(int sock, uint32_t received_spawn_version,
-                             uint32_t supported_spawn_version, const char* reason) {
-    ww_evt_init_nack_t m;
-    memset(&m, 0, sizeof(m));
-    m.received_spawn_version  = received_spawn_version;
-    m.supported_spawn_version = supported_spawn_version;
-    /* Encoder doesn't mutate `reason`; cast away const-ness to fit
-     * the generated struct layout. NULL → empty string. */
-    m.reason = (char*)(reason ? reason : "");
+int ww_bridge_send_init_nack(int sock, const waywallen_init_rejection_t* rejection) {
+    if (! rejection) return -EINVAL;
+    ww_evt_init_nack_t m = { .rejection = *rejection };
     WW_SEND_EVENT(sock, WW_EVT_INIT_NACK, ww_evt_init_nack_encode, &m, NULL, 0);
-}
-
-/* -----------------------------------------------------------------------
- * setting_changed (hot-reload kv push)
- * ----------------------------------------------------------------------- */
-
-int ww_bridge_setting_changed_from_control(ww_bridge_control_t*         ctrl,
-                                           ww_bridge_setting_changed_t* out) {
-    if (! ctrl || ! out) return -EINVAL;
-    if (ctrl->op != WW_EVT_IN_SETTING_CHANGED) return -EINVAL;
-    memset(out, 0, sizeof(*out));
-    /* Transfer ownership of the heap kv list. After this point
-     * `ctrl->u.setting_changed.settings` is empty so
-     * `ww_bridge_control_free(ctrl)` is a no-op for that arm. */
-    out->settings = ctrl->u.setting_changed.settings;
-    memset(&ctrl->u.setting_changed.settings, 0, sizeof(ctrl->u.setting_changed.settings));
-    return 0;
-}
-
-void ww_bridge_setting_changed_free(ww_bridge_setting_changed_t* out) {
-    if (! out) return;
-    if (out->settings.data) {
-        for (uint32_t i = 0; i < out->settings.count; ++i) {
-            free(out->settings.data[i].key);
-            free(out->settings.data[i].value);
-        }
-        free(out->settings.data);
-    }
-    memset(out, 0, sizeof(*out));
-}
-
-int ww_bridge_event_subscriptions_applied_from_control(
-    ww_bridge_control_t* ctrl, ww_bridge_event_subscriptions_applied_t* out) {
-    if (! ctrl || ! out) return -EINVAL;
-    if (ctrl->op != WW_EVT_IN_EVENT_SUBSCRIPTIONS_APPLIED) return -EINVAL;
-
-    memset(out, 0, sizeof(*out));
-    out->revision = ctrl->u.event_subscriptions_applied.revision;
-    out->status   = ctrl->u.event_subscriptions_applied.status;
-    out->kinds    = ctrl->u.event_subscriptions_applied.kinds;
-    out->reason   = ctrl->u.event_subscriptions_applied.reason;
-    memset(&ctrl->u.event_subscriptions_applied, 0, sizeof(ctrl->u.event_subscriptions_applied));
-    return 0;
-}
-
-void ww_bridge_event_subscriptions_applied_free(ww_bridge_event_subscriptions_applied_t* out) {
-    if (! out) return;
-    if (out->kinds.data) {
-        for (uint32_t i = 0; i < out->kinds.count; ++i) free(out->kinds.data[i]);
-        free(out->kinds.data);
-    }
-    free(out->reason);
-    memset(out, 0, sizeof(*out));
 }
 
 int ww_bridge_audio_window_from_control(const ww_bridge_control_t* ctrl,
@@ -749,18 +616,18 @@ int ww_bridge_audio_window_from_control(const ww_bridge_control_t* ctrl,
     memset(out, 0, sizeof(*out));
     if (ctrl->op != WW_EVT_IN_AUDIO_WINDOW) return -EINVAL;
 
-    const ww_evt_in_audio_window_t* in          = &ctrl->u.audio_window;
+    const waywallen_audio_window_t* in          = &ctrl->u.audio_window.window;
     const uint32_t                  known_flags = WW_BRIDGE_AUDIO_END_OF_STREAM;
     if ((in->flags & ~known_flags) != 0) {
         return -EPROTO;
     }
     const int ended = (in->flags & WW_BRIDGE_AUDIO_END_OF_STREAM) != 0;
     if (ended) {
-        if (in->samples.count != 0 || in->frames != 0 || in->sample_rate_hz != 0 ||
-            in->channels != 0)
+        if (in->samples.count != 0 || in->frames != 0 || in->format.sample_rate_hz != 0 ||
+            in->format.channels != 0)
             return -EPROTO;
-    } else if (in->sample_rate_hz != WW_BRIDGE_AUDIO_SAMPLE_RATE ||
-               in->channels != WW_BRIDGE_AUDIO_CHANNELS ||
+    } else if (in->format.sample_rate_hz != WW_BRIDGE_AUDIO_SAMPLE_RATE ||
+               in->format.channels != WW_BRIDGE_AUDIO_CHANNELS ||
                in->frames != WW_BRIDGE_AUDIO_WINDOW_FRAMES ||
                in->samples.count != WW_BRIDGE_AUDIO_SAMPLE_COUNT || ! in->samples.data) {
         return -EPROTO;
@@ -776,81 +643,10 @@ int ww_bridge_audio_window_from_control(const ww_bridge_control_t* ctrl,
     out->sequence              = in->sequence;
     out->captured_at_ns        = in->captured_at_ns;
     out->end_sample_frame      = in->end_sample_frame;
-    out->sample_rate_hz        = in->sample_rate_hz;
-    out->channels              = in->channels;
+    out->sample_rate_hz        = in->format.sample_rate_hz;
+    out->channels              = in->format.channels;
     out->frames                = in->frames;
     out->flags                 = in->flags;
     if (in->samples.count > 0) memcpy(out->samples, in->samples.data, sizeof(out->samples));
     return 0;
-}
-
-/* -----------------------------------------------------------------------
- * Pointer events
- * ----------------------------------------------------------------------- */
-
-int ww_bridge_pointer_motion_from_control(ww_bridge_control_t*        ctrl,
-                                          ww_bridge_pointer_motion_t* out) {
-    if (! ctrl || ! out) return -EINVAL;
-    if (ctrl->op != WW_EVT_IN_POINTER_MOTION) return -EINVAL;
-    out->x            = ctrl->u.pointer_motion.x;
-    out->y            = ctrl->u.pointer_motion.y;
-    out->timestamp_us = ctrl->u.pointer_motion.timestamp_us;
-    out->modifiers    = ctrl->u.pointer_motion.modifiers;
-    return 0;
-}
-
-int ww_bridge_pointer_button_from_control(ww_bridge_control_t*        ctrl,
-                                          ww_bridge_pointer_button_t* out) {
-    if (! ctrl || ! out) return -EINVAL;
-    if (ctrl->op != WW_EVT_IN_POINTER_BUTTON) return -EINVAL;
-    out->x            = ctrl->u.pointer_button.x;
-    out->y            = ctrl->u.pointer_button.y;
-    out->button       = ctrl->u.pointer_button.button;
-    out->state        = ctrl->u.pointer_button.state;
-    out->timestamp_us = ctrl->u.pointer_button.timestamp_us;
-    out->modifiers    = ctrl->u.pointer_button.modifiers;
-    return 0;
-}
-
-int ww_bridge_pointer_axis_from_control(ww_bridge_control_t* ctrl, ww_bridge_pointer_axis_t* out) {
-    if (! ctrl || ! out) return -EINVAL;
-    if (ctrl->op != WW_EVT_IN_POINTER_AXIS) return -EINVAL;
-    out->x            = ctrl->u.pointer_axis.x;
-    out->y            = ctrl->u.pointer_axis.y;
-    out->delta_x      = ctrl->u.pointer_axis.delta_x;
-    out->delta_y      = ctrl->u.pointer_axis.delta_y;
-    out->source       = ctrl->u.pointer_axis.source;
-    out->timestamp_us = ctrl->u.pointer_axis.timestamp_us;
-    out->modifiers    = ctrl->u.pointer_axis.modifiers;
-    return 0;
-}
-
-/* -----------------------------------------------------------------------
- * MPRIS media events
- * ----------------------------------------------------------------------- */
-
-int ww_bridge_mpris_from_control(ww_bridge_control_t* ctrl, ww_bridge_mpris_t* out) {
-    if (! ctrl || ! out) return -EINVAL;
-    if (ctrl->op != WW_EVT_IN_MPRIS) return -EINVAL;
-    memset(out, 0, sizeof(*out));
-    out->state            = ctrl->u.mpris.state;
-    out->title            = ctrl->u.mpris.title;
-    out->artist           = ctrl->u.mpris.artist;
-    out->album            = ctrl->u.mpris.album;
-    out->album_artist     = ctrl->u.mpris.album_artist;
-    out->art_url          = ctrl->u.mpris.art_url;
-    out->previous_art_url = ctrl->u.mpris.previous_art_url;
-    memset(&ctrl->u.mpris, 0, sizeof(ctrl->u.mpris));
-    return 0;
-}
-
-void ww_bridge_mpris_free(ww_bridge_mpris_t* out) {
-    if (! out) return;
-    free(out->title);
-    free(out->artist);
-    free(out->album);
-    free(out->album_artist);
-    free(out->art_url);
-    free(out->previous_art_url);
-    memset(out, 0, sizeof(*out));
 }

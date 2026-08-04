@@ -118,8 +118,7 @@ impl PeerCaps {
     }
 }
 
-/// Path category — wire-mirrored to ipc-v3
-/// `ww_evt_in_negotiate_buffers_t.path` and bridge `ww_path_category`.
+/// Allocation path selected from the producer and consumer topology.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum PathCategory {
@@ -137,8 +136,7 @@ pub enum PathCategory {
     CompatCpuReadback = 3,
 }
 
-/// Memory source — wire-mirrored to ipc-v3
-/// `ww_evt_in_negotiate_buffers_t.mem_source` and bridge `ww_mem_source`.
+/// Memory source selected for the allocation path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum MemSource {
@@ -149,17 +147,6 @@ pub enum MemSource {
     GpuLinear = 1,
     /// `/dev/dma_heap/system` — reserved for future use.
     DmabufHeap = 2,
-}
-
-impl PathCategory {
-    pub fn as_u32(self) -> u32 {
-        self as u32
-    }
-}
-impl MemSource {
-    pub fn as_u32(self) -> u32 {
-        self as u32
-    }
 }
 
 /// Resolved scheme that both peers will use until the next
@@ -173,10 +160,9 @@ pub struct NegotiatedScheme {
     pub color: u32,
     pub mem_hint: u32,
     pub count: u32, // pool size, daemon-chosen
-    /// v3: explicit allocation path. Bridge executes accordingly,
-    /// no plugin-side fallback.
+    /// Explicit allocation path. Bridge executes it without plugin fallback.
     pub path: PathCategory,
-    /// v3: which memory backend the bridge should use.
+    /// Memory backend the bridge should use.
     pub mem_source: MemSource,
 }
 
@@ -195,11 +181,6 @@ pub const MEM_HINT_DEVICE_LOCAL: u32 = 1 << 0;
 pub const MEM_HINT_HOST_VISIBLE: u32 = 1 << 1;
 pub const MEM_HINT_SCANOUT_CAPABLE: u32 = 1 << 2;
 pub const MEM_HINT_PROTECTED: u32 = 1 << 3;
-/// Reserved wire-stable bit `1 << 4`. The topology-first picker
-/// no longer reads this; topology drives cross-device decisions.
-#[deprecated = "no longer drives the picker; topology decides path"]
-pub const MEM_HINT_LINEAR_ONLY: u32 = 1 << 4;
-
 pub const SYNC_IMPLICIT: u32 = 1 << 0;
 pub const SYNC_SYNCOBJ_BINARY: u32 = 1 << 1;
 pub const SYNC_SYNCOBJ_TIMELINE: u32 = 1 << 2;
@@ -295,12 +276,10 @@ pub fn unflatten_caps(
             "color contains unknown capability bits",
         ));
     }
-    #[allow(deprecated)]
     let known_mem = MEM_HINT_DEVICE_LOCAL
         | MEM_HINT_HOST_VISIBLE
         | MEM_HINT_SCANOUT_CAPABLE
-        | MEM_HINT_PROTECTED
-        | MEM_HINT_LINEAR_ONLY;
+        | MEM_HINT_PROTECTED;
     if mem_hint & !known_mem != 0 {
         return Err(NegotiateError::MalformedCaps(
             "mem_hint contains unknown capability bits",

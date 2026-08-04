@@ -418,33 +418,31 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
         rstd_warn("waywallen-video-renderer: unexpected late Init; ignoring");
         break;
     case WW_EVT_IN_PLAY:
-        host.pause_fade_ms.store(c.u.play.fade_ms, std::memory_order_release);
+        host.pause_fade_ms.store(c.u.play.transition.fade_ms, std::memory_order_release);
         host.paused.store(false, std::memory_order_release);
         host.neg_cv.notify_all();
         break;
     case WW_EVT_IN_PAUSE:
-        host.pause_fade_ms.store(c.u.pause.fade_ms, std::memory_order_release);
+        host.pause_fade_ms.store(c.u.pause.transition.fade_ms, std::memory_order_release);
         host.paused.store(true, std::memory_order_release);
         host.neg_cv.notify_all();
         break;
     case WW_EVT_IN_UNMUTE:
-        host.mute_fade_ms.store(c.u.unmute.fade_ms, std::memory_order_release);
+        host.mute_fade_ms.store(c.u.unmute.transition.fade_ms, std::memory_order_release);
         host.muted.store(false, std::memory_order_release);
         break;
     case WW_EVT_IN_MUTE:
-        host.mute_fade_ms.store(c.u.mute.fade_ms, std::memory_order_release);
+        host.mute_fade_ms.store(c.u.mute.transition.fade_ms, std::memory_order_release);
         host.muted.store(true, std::memory_order_release);
         break;
-    case WW_EVT_IN_SET_FPS:
     case WW_EVT_IN_POINTER_MOTION:
     case WW_EVT_IN_POINTER_BUTTON:
     case WW_EVT_IN_POINTER_AXIS: break;
     case WW_EVT_IN_SETTING_CHANGED: {
-        ww_bridge_setting_changed_t as {};
-        if (ww_bridge_setting_changed_from_control(&c, &as) != 0) break;
-        for (uint32_t i = 0; i < as.settings.count; ++i) {
-            const char* key = as.settings.data[i].key;
-            const char* val = as.settings.data[i].value;
+        const auto& settings = c.u.setting_changed.settings;
+        for (uint32_t i = 0; i < settings.count; ++i) {
+            const char* key = settings.data[i].key;
+            const char* val = settings.data[i].value;
             if (! key || ! val) continue;
             if (std::strcmp(key, "loop_file") == 0) {
                 bool enabled = ! (std::strcmp(val, "no") == 0);
@@ -478,23 +476,12 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
                           static_cast<const char*>(key));
             }
         }
-        ww_bridge_setting_changed_free(&as);
         host.neg_cv.notify_all();
         break;
     }
     case WW_EVT_IN_SHUTDOWN: signal_shutdown(host); break;
     case WW_EVT_IN_NEGOTIATE_BUFFERS: {
-        const auto&         nb = c.u.negotiate_buffers;
-        ww_pool_directive_t d {};
-        d.category    = nb.path;
-        d.mem_source  = nb.mem_source;
-        d.fourcc      = nb.fourcc;
-        d.modifier    = nb.modifier;
-        d.plane_count = nb.plane_count;
-        d.sync_mode   = nb.sync_mode;
-        d.color       = nb.color;
-        d.mem_hint    = nb.mem_hint;
-        d.count       = nb.count;
+        const ww_pool_directive_t& d = c.u.negotiate_buffers.directive;
         {
             std::lock_guard<std::mutex> lk(host.neg_mu);
             host.neg_directive = d;
@@ -877,13 +864,19 @@ int run(int argc, char** argv) {
     host.sock = ww_bridge_connect(opt.ipc_path.c_str());
     if (host.sock < 0) die("ww_bridge_connect: " + std::string(std::strerror(-host.sock)));
 
-    ww_bridge_init_t init {};
+    waywallen_renderer_init_t init {};
     if (int rc = ww_bridge_recv_init(host.sock, &init); rc < 0) {
         const char* reason = (rc == -EPROTO) ? "init: protocol error or unsupported spawn_version"
                                              : "init: recv failed";
-        ww_bridge_send_init_nack(
-            host.sock, init.spawn_version, WW_BRIDGE_SUPPORTED_SPAWN_VERSION, reason);
-        ww_bridge_init_free(&init);
+        waywallen_init_rejection_t rejection {
+            .received_protocol_version  = init.protocol_version,
+            .supported_protocol_version = WW_BRIDGE_SUPPORTED_PROTOCOL_VERSION,
+            .received_spawn_version     = init.spawn_version,
+            .supported_spawn_version    = WW_BRIDGE_SUPPORTED_SPAWN_VERSION,
+            .reason                     = const_cast<char*>(reason),
+        };
+        ww_bridge_send_init_nack(host.sock, &rejection);
+        waywallen_renderer_init_free(&init);
         die(std::string(reason) + " rc=" + std::to_string(rc));
     }
     // Video path arrives via CLI argv `--path` (already in
@@ -925,7 +918,7 @@ int run(int argc, char** argv) {
                                 : static_cast<int32_t>(WW_RESOLUTION_1080P);
     }
     apply_user_properties(host, init.user_properties);
-    ww_bridge_init_free(&init);
+    waywallen_renderer_init_free(&init);
     if (opt.video_path.empty()) die("--path <video-file> is required");
 
     /* Probe the file's native dimensions. `Producer::create_with_render_node`
@@ -1121,7 +1114,7 @@ int run(int argc, char** argv) {
     rstd_info("waywallen-video-renderer: decoder mode = {}", kind_label(decoder->get()->kind()));
 
     /* --- Main loop ----------------------------------------------------- */
-    wavsen::video::Presenter presenter; // Iter 3: PTS-driven pacing.
+    wavsen::video::Presenter presenter; // PTS-driven pacing.
     if (auto* player = current_av_player()) {
         presenter.set_external_clock([p = player] {
             return p->current_time_seconds();

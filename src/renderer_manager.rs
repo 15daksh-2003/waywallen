@@ -12,7 +12,11 @@ use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, watch, Mutex as TokioMutex};
 use uuid::Uuid;
 
-use crate::ipc::proto::{ControlMsg, EventMsg};
+use crate::ipc::proto::{
+    AudioWindow, BufferDirective, BufferFormat, BufferMemorySource, BufferPath, ControlMsg,
+    EventMsg, EventSubscriptionResult, EventSubscriptionStatus, MediaPlaybackState, PointerAxis,
+    PointerButton, PointerMotion, RendererInit, WireMprisSnapshot,
+};
 use crate::ipc::uds::{recv_event, send_control};
 
 /// Renderer IPC compatibility version the daemon currently emits. Bump
@@ -65,12 +69,6 @@ fn renderer_spawn_error_reason(error: Error) -> String {
         other => other.to_string(),
     }
 }
-
-pub const SUBSCRIPTION_STATUS_APPLIED: u32 = 0;
-pub const SUBSCRIPTION_STATUS_INVALID: u32 = 1;
-pub const SUBSCRIPTION_STATUS_STALE_REVISION: u32 = 2;
-pub const SUBSCRIPTION_STATUS_REVISION_CONFLICT: u32 = 3;
-pub const SUBSCRIPTION_STATUS_LIMIT_EXCEEDED: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RendererEventKind {
@@ -152,7 +150,7 @@ impl RendererSubscriptionSnapshot {
 
 struct SubscriptionApply {
     revision: u64,
-    status: u32,
+    status: EventSubscriptionStatus,
     kinds: Vec<String>,
     reason: String,
     commit: Option<RendererSubscription>,
@@ -192,7 +190,7 @@ impl RendererSubscriptionRegistry {
             Err(_) => {
                 return SubscriptionApply {
                     revision,
-                    status: SUBSCRIPTION_STATUS_INVALID,
+                    status: EventSubscriptionStatus::Invalid,
                     kinds: Vec::new(),
                     reason: "subscription registry unavailable".to_string(),
                     commit: None,
@@ -202,7 +200,7 @@ impl RendererSubscriptionRegistry {
         let Some(current) = committed.get(id) else {
             return SubscriptionApply {
                 revision,
-                status: SUBSCRIPTION_STATUS_INVALID,
+                status: EventSubscriptionStatus::Invalid,
                 kinds: Vec::new(),
                 reason: "renderer is not registered".to_string(),
                 commit: None,
@@ -218,7 +216,7 @@ impl RendererSubscriptionRegistry {
         if raw_kinds.len() > MAX_EVENT_SUBSCRIPTIONS {
             return SubscriptionApply {
                 revision,
-                status: SUBSCRIPTION_STATUS_LIMIT_EXCEEDED,
+                status: EventSubscriptionStatus::LimitExceeded,
                 kinds: current_kinds(),
                 reason: format!("at most {MAX_EVENT_SUBSCRIPTIONS} event kinds are allowed"),
                 commit: None,
@@ -227,7 +225,7 @@ impl RendererSubscriptionRegistry {
         if revision == 0 {
             return SubscriptionApply {
                 revision,
-                status: SUBSCRIPTION_STATUS_INVALID,
+                status: EventSubscriptionStatus::Invalid,
                 kinds: current_kinds(),
                 reason: "revision must start at 1".to_string(),
                 commit: None,
@@ -243,7 +241,7 @@ impl RendererSubscriptionRegistry {
         {
             return SubscriptionApply {
                 revision,
-                status: SUBSCRIPTION_STATUS_LIMIT_EXCEEDED,
+                status: EventSubscriptionStatus::LimitExceeded,
                 kinds: current_kinds(),
                 reason: format!(
                     "event kind names are limited to {MAX_EVENT_KIND_BYTES} bytes each and \
@@ -258,7 +256,7 @@ impl RendererSubscriptionRegistry {
             let Some(kind) = RendererEventKind::parse(raw) else {
                 return SubscriptionApply {
                     revision,
-                    status: SUBSCRIPTION_STATUS_INVALID,
+                    status: EventSubscriptionStatus::Invalid,
                     kinds: current_kinds(),
                     reason: format!("unknown event kind {raw:?}"),
                     commit: None,
@@ -271,7 +269,7 @@ impl RendererSubscriptionRegistry {
         if revision < current.revision {
             return SubscriptionApply {
                 revision,
-                status: SUBSCRIPTION_STATUS_STALE_REVISION,
+                status: EventSubscriptionStatus::StaleRevision,
                 kinds: current_kinds(),
                 reason: format!("current revision is {}", current.revision),
                 commit: None,
@@ -282,9 +280,9 @@ impl RendererSubscriptionRegistry {
             return SubscriptionApply {
                 revision,
                 status: if same {
-                    SUBSCRIPTION_STATUS_APPLIED
+                    EventSubscriptionStatus::Applied
                 } else {
-                    SUBSCRIPTION_STATUS_REVISION_CONFLICT
+                    EventSubscriptionStatus::RevisionConflict
                 },
                 kinds: current_kinds(),
                 reason: if same {
@@ -298,7 +296,7 @@ impl RendererSubscriptionRegistry {
 
         SubscriptionApply {
             revision,
-            status: SUBSCRIPTION_STATUS_APPLIED,
+            status: EventSubscriptionStatus::Applied,
             kinds: canonical,
             reason: String::new(),
             commit: Some(RendererSubscription { revision, kinds }),
@@ -1379,8 +1377,7 @@ impl RendererManager {
         })
     }
 
-    /// Modifier-negotiation v2 dispatch — replaces the deleted
-    /// `send_configure_buffers`.
+    /// Dispatch the complete buffer allocation decision.
     pub async fn send_negotiate_buffers(
         &self,
         id: &str,
@@ -1411,15 +1408,34 @@ impl RendererManager {
             scheme.mem_source,
         );
         let msg = ControlMsg::NegotiateBuffers {
-            fourcc: scheme.fourcc,
-            modifier: scheme.modifier,
-            plane_count: scheme.plane_count,
-            sync_mode: scheme.sync_mode,
-            color: scheme.color,
-            mem_hint: scheme.mem_hint,
-            count: scheme.count,
-            path: scheme.path.as_u32(),
-            mem_source: scheme.mem_source.as_u32(),
+            directive: BufferDirective {
+                format: BufferFormat {
+                    fourcc: scheme.fourcc,
+                    modifier: scheme.modifier,
+                    plane_count: scheme.plane_count,
+                },
+                sync_mode: scheme.sync_mode,
+                color: scheme.color,
+                mem_hint: scheme.mem_hint,
+                count: scheme.count,
+                path: match scheme.path {
+                    crate::dma::negotiate::PathCategory::OptimizedSameDevice => {
+                        BufferPath::OptimizedSameDevice
+                    }
+                    crate::dma::negotiate::PathCategory::OptimizedSameVendor => {
+                        BufferPath::OptimizedSameVendor
+                    }
+                    crate::dma::negotiate::PathCategory::CompatLinear => BufferPath::CompatLinear,
+                    crate::dma::negotiate::PathCategory::CompatCpuReadback => {
+                        BufferPath::CompatCpuReadback
+                    }
+                },
+                memory_source: match scheme.mem_source {
+                    crate::dma::negotiate::MemSource::GpuNative => BufferMemorySource::GpuNative,
+                    crate::dma::negotiate::MemSource::GpuLinear => BufferMemorySource::GpuLinear,
+                    crate::dma::negotiate::MemSource::DmabufHeap => BufferMemorySource::DmabufHeap,
+                },
+            },
         };
         self.send_control(id, msg).await?;
         if let Ok(mut guard) = handle.last_dispatched_scheme.lock() {
@@ -1463,96 +1479,41 @@ impl RendererManager {
 
     /// Forward a pointer-motion event to a live renderer. Silently
     /// drops when the renderer did not subscribe to pointer events.
-    pub async fn send_pointer_motion(
-        &self,
-        id: &str,
-        x: f32,
-        y: f32,
-        timestamp_us: u64,
-        modifiers: u32,
-    ) -> Result<()> {
+    pub async fn send_pointer_motion(&self, id: &str, event: PointerMotion) -> Result<()> {
         if !self.pointer_forwarding_enabled() {
             return Ok(());
         }
         if !self.subscribed_to(id, RendererEventKind::Pointer) {
             return Ok(());
         }
-        self.send_control(
-            id,
-            ControlMsg::PointerMotion {
-                x,
-                y,
-                timestamp_us,
-                modifiers,
-            },
-        )
-        .await
+        self.send_control(id, ControlMsg::PointerMotion { event })
+            .await
     }
 
     /// Forward a pointer-button event. Same gating as
     /// [`Self::send_pointer_motion`].
-    pub async fn send_pointer_button(
-        &self,
-        id: &str,
-        x: f32,
-        y: f32,
-        button: u32,
-        state: u32,
-        timestamp_us: u64,
-        modifiers: u32,
-    ) -> Result<()> {
+    pub async fn send_pointer_button(&self, id: &str, event: PointerButton) -> Result<()> {
         if !self.pointer_forwarding_enabled() {
             return Ok(());
         }
         if !self.subscribed_to(id, RendererEventKind::Pointer) {
             return Ok(());
         }
-        self.send_control(
-            id,
-            ControlMsg::PointerButton {
-                x,
-                y,
-                button,
-                state,
-                timestamp_us,
-                modifiers,
-            },
-        )
-        .await
+        self.send_control(id, ControlMsg::PointerButton { event })
+            .await
     }
 
     /// Forward a pointer-axis (scroll) event. Same gating as
     /// [`Self::send_pointer_motion`].
-    pub async fn send_pointer_axis(
-        &self,
-        id: &str,
-        x: f32,
-        y: f32,
-        delta_x: f32,
-        delta_y: f32,
-        source: u32,
-        timestamp_us: u64,
-        modifiers: u32,
-    ) -> Result<()> {
+    pub async fn send_pointer_axis(&self, id: &str, event: PointerAxis) -> Result<()> {
         if !self.pointer_forwarding_enabled() {
             return Ok(());
         }
         if !self.subscribed_to(id, RendererEventKind::Pointer) {
             return Ok(());
         }
-        self.send_control(
-            id,
-            ControlMsg::PointerAxis {
-                x,
-                y,
-                delta_x,
-                delta_y,
-                source,
-                timestamp_us,
-                modifiers,
-            },
-        )
-        .await
+        self.send_control(id, ControlMsg::PointerAxis { event })
+            .await
     }
 
     fn pointer_forwarding_enabled(&self) -> bool {
@@ -1582,13 +1543,19 @@ impl RendererManager {
         self.send_control(
             id,
             ControlMsg::Mpris {
-                state: snapshot.state,
-                title: snapshot.title,
-                artist: snapshot.artist,
-                album: snapshot.album,
-                album_artist: snapshot.album_artist,
-                art_url: snapshot.art_url,
-                previous_art_url: snapshot.previous_art_url,
+                snapshot: WireMprisSnapshot {
+                    state: match snapshot.state {
+                        1 => MediaPlaybackState::Playing,
+                        2 => MediaPlaybackState::Paused,
+                        _ => MediaPlaybackState::Stopped,
+                    },
+                    title: snapshot.title,
+                    artist: snapshot.artist,
+                    album: snapshot.album,
+                    album_artist: snapshot.album_artist,
+                    art_url: snapshot.art_url,
+                    previous_art_url: snapshot.previous_art_url,
+                },
             },
         )
         .await
@@ -1652,20 +1619,7 @@ impl RendererManager {
             .is_some()
     }
 
-    pub async fn send_audio_window_latest(
-        &self,
-        id: &str,
-        subscription_revision: u64,
-        generation: u64,
-        sequence: u64,
-        captured_at_ns: u64,
-        end_sample_frame: u64,
-        sample_rate_hz: u32,
-        channels: u32,
-        frames: u32,
-        flags: u32,
-        samples: Vec<f32>,
-    ) -> Result<()> {
+    pub async fn send_audio_window_latest(&self, id: &str, window: AudioWindow) -> Result<()> {
         let handle = self
             .get(id)
             .await
@@ -1673,26 +1627,15 @@ impl RendererManager {
         if self
             .subscription_snapshot()
             .revision_for(id, RendererEventKind::Audio)
-            != Some(subscription_revision)
+            != Some(window.subscription_revision)
         {
             return Ok(());
         }
         handle
             .writer
             .replace_audio(
-                subscription_revision,
-                ControlMsg::AudioWindow {
-                    subscription_revision,
-                    generation,
-                    sequence,
-                    captured_at_ns,
-                    end_sample_frame,
-                    sample_rate_hz,
-                    channels,
-                    frames,
-                    flags,
-                    samples,
-                },
+                window.subscription_revision,
+                ControlMsg::AudioWindow { window },
             )
             .map_err(|error| Error::RendererControlFailed(format!("send audio: {error}")))
     }
@@ -1800,17 +1743,15 @@ fn run_reader(
         let (msg, fds) = received;
         let mut event_pool_generation = None;
 
-        if let EventMsg::SetEventSubscriptions {
-            revision,
-            ref kinds,
-        } = msg
-        {
-            let applied = subscriptions.prepare(&id, revision, kinds);
+        if let EventMsg::SetEventSubscriptions { ref subscription } = msg {
+            let applied = subscriptions.prepare(&id, subscription.revision, &subscription.kinds);
             let ack = ControlMsg::EventSubscriptionsApplied {
-                revision: applied.revision,
-                status: applied.status,
-                kinds: applied.kinds,
-                reason: applied.reason,
+                result: EventSubscriptionResult {
+                    revision: applied.revision,
+                    status: applied.status,
+                    kinds: applied.kinds,
+                    reason: applied.reason,
+                },
             };
             if let Err(error) = writer.send_blocking(ack, applied.commit) {
                 log::warn!("renderer {id}: subscription acknowledgement failed: {error}");
@@ -1820,20 +1761,18 @@ fn run_reader(
 
         // Cache each BindBuffers snapshot with its fds; later generations
         // replace earlier ones.
-        if let EventMsg::BindBuffers {
-            generation,
-            flags,
-            count,
-            fourcc,
-            width,
-            height,
-            modifier,
-            planes_per_buffer,
-            ref stride,
-            ref plane_offset,
-            ref size,
-        } = msg
-        {
+        if let EventMsg::BindBuffers { ref pool } = msg {
+            let generation = pool.generation;
+            let flags = pool.flags;
+            let count = pool.count;
+            let fourcc = pool.format.fourcc;
+            let modifier = pool.format.modifier;
+            let planes_per_buffer = pool.format.plane_count;
+            let width = pool.extent.width;
+            let height = pool.extent.height;
+            let stride = &pool.stride;
+            let plane_offset = &pool.plane_offset;
+            let size = &pool.size;
             // Validate parallel arrays up front so all per-plane fields
             // stay index-aligned.
             let expected = (count as usize) * (planes_per_buffer as usize);
@@ -1915,13 +1854,7 @@ fn run_reader(
                     }
                 }
             }
-        } else if let EventMsg::FrameReady {
-            image_index,
-            seq,
-            release_point,
-            ..
-        } = msg
-        {
+        } else if let EventMsg::FrameReady { ref frame } = msg {
             // frame_ready always carries exactly one sync_fd: the codec
             // enforced expected_fds() == 1 before handing us `fds`.
             let mut taken = fds;
@@ -1930,7 +1863,7 @@ fn run_reader(
                 while guard.len() >= SYNC_FD_RETENTION {
                     guard.pop_front();
                 }
-                guard.push_back((seq, fd));
+                guard.push_back((frame.sequence, fd));
             }
             let gen = published_pool
                 .lock()
@@ -1948,9 +1881,9 @@ fn run_reader(
                 if let Ok(mut guard) = latest_frame.lock() {
                     *guard = Some(FrameSnapshot {
                         buffer_generation,
-                        buffer_index: image_index,
-                        seq,
-                        release_point,
+                        buffer_index: frame.image_index,
+                        seq: frame.sequence,
+                        release_point: frame.release_point,
                     });
                 }
             }
@@ -1969,38 +1902,26 @@ fn run_reader(
                 *guard = Some(fd);
                 log::info!("renderer {id}: ReleaseSyncobj imported");
             }
-        } else if let EventMsg::FormatCaps {
-            ref fourccs,
-            ref mod_counts,
-            ref modifiers,
-            ref plane_counts,
-            ref device_uuid,
-            ref driver_uuid,
-            drm_render_major,
-            drm_render_minor,
-            mem_hints,
-            sync_caps,
-            color_caps,
-            extent_max_w,
-            extent_max_h,
-        } = msg
-        {
+        } else if let EventMsg::FormatCaps { ref capabilities } = msg {
             let drm = DrmNode {
-                major: drm_render_major,
-                minor: drm_render_minor,
+                major: capabilities.drm_node.major,
+                minor: capabilities.drm_node.minor,
             };
             match crate::dma::negotiate::unflatten_caps(
-                fourccs,
-                mod_counts,
-                modifiers,
-                plane_counts,
-                device_uuid,
-                driver_uuid,
+                &capabilities.fourccs,
+                &capabilities.mod_counts,
+                &capabilities.modifiers,
+                &capabilities.plane_counts,
+                &capabilities.device_uuid,
+                &capabilities.driver_uuid,
                 drm,
-                sync_caps,
-                color_caps,
-                mem_hints,
-                (extent_max_w, extent_max_h),
+                capabilities.sync_caps,
+                capabilities.color_caps,
+                capabilities.mem_hints,
+                (
+                    capabilities.max_extent.width,
+                    capabilities.max_extent.height,
+                ),
             ) {
                 Ok(caps) => {
                     if let Ok(mut guard) = format_caps.lock() {
@@ -2028,34 +1949,26 @@ fn run_reader(
                     log::warn!("renderer {id}: FormatCaps malformed: {e:?}");
                 }
             }
-        } else if let EventMsg::BindFailed {
-            fourcc,
-            modifier,
-            reason,
-            ref message,
-        } = msg
-        {
+        } else if let EventMsg::BindFailed { ref failure } = msg {
             // Renderer-side bind failure is surfaced for debugging; router
             // retry paths handle consumer-side failures.
             log::warn!(
-                "renderer {id}: BindFailed fourcc=0x{fourcc:08x} \
-                 modifier=0x{modifier:x} reason={reason} msg={message:?}"
+                "renderer {id}: BindFailed fourcc=0x{:08x} \
+                 modifier=0x{:x} kind={:?} msg={:?}",
+                failure.format.fourcc,
+                failure.format.modifier,
+                failure.kind,
+                failure.message,
             );
         } else if let EventMsg::ReportState { ref state } = msg {
-            // Recognised keys are stashed on the handle; unknown keys
-            // are ignored. Currently only `clear_color` is consumed.
-            for (k, v) in state.iter() {
-                if k == "clear_color" {
-                    if let Some(rgba) = parse_clear_color(v) {
-                        if let Ok(mut g) = clear_rgba.lock() {
-                            *g = rgba;
-                        }
-                    } else {
-                        log::warn!(
-                            "renderer {id}: ReportState clear_color={v:?} unparseable, ignored"
-                        );
-                    }
+            let color = state.clear_color;
+            let rgba = [color.r, color.g, color.b, color.a];
+            if rgba.iter().all(|component| component.is_finite()) {
+                if let Ok(mut stored) = clear_rgba.lock() {
+                    *stored = rgba.map(|component| component.clamp(0.0, 1.0));
                 }
+            } else {
+                log::warn!("renderer {id}: ReportState clear_color contains a non-finite value");
             }
         } else if !fds.is_empty() {
             log::warn!("renderer {id}: unexpected fds on event {msg:?}, dropping");
@@ -2118,10 +2031,12 @@ pub(crate) fn build_init_msg(req: &SpawnRequest, def: &RendererDef) -> ControlMs
     settings.sort_by(|a, b| a.0.cmp(&b.0));
 
     ControlMsg::Init {
-        protocol_version: crate::ipc::proto::PROTOCOL_VERSION,
-        spawn_version,
-        settings,
-        user_properties: req.user_properties_json.clone().unwrap_or_default(),
+        config: RendererInit {
+            protocol_version: crate::ipc::proto::PROTOCOL_VERSION,
+            spawn_version,
+            settings,
+            user_properties: req.user_properties_json.clone().unwrap_or_default(),
+        },
     }
 }
 
@@ -2133,25 +2048,22 @@ pub(crate) fn run_init_handshake(sock: &StdUnixStream, init: &ControlMsg) -> Res
     let (evt, fds) =
         recv_event(sock).map_err(|e| Error::RendererSpawnFailed(format!("recv Ready: {e}")))?;
     match evt {
-        EventMsg::Ready {
-            drm_render_major,
-            drm_render_minor,
-        } => {
+        EventMsg::Ready { drm_node } => {
             if !fds.is_empty() {
                 log::warn!("Ready unexpectedly carried {} fds; dropping", fds.len());
             }
             Ok(DrmNode {
-                major: drm_render_major,
-                minor: drm_render_minor,
+                major: drm_node.major,
+                minor: drm_node.minor,
             })
         }
-        EventMsg::InitNack {
-            received_spawn_version,
-            supported_spawn_version,
-            reason,
-        } => Err(Error::RendererSpawnFailed(format!(
-            "renderer rejected Init: {reason} (received spawn_version={received_spawn_version}, \
-             supported={supported_spawn_version})"
+        EventMsg::InitNack { rejection } => Err(Error::RendererSpawnFailed(format!(
+            "renderer rejected Init: {} (protocol {} supported {}; spawn {} supported {})",
+            rejection.reason,
+            rejection.received_protocol_version,
+            rejection.supported_protocol_version,
+            rejection.received_spawn_version,
+            rejection.supported_spawn_version,
         ))),
         other => Err(Error::RendererSpawnFailed(format!(
             "host emitted {other:?} before Ready; aborting spawn"
@@ -2161,24 +2073,6 @@ pub(crate) fn run_init_handshake(sock: &StdUnixStream, init: &ControlMsg) -> Res
 
 #[allow(dead_code)]
 fn _assert_path_ok<P: AsRef<std::path::Path>>(_p: P) {} // compile-time shim
-
-/// Parse a `"r,g,b,a"` clear-color value. Components clamped to
-/// `[0, 1]`; malformed strings return `None`.
-fn parse_clear_color(s: &str) -> Option<[f32; 4]> {
-    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
-    if parts.len() != 4 {
-        return None;
-    }
-    let mut out = [0.0f32; 4];
-    for (i, p) in parts.iter().enumerate() {
-        let v: f32 = p.parse().ok()?;
-        if !v.is_finite() {
-            return None;
-        }
-        out[i] = v.clamp(0.0, 1.0);
-    }
-    Some(out)
-}
 
 // ---------------------------------------------------------------------------
 // Test stubs
@@ -2313,6 +2207,7 @@ impl RendererManager {
 #[cfg(test)]
 mod subscription_tests {
     use super::*;
+    use crate::ipc::proto::AudioStreamFormat;
     use crate::ipc::uds::{recv_control, CodecError};
 
     #[tokio::test]
@@ -2347,7 +2242,15 @@ mod subscription_tests {
         peer.set_read_timeout(Some(Duration::from_millis(20)))
             .unwrap();
         manager
-            .send_pointer_motion("renderer", 1.0, 2.0, 3, 0)
+            .send_pointer_motion(
+                "renderer",
+                PointerMotion {
+                    x: 1.0,
+                    y: 2.0,
+                    timestamp_us: 3,
+                    modifiers: 0,
+                },
+            )
             .await
             .unwrap();
         let error = recv_control(&peer).unwrap_err();
@@ -2364,16 +2267,26 @@ mod subscription_tests {
         settings.update(|state| state.global.pointer_forwarding_enabled = true);
         peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         manager
-            .send_pointer_motion("renderer", 4.0, 5.0, 6, 0)
+            .send_pointer_motion(
+                "renderer",
+                PointerMotion {
+                    x: 4.0,
+                    y: 5.0,
+                    timestamp_us: 6,
+                    modifiers: 0,
+                },
+            )
             .await
             .unwrap();
         assert!(matches!(
             recv_control(&peer).unwrap().0,
             ControlMsg::PointerMotion {
-                x: 4.0,
-                y: 5.0,
-                timestamp_us: 6,
-                modifiers: 0,
+                event: PointerMotion {
+                    x: 4.0,
+                    y: 5.0,
+                    timestamp_us: 6,
+                    modifiers: 0,
+                },
             }
         ));
     }
@@ -2413,7 +2326,7 @@ mod subscription_tests {
                 "audio".to_string(),
             ],
         );
-        assert_eq!(applied.status, SUBSCRIPTION_STATUS_APPLIED);
+        assert_eq!(applied.status, EventSubscriptionStatus::Applied);
         assert_eq!(applied.kinds, vec!["pointer", "audio"]);
         assert!(registry
             .snapshot()
@@ -2428,15 +2341,15 @@ mod subscription_tests {
         );
 
         let replay = registry.prepare("renderer", 1, &["pointer".to_string(), "audio".to_string()]);
-        assert_eq!(replay.status, SUBSCRIPTION_STATUS_APPLIED);
+        assert_eq!(replay.status, EventSubscriptionStatus::Applied);
         assert!(replay.commit.is_none());
 
         let conflict = registry.prepare("renderer", 1, &["mpris".to_string()]);
-        assert_eq!(conflict.status, SUBSCRIPTION_STATUS_REVISION_CONFLICT);
+        assert_eq!(conflict.status, EventSubscriptionStatus::RevisionConflict);
         let next = registry.prepare("renderer", 2, &["audio".to_string()]);
         registry.commit("renderer".to_string(), next.commit.unwrap());
         let stale = registry.prepare("renderer", 1, &[]);
-        assert_eq!(stale.status, SUBSCRIPTION_STATUS_STALE_REVISION);
+        assert_eq!(stale.status, EventSubscriptionStatus::StaleRevision);
         assert_eq!(
             registry
                 .snapshot()
@@ -2451,15 +2364,15 @@ mod subscription_tests {
         registry.register("renderer".to_string());
 
         let unknown = registry.prepare("renderer", 1, &["video".to_string()]);
-        assert_eq!(unknown.status, SUBSCRIPTION_STATUS_INVALID);
+        assert_eq!(unknown.status, EventSubscriptionStatus::Invalid);
         let oversized = registry.prepare("renderer", 1, &["x".repeat(MAX_EVENT_KIND_BYTES + 1)]);
-        assert_eq!(oversized.status, SUBSCRIPTION_STATUS_LIMIT_EXCEEDED);
+        assert_eq!(oversized.status, EventSubscriptionStatus::LimitExceeded);
         let too_many = registry.prepare(
             "renderer",
             1,
             &vec!["audio".to_string(); MAX_EVENT_SUBSCRIPTIONS + 1],
         );
-        assert_eq!(too_many.status, SUBSCRIPTION_STATUS_LIMIT_EXCEEDED);
+        assert_eq!(too_many.status, EventSubscriptionStatus::LimitExceeded);
         assert!(registry
             .snapshot()
             .subscribers(RendererEventKind::Audio)
@@ -2482,10 +2395,12 @@ mod subscription_tests {
         writer
             .send_blocking(
                 ControlMsg::EventSubscriptionsApplied {
-                    revision: 1,
-                    status: applied.status,
-                    kinds: applied.kinds,
-                    reason: applied.reason,
+                    result: EventSubscriptionResult {
+                        revision: 1,
+                        status: applied.status,
+                        kinds: applied.kinds,
+                        reason: applied.reason,
+                    },
                 },
                 applied.commit,
             )
@@ -2494,16 +2409,20 @@ mod subscription_tests {
             .replace_audio(
                 1,
                 ControlMsg::AudioWindow {
-                    subscription_revision: 1,
-                    generation: 2,
-                    sequence: 3,
-                    captured_at_ns: 4,
-                    end_sample_frame: 4096,
-                    sample_rate_hz: 48_000,
-                    channels: 2,
-                    frames: 4096,
-                    flags: 0,
-                    samples: vec![0.0; 8192],
+                    window: AudioWindow {
+                        subscription_revision: 1,
+                        generation: 2,
+                        sequence: 3,
+                        captured_at_ns: 4,
+                        end_sample_frame: 4096,
+                        format: AudioStreamFormat {
+                            sample_rate_hz: 48_000,
+                            channels: 2,
+                        },
+                        frames: 4096,
+                        flags: 0,
+                        samples: vec![0.0; 8192],
+                    },
                 },
             )
             .unwrap();
@@ -2512,15 +2431,19 @@ mod subscription_tests {
         let (second, _) = recv_control(&renderer).unwrap();
         assert!(matches!(
             first,
-            ControlMsg::EventSubscriptionsApplied { revision: 1, .. }
+            ControlMsg::EventSubscriptionsApplied {
+                result: EventSubscriptionResult { revision: 1, .. }
+            }
         ));
         assert!(matches!(
             second,
             ControlMsg::AudioWindow {
-                subscription_revision: 1,
-                generation: 2,
-                sequence: 3,
-                ..
+                window: AudioWindow {
+                    subscription_revision: 1,
+                    generation: 2,
+                    sequence: 3,
+                    ..
+                }
             }
         ));
     }
@@ -2529,6 +2452,7 @@ mod subscription_tests {
 #[cfg(test)]
 mod init_handshake_tests {
     use super::*;
+    use crate::ipc::proto::{InitRejection, PROTOCOL_VERSION};
     use crate::ipc::uds::send_event;
     use crate::plugin::renderer_registry::{SettingDef, SettingType};
     use std::path::PathBuf;
@@ -2615,16 +2539,14 @@ mod init_handshake_tests {
         };
         let msg = build_init_msg(&req, &def_mpv_schema());
         match msg {
-            ControlMsg::Init {
-                protocol_version,
-                spawn_version,
-                settings,
-                user_properties,
-            } => {
-                assert_eq!(protocol_version, crate::ipc::proto::PROTOCOL_VERSION);
-                assert_eq!(spawn_version, 1); // pulled from def_mpv_schema
-                assert_eq!(settings, vec![("loop_file".to_string(), "inf".to_string())]);
-                assert_eq!(user_properties, "");
+            ControlMsg::Init { config } => {
+                assert_eq!(config.protocol_version, crate::ipc::proto::PROTOCOL_VERSION);
+                assert_eq!(config.spawn_version, 1); // pulled from def_mpv_schema
+                assert_eq!(
+                    config.settings,
+                    vec![("loop_file".to_string(), "inf".to_string())]
+                );
+                assert_eq!(config.user_properties, "");
             }
             other => panic!("expected ControlMsg::Init, got {other:?}"),
         }
@@ -2649,9 +2571,13 @@ mod init_handshake_tests {
             send_event(
                 &renderer,
                 &EventMsg::InitNack {
-                    received_spawn_version: 999,
-                    supported_spawn_version: SPAWN_VERSION,
-                    reason: "unsupported spawn_version".into(),
+                    rejection: InitRejection {
+                        received_protocol_version: PROTOCOL_VERSION,
+                        supported_protocol_version: PROTOCOL_VERSION,
+                        received_spawn_version: 999,
+                        supported_spawn_version: SPAWN_VERSION,
+                        reason: "unsupported spawn_version".into(),
+                    },
                 },
                 &[],
             )

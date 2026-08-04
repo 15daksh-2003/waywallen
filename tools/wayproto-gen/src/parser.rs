@@ -229,6 +229,9 @@ pub fn parse_protocol(src: &str) -> Result<Protocol, ParseError> {
         }
     }
 
+    validate_fd_paths(&requests, &structs)?;
+    validate_fd_paths(&events, &structs)?;
+
     Ok(Protocol {
         name,
         version,
@@ -238,6 +241,66 @@ pub fn parse_protocol(src: &str) -> Result<Protocol, ParseError> {
         requests,
         events,
     })
+}
+
+fn validate_fd_paths(messages: &[Message], structs: &[NamedStruct]) -> Result<(), ParseError> {
+    let structs: HashMap<&str, &NamedStruct> = structs
+        .iter()
+        .map(|item| (item.name.as_str(), item))
+        .collect();
+
+    for message in messages {
+        let FdSpec::Product(paths) = &message.fds else {
+            continue;
+        };
+        for path in paths {
+            let mut segments = path.split('.');
+            let root = segments.next().expect("validated non-empty fd path");
+            let mut ty = &message
+                .args
+                .iter()
+                .find(|arg| arg.name == root)
+                .ok_or_else(|| ParseError {
+                    pos: 0,
+                    msg: format!(
+                        "count_expr path {path} does not start with a field of message {}",
+                        message.name
+                    ),
+                })?
+                .ty;
+
+            for segment in segments {
+                let ArgType::Named(struct_name) = ty else {
+                    return err(
+                        0,
+                        format!("count_expr path {path} traverses non-struct field {segment}"),
+                    );
+                };
+                let item = structs
+                    .get(struct_name.as_str())
+                    .expect("validated named struct reference");
+                ty = &item
+                    .fields
+                    .iter()
+                    .find(|field| field.name == segment)
+                    .ok_or_else(|| ParseError {
+                        pos: 0,
+                        msg: format!(
+                            "count_expr path {path} has no field {segment} in struct {struct_name}"
+                        ),
+                    })?
+                    .ty;
+            }
+
+            if !matches!(ty, ArgType::U32 | ArgType::U64) {
+                return err(
+                    0,
+                    format!("count_expr path {path} must resolve to u32 or u64"),
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn parse_enum(node: &Node) -> Result<NamedEnum, ParseError> {
@@ -490,8 +553,8 @@ fn parse_fds(node: &Node) -> Result<FdSpec, ParseError> {
             Ok(FdSpec::Fixed(n))
         }
     } else if let Some(expr) = node.attr("count_expr") {
-        // Support only "a * b * c ..." — whitespace-separated field names
-        // joined by `*`. Anything fancier is rejected.
+        // Support only products of message fields or nested struct fields.
+        // Each operand is an identifier path such as `pool.count`.
         let parts: Vec<String> = expr
             .split('*')
             .map(|p| p.trim().to_string())
@@ -501,8 +564,13 @@ fn parse_fds(node: &Node) -> Result<FdSpec, ParseError> {
             return err(0, "empty count_expr");
         }
         for p in &parts {
-            if !p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                return err(0, format!("count_expr field not an ident: {p}"));
+            if p.split('.').any(|segment| {
+                segment.is_empty()
+                    || !segment
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            }) {
+                return err(0, format!("count_expr field not an ident path: {p}"));
             }
         }
         Ok(FdSpec::Product(parts))
@@ -722,9 +790,16 @@ mod tests {
     #[test]
     fn parse_fds() {
         let src = r#"<protocol name="t" version="1">
+            <struct name="pool">
+                <field name="count" type="u32"/>
+                <field name="planes_per_buffer" type="u32"/>
+            </struct>
             <event name="a" opcode="1"><fds count="1"/></event>
             <event name="b" opcode="2"><fds count="0"/></event>
-            <event name="c" opcode="3"><fds count_expr="count * planes_per_buffer"/></event>
+            <event name="c" opcode="3">
+                <arg name="pool" type="pool"/>
+                <fds count_expr="pool.count * pool.planes_per_buffer"/>
+            </event>
         </protocol>"#;
         let p = parse_protocol(src).unwrap();
         assert!(matches!(p.events[0].fds, FdSpec::Fixed(1)));
@@ -733,11 +808,35 @@ mod tests {
             FdSpec::Product(parts) => {
                 assert_eq!(
                     parts,
-                    &vec!["count".to_string(), "planes_per_buffer".to_string()]
+                    &vec![
+                        "pool.count".to_string(),
+                        "pool.planes_per_buffer".to_string()
+                    ]
                 );
             }
             _ => panic!("expected Product"),
         }
+    }
+
+    #[test]
+    fn rejects_invalid_fd_field_paths() {
+        let missing = r#"<protocol name="t" version="1">
+            <struct name="pool"><field name="count" type="u32"/></struct>
+            <event name="bind" opcode="1">
+                <arg name="pool" type="pool"/>
+                <fds count_expr="pool.missing"/>
+            </event>
+        </protocol>"#;
+        assert!(parse_protocol(missing).is_err());
+
+        let non_integer = r#"<protocol name="t" version="1">
+            <struct name="pool"><field name="label" type="string"/></struct>
+            <event name="bind" opcode="1">
+                <arg name="pool" type="pool"/>
+                <fds count_expr="pool.label"/>
+            </event>
+        </protocol>"#;
+        assert!(parse_protocol(non_integer).is_err());
     }
 
     #[test]

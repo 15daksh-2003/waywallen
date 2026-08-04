@@ -70,7 +70,7 @@ set_target_properties(waywallen-bridge PROPERTIES
     EXPORT_NAME bridge
 )
 
-# Symbol visibility: export only the public ww_* API.
+# Symbol visibility: export only the public bridge and generated value APIs.
 # Uses a linker version script because ipc_v3.{h,c} is auto-generated and
 # hand-annotating its declarations with a visibility macro would be lost on
 # regeneration. Restricted to ELF/GNU-like linkers (Linux is the only

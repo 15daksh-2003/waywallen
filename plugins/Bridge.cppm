@@ -17,19 +17,21 @@ module;
 
 enum : uint32_t
 {
-    OWE_WW_BRIDGE_SUPPORTED_SPAWN_VERSION = WW_BRIDGE_SUPPORTED_SPAWN_VERSION,
-    OWE_WW_MEM_HINT_DEVICE_LOCAL          = WW_MEM_HINT_DEVICE_LOCAL,
-    OWE_WW_MEM_HINT_HOST_VISIBLE          = WW_MEM_HINT_HOST_VISIBLE,
-    OWE_WW_DRM_FORMAT_ABGR8888            = WW_DRM_FORMAT_ABGR8888,
-    OWE_WW_DRM_FORMAT_XBGR8888            = WW_DRM_FORMAT_XBGR8888,
-    OWE_WW_DRM_FORMAT_ARGB8888            = WW_DRM_FORMAT_ARGB8888,
-    OWE_WW_DRM_FORMAT_XRGB8888            = WW_DRM_FORMAT_XRGB8888,
-    OWE_WW_DRM_FORMAT_RGBA8888            = WW_DRM_FORMAT_RGBA8888,
-    OWE_WW_DRM_FORMAT_BGRA8888            = WW_DRM_FORMAT_BGRA8888,
-    OWE_WW_DRM_FORMAT_RGBX8888            = WW_DRM_FORMAT_RGBX8888,
-    OWE_WW_DRM_FORMAT_BGRX8888            = WW_DRM_FORMAT_BGRX8888,
+    OWE_WW_BRIDGE_SUPPORTED_PROTOCOL_VERSION = WW_BRIDGE_SUPPORTED_PROTOCOL_VERSION,
+    OWE_WW_BRIDGE_SUPPORTED_SPAWN_VERSION    = WW_BRIDGE_SUPPORTED_SPAWN_VERSION,
+    OWE_WW_MEM_HINT_DEVICE_LOCAL             = WW_MEM_HINT_DEVICE_LOCAL,
+    OWE_WW_MEM_HINT_HOST_VISIBLE             = WW_MEM_HINT_HOST_VISIBLE,
+    OWE_WW_DRM_FORMAT_ABGR8888               = WW_DRM_FORMAT_ABGR8888,
+    OWE_WW_DRM_FORMAT_XBGR8888               = WW_DRM_FORMAT_XBGR8888,
+    OWE_WW_DRM_FORMAT_ARGB8888               = WW_DRM_FORMAT_ARGB8888,
+    OWE_WW_DRM_FORMAT_XRGB8888               = WW_DRM_FORMAT_XRGB8888,
+    OWE_WW_DRM_FORMAT_RGBA8888               = WW_DRM_FORMAT_RGBA8888,
+    OWE_WW_DRM_FORMAT_BGRA8888               = WW_DRM_FORMAT_BGRA8888,
+    OWE_WW_DRM_FORMAT_RGBX8888               = WW_DRM_FORMAT_RGBX8888,
+    OWE_WW_DRM_FORMAT_BGRX8888               = WW_DRM_FORMAT_BGRX8888,
 };
 
+#undef WW_BRIDGE_SUPPORTED_PROTOCOL_VERSION
 #undef WW_BRIDGE_SUPPORTED_SPAWN_VERSION
 #undef WW_MEM_HINT_DEVICE_LOCAL
 #undef WW_MEM_HINT_HOST_VISIBLE
@@ -47,6 +49,8 @@ export module waywallen.bridge;
 export import vulkan;
 import rstd.cppstd;
 
+export inline constexpr uint32_t WW_BRIDGE_SUPPORTED_PROTOCOL_VERSION =
+    OWE_WW_BRIDGE_SUPPORTED_PROTOCOL_VERSION;
 export inline constexpr uint32_t WW_BRIDGE_SUPPORTED_SPAWN_VERSION =
     OWE_WW_BRIDGE_SUPPORTED_SPAWN_VERSION;
 
@@ -80,7 +84,6 @@ export using ::WW_EVT_IN_POINTER_AXIS;
 export using ::WW_EVT_IN_POINTER_BUTTON;
 export using ::WW_EVT_IN_POINTER_MOTION;
 export using ::WW_EVT_IN_MPRIS;
-export using ::WW_EVT_IN_SET_FPS;
 export using ::WW_EVT_IN_SETTING_CHANGED;
 export using ::WW_EVT_IN_SHUTDOWN;
 export using ::WW_EVT_IN_UNMUTE;
@@ -113,18 +116,7 @@ export using ::ww_bridge_close;
 export using ::ww_bridge_connect;
 export using ::ww_bridge_control_free;
 export using ::ww_bridge_control_t;
-export using ::ww_bridge_init_free;
-export using ::ww_bridge_init_t;
 export using ::ww_bridge_log_level_t;
-export using ::ww_bridge_pointer_axis_from_control;
-export using ::ww_bridge_pointer_axis_t;
-export using ::ww_bridge_pointer_button_from_control;
-export using ::ww_bridge_pointer_button_t;
-export using ::ww_bridge_pointer_motion_from_control;
-export using ::ww_bridge_pointer_motion_t;
-export using ::ww_bridge_mpris_free;
-export using ::ww_bridge_mpris_from_control;
-export using ::ww_bridge_mpris_t;
 export using ::ww_bridge_pool_abort_acquired_slot;
 export using ::ww_bridge_pool_advertise_caps;
 export using ::ww_bridge_pool_apply_directive;
@@ -141,9 +133,6 @@ export using ::ww_bridge_send_bind_failed;
 export using ::ww_bridge_send_init_nack;
 export using ::ww_bridge_send_report_state_clear_color;
 export using ::ww_bridge_set_log_callback;
-export using ::ww_bridge_setting_changed_free;
-export using ::ww_bridge_setting_changed_from_control;
-export using ::ww_bridge_setting_changed_t;
 export using ::ww_bridge_vk_dt_load;
 export using ::ww_bridge_vk_dt_t;
 export using ::ww_bridge_vk_log_gpu_info;
@@ -165,6 +154,17 @@ export using ::ww_pool_slot_submit_result_t;
 export using ::ww_pool_slot_submit_status_t;
 export using ::ww_pool_t;
 export using ::ww_pool_vulkan_init_t;
+export using ::waywallen_bind_failure_t;
+export using ::waywallen_buffer_allocation_failure_kind_t;
+export using ::waywallen_buffer_directive_t;
+export using ::waywallen_event_subscription_result_t;
+export using ::waywallen_init_rejection_t;
+export using ::waywallen_mpris_snapshot_t;
+export using ::waywallen_pointer_axis_t;
+export using ::waywallen_pointer_button_t;
+export using ::waywallen_pointer_motion_t;
+export using ::waywallen_renderer_init_free;
+export using ::waywallen_renderer_init_t;
 
 export inline uint32_t ww_resolution_short_edge(int32_t r) {
     switch (r) {

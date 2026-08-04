@@ -7,6 +7,7 @@ use super::playback::{has_external_playback, PlaybackObserverBackend};
 use super::pulse::{AudioCaptureBackend, CaptureErrorKind, PulseCapture, PulsePlaybackObserver};
 use super::window::{AudioPcmWindow, AUDIO_WINDOW_END_OF_STREAM};
 use crate::events::GlobalEvent;
+use crate::ipc::proto::{AudioStreamFormat, AudioWindow};
 use crate::renderer_manager::{RendererEventKind, RendererManager};
 use crate::routing::Router;
 use crate::settings::SettingsStore;
@@ -178,16 +179,20 @@ impl AudioService {
                             if let Err(error) = manager
                                 .send_audio_window_latest(
                                     &id,
-                                    revision,
-                                    frame.generation,
-                                    frame.sequence,
-                                    frame.captured_at_ns,
-                                    frame.end_sample_frame,
-                                    frame.sample_rate_hz,
-                                    frame.channels,
-                                    frame.frames,
-                                    0,
-                                    frame.samples.to_vec(),
+                                    AudioWindow {
+                                        subscription_revision: revision,
+                                        generation: frame.generation,
+                                        sequence: frame.sequence,
+                                        captured_at_ns: frame.captured_at_ns,
+                                        end_sample_frame: frame.end_sample_frame,
+                                        format: AudioStreamFormat {
+                                            sample_rate_hz: frame.sample_rate_hz,
+                                            channels: frame.channels,
+                                        },
+                                        frames: frame.frames,
+                                        flags: 0,
+                                        samples: frame.samples.to_vec(),
+                                    },
                                 )
                                 .await
                             {
@@ -236,16 +241,20 @@ async fn send_end(manager: &RendererManager, generation: u64, sequence: u64) {
         if let Err(error) = manager
             .send_audio_window_latest(
                 &id,
-                revision,
-                generation,
-                sequence,
-                captured_at_ns,
-                0,
-                0,
-                0,
-                0,
-                AUDIO_WINDOW_END_OF_STREAM,
-                Vec::new(),
+                AudioWindow {
+                    subscription_revision: revision,
+                    generation,
+                    sequence,
+                    captured_at_ns,
+                    end_sample_frame: 0,
+                    format: AudioStreamFormat {
+                        sample_rate_hz: 0,
+                        channels: 0,
+                    },
+                    frames: 0,
+                    flags: AUDIO_WINDOW_END_OF_STREAM,
+                    samples: Vec::new(),
+                },
             )
             .await
         {

@@ -91,7 +91,11 @@ static void teardown_slots(ww_pool_t* p) {
 
 static int send_ready_once(ww_pool_t* p, int sock) {
     if (p->ready_sent) return 0;
-    int rc = ww_bridge_send_ready(sock, p->caps.drm_render_major, p->caps.drm_render_minor);
+    const waywallen_drm_node_t drm_node = {
+        .major = p->caps.drm_render_major,
+        .minor = p->caps.drm_render_minor,
+    };
+    int rc = ww_bridge_send_ready(sock, &drm_node);
     if (rc != 0) return rc;
     p->ready_sent = true;
     return 0;
@@ -166,25 +170,25 @@ static int emit_bind_buffers(ww_pool_t* p, int sock) {
      * leave the bit clear there (consumer treats absent as "device
      * local; same-GPU only"). */
     uint32_t bb_flags = 0;
-    if (p->cur.mem_source == WW_MEM_SRC_GPU_LINEAR || p->cur.mem_source == WW_MEM_SRC_DMABUF_HEAP) {
+    if (p->cur.directive.memory_source == WAYWALLEN_BUFFER_MEMORY_SOURCE_GPU_LINEAR ||
+        p->cur.directive.memory_source == WAYWALLEN_BUFFER_MEMORY_SOURCE_DMABUF_HEAP) {
         bb_flags |= WW_BUF_HOST_VISIBLE;
     }
 
-    ww_evt_bind_buffers_t bb = { 0 };
-    bb.generation            = bind_generation;
-    bb.flags                 = bb_flags;
-    bb.count                 = p->n_slots;
-    bb.fourcc                = p->cur.fourcc;
-    bb.width                 = p->cur.width;
-    bb.height                = p->cur.height;
-    bb.modifier              = p->slots[0].modifier;
-    bb.planes_per_buffer     = planes_per_buffer;
-    bb.stride.count          = total;
-    bb.stride.data           = strides;
-    bb.plane_offset.count    = total;
-    bb.plane_offset.data     = offsets;
-    bb.size.count            = total;
-    bb.size.data             = sizes;
+    waywallen_buffer_pool_t bb = {
+        .generation = bind_generation,
+        .flags      = bb_flags,
+        .count      = p->n_slots,
+        .format     = {
+            .fourcc      = p->cur.directive.format.fourcc,
+            .modifier    = p->slots[0].modifier,
+            .plane_count = planes_per_buffer,
+        },
+        .extent       = p->cur.extent,
+        .stride       = { .count = total, .data = strides },
+        .plane_offset = { .count = total, .data = offsets },
+        .size          = { .count = total, .data = sizes },
+    };
 
     ww_bridge_logf(WW_BRIDGE_LOG_DEBUG,
                    "ww_pool: emit_bind_buffers gen=%llu count=%u planes=%u fourcc=0x%08x "
@@ -192,10 +196,10 @@ static int emit_bind_buffers(ww_pool_t* p, int sock) {
                    (unsigned long long)bb.generation,
                    bb.count,
                    planes_per_buffer,
-                   bb.fourcc,
-                   bb.width,
-                   bb.height,
-                   (unsigned long long)bb.modifier,
+                   bb.format.fourcc,
+                   bb.extent.width,
+                   bb.extent.height,
+                   (unsigned long long)bb.format.modifier,
                    bb.flags);
     for (uint32_t s = 0; s < p->n_slots; ++s) {
         for (uint32_t pl = 0; pl < planes_per_buffer; ++pl) {
@@ -224,30 +228,30 @@ static int validate_directive(const ww_pool_t* p, const ww_pool_directive_t* d) 
      * dims (caller forgot to call `advertise_caps`). */
     if (p->probe_width == 0 || p->probe_height == 0) return -EINVAL;
 
-    switch (d->category) {
-    case WW_PATH_OPTIMIZED_SAME_DEVICE:
-    case WW_PATH_OPTIMIZED_SAME_VENDOR:
-    case WW_PATH_COMPAT_LINEAR: break;
-    case WW_PATH_COMPAT_CPU_READBACK: return -ENOTSUP; /* Iter 3+ */
+    switch (d->path) {
+    case WAYWALLEN_BUFFER_PATH_OPTIMIZED_SAME_DEVICE:
+    case WAYWALLEN_BUFFER_PATH_OPTIMIZED_SAME_VENDOR:
+    case WAYWALLEN_BUFFER_PATH_COMPAT_LINEAR: break;
+    case WAYWALLEN_BUFFER_PATH_COMPAT_CPU_READBACK: return -ENOTSUP;
     default: return -EINVAL;
     }
 
-    switch (d->mem_source) {
-    case WW_MEM_SRC_GPU_NATIVE:
-    case WW_MEM_SRC_GPU_LINEAR: break;
-    case WW_MEM_SRC_DMABUF_HEAP: return -ENOTSUP; /* Iter 1 doesn't implement dma-buf-heap */
+    switch (d->memory_source) {
+    case WAYWALLEN_BUFFER_MEMORY_SOURCE_GPU_NATIVE:
+    case WAYWALLEN_BUFFER_MEMORY_SOURCE_GPU_LINEAR: break;
+    case WAYWALLEN_BUFFER_MEMORY_SOURCE_DMABUF_HEAP: return -ENOTSUP;
     default: return -EINVAL;
     }
 
     /* OPTIMIZED paths must reference an advertised (fourcc, modifier).
      * COMPAT_LINEAR doesn't have to be advertised — bridge may
      * re-allocate a brand-new LINEAR buffer regardless. */
-    if (d->category == WW_PATH_OPTIMIZED_SAME_DEVICE ||
-        d->category == WW_PATH_OPTIMIZED_SAME_VENDOR) {
+    if (d->path == WAYWALLEN_BUFFER_PATH_OPTIMIZED_SAME_DEVICE ||
+        d->path == WAYWALLEN_BUFFER_PATH_OPTIMIZED_SAME_VENDOR) {
         bool ok = false;
         for (size_t i = 0; i < p->caps.count; ++i) {
-            if (p->caps.entries[i].fourcc == d->fourcc &&
-                p->caps.entries[i].modifier == d->modifier) {
+            if (p->caps.entries[i].fourcc == d->format.fourcc &&
+                p->caps.entries[i].modifier == d->format.modifier) {
                 ok = true;
                 break;
             }
@@ -255,8 +259,7 @@ static int validate_directive(const ww_pool_t* p, const ww_pool_directive_t* d) 
         if (! ok) return -ENOTSUP;
     }
 
-    /* Iter 1 only supports timeline drm_syncobj; daemon must pick
-     * SYNC_SYNCOBJ_TIMELINE. Other modes are reserved for Iter 4. */
+    /* The pool lifecycle is defined by a timeline drm_syncobj. */
     if (d->sync_mode != WW_SYNC_SYNCOBJ_TIMELINE) {
         return -ENOTSUP;
     }
@@ -264,9 +267,15 @@ static int validate_directive(const ww_pool_t* p, const ww_pool_directive_t* d) 
     return 0;
 }
 
-static void send_bind_failed_quiet(ww_pool_t* p, int sock, uint32_t fourcc, uint64_t modifier,
-                                   uint32_t reason, const char* msg) {
-    int rc = ww_bridge_send_bind_failed(sock, fourcc, modifier, reason, msg);
+static void send_bind_failed_quiet(ww_pool_t* p, int sock, const waywallen_buffer_format_t* format,
+                                   waywallen_buffer_allocation_failure_kind_t kind,
+                                   const char*                                msg) {
+    waywallen_bind_failure_t failure = {
+        .format  = *format,
+        .kind    = kind,
+        .message = (char*)msg,
+    };
+    int rc = ww_bridge_send_bind_failed(sock, &failure);
     if (rc != 0) {
         ww_bridge_logf(WW_BRIDGE_LOG_ERROR, "ww_pool: send bind_failed failed: %d", rc);
     }
@@ -373,7 +382,7 @@ int ww_bridge_pool_advertise_caps(ww_pool_t* pool, int sock, uint32_t width, uin
     rc = send_release_syncobj_once(pool, sock);
     if (rc != 0) return rc;
 
-    /* Encode caps as a flat ww_evt_format_caps_t and send. */
+    /* Flatten the per-format entries into the protocol capability arrays. */
     if (pool->caps.count == 0) return -ENOTSUP;
 
     /* Worst-case scratch sizing: one fourcc per entry. */
@@ -398,21 +407,31 @@ int ww_bridge_pool_advertise_caps(ww_pool_t* pool, int sock, uint32_t width, uin
     neg.modifier               = pool->caps.entries[0].modifier;
     neg.plane_count            = pool->caps.entries[0].plane_count;
 
-    ww_format_caps_caller_t out = { 0 };
+    waywallen_producer_capabilities_t out = { 0 };
     ww_bridge_negotiation_fill_format_caps(
         &neg, scratch_fourccs, scratch_mod_counts, scratch_modifiers, scratch_plane_counts, &out);
 
-    out.device_uuid      = pool->caps.have_uuid ? pool->caps.device_uuid : NULL;
-    out.driver_uuid      = pool->caps.have_uuid ? pool->caps.driver_uuid : NULL;
-    out.drm_render_major = pool->caps.drm_render_major;
-    out.drm_render_minor = pool->caps.drm_render_minor;
-    out.mem_hints        = pool->caps.mem_hints;
-    out.sync_caps        = pool->caps.sync_caps;
-    out.color_caps       = pool->caps.color_caps;
-    out.extent_max_w     = pool->caps.extent_max_w;
-    out.extent_max_h     = pool->caps.extent_max_h;
+    uint32_t device_uuid[4] = { 0 };
+    uint32_t driver_uuid[4] = { 0 };
+    if (pool->caps.have_uuid) {
+        memcpy(device_uuid, pool->caps.device_uuid, sizeof(device_uuid));
+        memcpy(driver_uuid, pool->caps.driver_uuid, sizeof(driver_uuid));
+    }
+    out.device_uuid = (ww_array_u32_t) { .count = 4, .data = device_uuid };
+    out.driver_uuid = (ww_array_u32_t) { .count = 4, .data = driver_uuid };
+    out.drm_node    = (waywallen_drm_node_t) {
+        .major = pool->caps.drm_render_major,
+        .minor = pool->caps.drm_render_minor,
+    };
+    out.mem_hints  = pool->caps.mem_hints;
+    out.sync_caps  = pool->caps.sync_caps;
+    out.color_caps = pool->caps.color_caps;
+    out.max_extent = (waywallen_extent_t) {
+        .width  = pool->caps.extent_max_w,
+        .height = pool->caps.extent_max_h,
+    };
 
-    rc = ww_bridge_send_format_caps_v2(sock, &out);
+    rc = ww_bridge_send_format_caps(sock, &out);
     free(scratch_fourccs);
     free(scratch_mod_counts);
     free(scratch_modifiers);
@@ -434,16 +453,15 @@ int ww_bridge_pool_apply_directive(ww_pool_t* pool, int sock,
     if (rc != 0) {
         send_bind_failed_quiet(pool,
                                sock,
-                               directive->fourcc,
-                               directive->modifier,
-                               2 /* feature_unsupported */,
+                               &directive->format,
+                               WAYWALLEN_BUFFER_ALLOCATION_FAILURE_KIND_UNSUPPORTED,
                                "directive rejected by pool");
         return rc;
     }
 
     /* Tear down existing slots before re-allocating. */
     teardown_slots(pool);
-    pool->cur = *directive;
+    pool->cur.directive = *directive;
     /* The renderer is the authority on render-target extent — it
      * already resolved the daemon's policy hint against its content's
      * intrinsic size when it called `advertise_caps`, and its render
@@ -453,8 +471,10 @@ int ww_bridge_pool_apply_directive(ww_pool_t* pool, int sock,
      * just an echo of what it sent in `Init` and isn't authoritative
      * here. Override with the renderer's choice so dmabuf slots
      * match the frames being put into them. */
-    if (pool->probe_width > 0) pool->cur.width = pool->probe_width;
-    if (pool->probe_height > 0) pool->cur.height = pool->probe_height;
+    pool->cur.extent = (waywallen_extent_t) {
+        .width  = pool->probe_width,
+        .height = pool->probe_height,
+    };
     pool->has_directive = true;
 
     /* Dry-run: try slot 0 first. */
@@ -463,15 +483,14 @@ int ww_bridge_pool_apply_directive(ww_pool_t* pool, int sock,
         ww_bridge_logf(WW_BRIDGE_LOG_WARN,
                        "ww_pool: dry-run alloc_slot[0] failed (path=%u mem_src=%u "
                        "modifier=0x%016llx): %d",
-                       directive->category,
-                       directive->mem_source,
-                       (unsigned long long)directive->modifier,
+                       directive->path,
+                       directive->memory_source,
+                       (unsigned long long)directive->format.modifier,
                        rc);
         send_bind_failed_quiet(pool,
                                sock,
-                               directive->fourcc,
-                               directive->modifier,
-                               0 /* import_failed */,
+                               &directive->format,
+                               WAYWALLEN_BUFFER_ALLOCATION_FAILURE_KIND_ALLOCATOR_REJECTED,
                                "alloc_slot dry-run failed");
         pool->n_slots = 0;
         return rc;
@@ -486,9 +505,8 @@ int ww_bridge_pool_apply_directive(ww_pool_t* pool, int sock,
             ww_bridge_logf(WW_BRIDGE_LOG_ERROR, "ww_pool: alloc_slot[%u] failed: %d", i, rc);
             send_bind_failed_quiet(pool,
                                    sock,
-                                   directive->fourcc,
-                                   directive->modifier,
-                                   1 /* oom */,
+                                   &directive->format,
+                                   WAYWALLEN_BUFFER_ALLOCATION_FAILURE_KIND_RESOURCE_EXHAUSTED,
                                    "alloc_slot failed mid-pool");
             teardown_slots(pool);
             return rc;
@@ -508,8 +526,8 @@ int ww_bridge_pool_apply_directive(ww_pool_t* pool, int sock,
 static int populate_slot_view(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_t* out_slot) {
     memset(out_slot, 0, sizeof(*out_slot));
     out_slot->index  = slot_index;
-    out_slot->width  = pool->cur.width;
-    out_slot->height = pool->cur.height;
+    out_slot->width  = pool->cur.extent.width;
+    out_slot->height = pool->cur.extent.height;
     /* Plugin-facing convenience: expose plane 0 only. Plugins that
      * need multi-plane layout (rare — render targets are normally
      * GPU-internal) read the bridge's caps directly. */
@@ -535,8 +553,8 @@ int ww_bridge_pool_get_extent(ww_pool_t* pool, uint32_t* out_width, uint32_t* ou
         pthread_mutex_unlock(&pool->release_mutex);
         return -ENODATA;
     }
-    *out_width  = pool->cur.width;
-    *out_height = pool->cur.height;
+    *out_width  = pool->cur.extent.width;
+    *out_height = pool->cur.extent.height;
     pthread_mutex_unlock(&pool->release_mutex);
     return 0;
 }
@@ -739,11 +757,12 @@ int ww_bridge_pool_submit_acquired_slot(ww_pool_t* pool, int sock,
     out_result->release_point = pt;
     pthread_mutex_unlock(&pool->release_mutex);
 
-    ww_evt_frame_ready_t fr = { 0 };
-    fr.image_index          = identity->slot_index;
-    fr.seq                  = pt; /* seq doubles as monotonic per submit */
-    fr.ts_ns                = ww_bridge_now_ns();
-    fr.release_point        = pt;
+    waywallen_frame_t fr = {
+        .image_index    = identity->slot_index,
+        .sequence       = pt,
+        .produced_at_ns = ww_bridge_now_ns(),
+        .release_point  = pt,
+    };
 
     int rc = ww_bridge_send_frame_ready(sock, &fr, acquire_sync_fd);
     if (acquire_sync_fd >= 0) close(acquire_sync_fd);

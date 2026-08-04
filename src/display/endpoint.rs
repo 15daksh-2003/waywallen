@@ -8,6 +8,11 @@ use std::sync::Arc;
 use crate::display::proto::generated::{self as wire, Rect};
 use crate::display::proto::{codec, opcode, Event, Request, PROTOCOL_VERSION};
 use crate::events::GlobalEvent;
+use crate::ipc::proto::{
+    PointerAxis as RendererPointerAxis, PointerAxisSource as RendererPointerAxisSource,
+    PointerButton as RendererPointerButton, PointerButtonState as RendererPointerButtonState,
+    PointerMotion as RendererPointerMotion,
+};
 // Display-protocol failures are daemon-internal; this layer talks to
 // display consumers over a UDS, not public WS or D-Bus surfaces.
 use crate::display::layout::display_point_to_texture;
@@ -564,7 +569,15 @@ async fn run_frame_loop(
                             // RendererManager.send_pointer_motion gates on the
                             // renderer's manifest events list.
                             if let Err(e) = router.renderer_manager()
-                                .send_pointer_motion(&r.id, tx, ty, timestamp_us, modifiers).await
+                                .send_pointer_motion(
+                                    &r.id,
+                                    RendererPointerMotion {
+                                        x: tx,
+                                        y: ty,
+                                        timestamp_us,
+                                        modifiers,
+                                    },
+                                ).await
                             {
                                 log::debug!("display {display_id}: pointer_motion forward failed: {e}");
                             }
@@ -584,7 +597,24 @@ async fn run_frame_loop(
                     if let (Some(r), Some(cfg)) = (bound_renderer.as_ref(), latest_config.as_ref()) {
                         if let Some((tx, ty)) = display_point_to_texture(x, y, cfg) {
                             if let Err(e) = router.renderer_manager()
-                                .send_pointer_button(&r.id, tx, ty, button, state as u32, timestamp_us, modifiers).await
+                                .send_pointer_button(
+                                    &r.id,
+                                    RendererPointerButton {
+                                        x: tx,
+                                        y: ty,
+                                        button,
+                                        state: match state {
+                                            wire::PointerButtonState::Released => {
+                                                RendererPointerButtonState::Released
+                                            }
+                                            wire::PointerButtonState::Pressed => {
+                                                RendererPointerButtonState::Pressed
+                                            }
+                                        },
+                                        timestamp_us,
+                                        modifiers,
+                                    },
+                                ).await
                             {
                                 log::debug!("display {display_id}: pointer_button forward failed: {e}");
                             }
@@ -606,7 +636,28 @@ async fn run_frame_loop(
                             // delta_x/delta_y are scroll quantities, not
                             // spatial; forward unchanged.
                             if let Err(e) = router.renderer_manager()
-                                .send_pointer_axis(&r.id, tx, ty, delta_x, delta_y, source as u32, timestamp_us, modifiers).await
+                                .send_pointer_axis(
+                                    &r.id,
+                                    RendererPointerAxis {
+                                        x: tx,
+                                        y: ty,
+                                        delta_x,
+                                        delta_y,
+                                        source: match source {
+                                            wire::PointerAxisSource::Wheel => {
+                                                RendererPointerAxisSource::Wheel
+                                            }
+                                            wire::PointerAxisSource::Finger => {
+                                                RendererPointerAxisSource::Finger
+                                            }
+                                            wire::PointerAxisSource::Continuous => {
+                                                RendererPointerAxisSource::Continuous
+                                            }
+                                        },
+                                        timestamp_us,
+                                        modifiers,
+                                    },
+                                ).await
                             {
                                 log::debug!("display {display_id}: pointer_axis forward failed: {e}");
                             }

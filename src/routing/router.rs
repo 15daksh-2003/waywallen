@@ -20,7 +20,7 @@ const RUNTIME_PROGRESS_HARD: Duration = Duration::from_secs(10);
 const RUNTIME_HEALTH_POLL: Duration = Duration::from_millis(500);
 
 use crate::display::layout::{FillMode, LayoutInput};
-use crate::ipc::proto::{ControlMsg, EventMsg};
+use crate::ipc::proto::{ControlMsg, ControlTransition, EventMsg};
 use crate::plugin::renderer_registry::RendererActivityMode;
 use crate::renderer_manager::{
     DrmNode, PublishedPool, RendererHandle, RendererId, RendererManager,
@@ -148,16 +148,24 @@ enum ResumeControl {
 impl ResumeControl {
     fn from_message(message: &ControlMsg) -> Option<Self> {
         match message {
-            ControlMsg::Play { fade_ms } => Some(Self::Play { fade_ms: *fade_ms }),
-            ControlMsg::Unmute { fade_ms } => Some(Self::Unmute { fade_ms: *fade_ms }),
+            ControlMsg::Play { transition } => Some(Self::Play {
+                fade_ms: transition.fade_ms,
+            }),
+            ControlMsg::Unmute { transition } => Some(Self::Unmute {
+                fade_ms: transition.fade_ms,
+            }),
             _ => None,
         }
     }
 
     fn into_message(self) -> ControlMsg {
         match self {
-            Self::Play { fade_ms } => ControlMsg::Play { fade_ms },
-            Self::Unmute { fade_ms } => ControlMsg::Unmute { fade_ms },
+            Self::Play { fade_ms } => ControlMsg::Play {
+                transition: ControlTransition { fade_ms },
+            },
+            Self::Unmute { fade_ms } => ControlMsg::Unmute {
+                transition: ControlTransition { fade_ms },
+            },
         }
     }
 
@@ -896,20 +904,15 @@ impl Router {
                                     EventMsg::BindBuffers { .. } if event.pool_generation.is_some() => {
                                         router.on_renderer_bind(&rid).await;
                                     }
-                                    EventMsg::FrameReady {
-                                        image_index,
-                                        seq,
-                                        release_point,
-                                        ..
-                                    } => {
+                                    EventMsg::FrameReady { frame } => {
                                         if let Some(buffer_generation) = event.pool_generation {
                                             router
                                                 .on_renderer_frame(
                                                     &rid,
                                                     buffer_generation,
-                                                    image_index,
-                                                    seq,
-                                                    release_point,
+                                                    frame.image_index,
+                                                    frame.sequence,
+                                                    frame.release_point,
                                                 )
                                                 .await;
                                         }
@@ -917,10 +920,14 @@ impl Router {
                                     EventMsg::FormatCaps { .. } => {
                                         router.reconcile_buffer_flags().await;
                                     }
-                                    EventMsg::BindFailed {
-                                        fourcc, modifier, ..
-                                    } => {
-                                        router.on_renderer_bind_failed(&rid, fourcc, modifier).await;
+                                    EventMsg::BindFailed { failure } => {
+                                        router
+                                            .on_renderer_bind_failed(
+                                                &rid,
+                                                failure.format.fourcc,
+                                                failure.format.modifier,
+                                            )
+                                            .await;
                                     }
                                     EventMsg::ReportState { .. } => {
                                         router.on_renderer_state_changed(&rid).await;
@@ -2665,7 +2672,9 @@ impl Router {
                         out.push((
                             rid,
                             ControlMsg::Pause {
-                                fade_ms: audio_fade_ms,
+                                transition: ControlTransition {
+                                    fade_ms: audio_fade_ms,
+                                },
                             },
                             pause_cause,
                         ));
@@ -2680,7 +2689,9 @@ impl Router {
                         out.push((
                             rid,
                             ControlMsg::Mute {
-                                fade_ms: audio_fade_ms,
+                                transition: ControlTransition {
+                                    fade_ms: audio_fade_ms,
+                                },
                             },
                             mute_cause,
                         ));
@@ -2693,7 +2704,9 @@ impl Router {
                         out.push((
                             rid,
                             ControlMsg::Play {
-                                fade_ms: audio_fade_ms,
+                                transition: ControlTransition {
+                                    fade_ms: audio_fade_ms,
+                                },
                             },
                             clear_cause,
                         ));
@@ -2706,7 +2719,9 @@ impl Router {
                         out.push((
                             rid,
                             ControlMsg::Unmute {
-                                fade_ms: audio_fade_ms,
+                                transition: ControlTransition {
+                                    fade_ms: audio_fade_ms,
+                                },
                             },
                             clear_cause,
                         ));
@@ -2718,8 +2733,20 @@ impl Router {
                         inner
                             .renderer_states
                             .insert(rid.clone(), PausedRendererStatus::Muted);
-                        out.push((rid.clone(), ControlMsg::Mute { fade_ms: 0 }, mute_cause));
-                        out.push((rid, ControlMsg::Play { fade_ms: 0 }, "state-switch"));
+                        out.push((
+                            rid.clone(),
+                            ControlMsg::Mute {
+                                transition: ControlTransition { fade_ms: 0 },
+                            },
+                            mute_cause,
+                        ));
+                        out.push((
+                            rid,
+                            ControlMsg::Play {
+                                transition: ControlTransition { fade_ms: 0 },
+                            },
+                            "state-switch",
+                        ));
                     }
                     (
                         RendererStatus::Paused(PausedRendererStatus::Muted),
@@ -2728,8 +2755,20 @@ impl Router {
                         inner
                             .renderer_states
                             .insert(rid.clone(), PausedRendererStatus::Paused);
-                        out.push((rid.clone(), ControlMsg::Pause { fade_ms: 0 }, pause_cause));
-                        out.push((rid, ControlMsg::Unmute { fade_ms: 0 }, "state-switch"));
+                        out.push((
+                            rid.clone(),
+                            ControlMsg::Pause {
+                                transition: ControlTransition { fade_ms: 0 },
+                            },
+                            pause_cause,
+                        ));
+                        out.push((
+                            rid,
+                            ControlMsg::Unmute {
+                                transition: ControlTransition { fade_ms: 0 },
+                            },
+                            "state-switch",
+                        ));
                     }
                     _ => {}
                 }
@@ -4953,8 +4992,8 @@ mod tests {
             while got.len() < 2 {
                 let (msg, _fds) = crate::ipc::uds::recv_control(&peer).expect("recv control");
                 match msg {
-                    ControlMsg::Mute { fade_ms } => got.push(("mute", fade_ms)),
-                    ControlMsg::Unmute { fade_ms } => got.push(("unmute", fade_ms)),
+                    ControlMsg::Mute { transition } => got.push(("mute", transition.fade_ms)),
+                    ControlMsg::Unmute { transition } => got.push(("unmute", transition.fade_ms)),
                     _ => {}
                 }
             }
@@ -5035,10 +5074,10 @@ mod tests {
             while got.len() < 4 {
                 let (msg, _fds) = crate::ipc::uds::recv_control(&peer).expect("recv control");
                 match msg {
-                    ControlMsg::Pause { fade_ms } => got.push(("pause", fade_ms)),
-                    ControlMsg::Play { fade_ms } => got.push(("play", fade_ms)),
-                    ControlMsg::Mute { fade_ms } => got.push(("mute", fade_ms)),
-                    ControlMsg::Unmute { fade_ms } => got.push(("unmute", fade_ms)),
+                    ControlMsg::Pause { transition } => got.push(("pause", transition.fade_ms)),
+                    ControlMsg::Play { transition } => got.push(("play", transition.fade_ms)),
+                    ControlMsg::Mute { transition } => got.push(("mute", transition.fade_ms)),
+                    ControlMsg::Unmute { transition } => got.push(("unmute", transition.fade_ms)),
                     _ => {}
                 }
             }
@@ -5094,10 +5133,10 @@ mod tests {
             while got.len() < 4 {
                 let (msg, _fds) = crate::ipc::uds::recv_control(&peer).expect("recv control");
                 match msg {
-                    ControlMsg::Pause { fade_ms } => got.push(("pause", fade_ms)),
-                    ControlMsg::Play { fade_ms } => got.push(("play", fade_ms)),
-                    ControlMsg::Mute { fade_ms } => got.push(("mute", fade_ms)),
-                    ControlMsg::Unmute { fade_ms } => got.push(("unmute", fade_ms)),
+                    ControlMsg::Pause { transition } => got.push(("pause", transition.fade_ms)),
+                    ControlMsg::Play { transition } => got.push(("play", transition.fade_ms)),
+                    ControlMsg::Mute { transition } => got.push(("mute", transition.fade_ms)),
+                    ControlMsg::Unmute { transition } => got.push(("unmute", transition.fade_ms)),
                     _ => {}
                 }
             }

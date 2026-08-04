@@ -126,18 +126,13 @@ mod handshake_cpp {
             };
             match msg {
                 EventMsg::Ready { .. } => saw_ready = true,
-                EventMsg::BindBuffers {
-                    count,
-                    fourcc,
-                    width,
-                    height,
-                    modifier,
-                    planes_per_buffer,
-                    stride,
-                    plane_offset,
-                    size,
-                    ..
-                } => {
+                EventMsg::BindBuffers { pool } => {
+                    let count = pool.count;
+                    let fourcc = pool.format.fourcc;
+                    let width = pool.extent.width;
+                    let height = pool.extent.height;
+                    let modifier = pool.format.modifier;
+                    let planes_per_buffer = pool.format.plane_count;
                     eprintln!(
                         "BindBuffers: count={} fourcc=0x{:08x} {}x{} planes={} mod=0x{:x} \
                      stride={:?} plane_offset={:?} size={:?} fds={}",
@@ -147,9 +142,9 @@ mod handshake_cpp {
                         height,
                         planes_per_buffer,
                         modifier,
-                        stride,
-                        plane_offset,
-                        size,
+                        pool.stride,
+                        pool.plane_offset,
+                        pool.size,
                         fds.len()
                     );
                     assert_eq!(count, 3, "expected 3 slots");
@@ -161,12 +156,19 @@ mod handshake_cpp {
                     );
                     assert!(fourcc != 0, "fourcc must be non-zero");
                     assert!(
-                        u64::from(stride[0]) >= u64::from(width) * 4,
+                        u64::from(pool.stride[0]) >= u64::from(width) * 4,
                         "stride sanity"
                     );
                     bind = Some((
                         fds.iter().map(|f| f.as_raw_fd()).collect(),
-                        (count, fourcc, width, height, u64::from(stride[0]), modifier),
+                        (
+                            count,
+                            fourcc,
+                            width,
+                            height,
+                            u64::from(pool.stride[0]),
+                            modifier,
+                        ),
                     ));
                     std::mem::forget(fds);
                 }
@@ -250,19 +252,15 @@ mod handshake_rust {
         //    count * planes_per_buffer = 3 fds).
         let (msg, fds) = recv_event(&stream).expect("recv BindBuffers");
         match msg {
-            EventMsg::BindBuffers {
-                generation,
-                flags,
-                count,
-                fourcc,
-                width,
-                height,
-                modifier,
-                planes_per_buffer,
-                stride,
-                plane_offset,
-                size,
-            } => {
+            EventMsg::BindBuffers { pool } => {
+                let generation = pool.generation;
+                let flags = pool.flags;
+                let count = pool.count;
+                let fourcc = pool.format.fourcc;
+                let width = pool.extent.width;
+                let height = pool.extent.height;
+                let modifier = pool.format.modifier;
+                let planes_per_buffer = pool.format.plane_count;
                 assert_eq!(generation, 1, "first BindBuffers must report gen=1");
                 assert_eq!(flags, 0, "initial pool must be DEVICE_LOCAL (flags=0)");
                 assert_eq!(count, 3);
@@ -276,17 +274,17 @@ mod handshake_rust {
                 assert_eq!(planes_per_buffer, 1, "LINEAR → single plane");
                 let n = (count as usize) * (planes_per_buffer as usize);
                 assert_eq!(fds.len(), n, "expected count*planes={n} DMA-BUF fds");
-                assert_eq!(stride.len(), n);
-                assert_eq!(plane_offset.len(), n);
-                assert_eq!(size.len(), n);
-                for &s in &stride {
+                assert_eq!(pool.stride.len(), n);
+                assert_eq!(pool.plane_offset.len(), n);
+                assert_eq!(pool.size.len(), n);
+                for &s in &pool.stride {
                     assert!(s >= 256 * 4, "stride {s} below minimum");
                 }
-                for &o in &plane_offset {
+                for &o in &pool.plane_offset {
                     assert_eq!(o, 0);
                 }
-                for (i, &sz) in size.iter().enumerate() {
-                    assert_eq!(sz, u64::from(stride[i]) * u64::from(height));
+                for (i, &sz) in pool.size.iter().enumerate() {
+                    assert_eq!(sz, u64::from(pool.stride[i]) * u64::from(height));
                 }
             }
             other => panic!("expected BindBuffers, got {other:?}"),
@@ -300,16 +298,14 @@ mod handshake_rust {
             let (ev, fds) = recv_event(&stream).expect("recv FrameReady");
             assert_eq!(fds.len(), 1, "FrameReady must carry exactly one sync_fd");
             match ev {
-                EventMsg::FrameReady {
-                    image_index,
-                    seq,
-                    ts_ns,
-                    ..
-                } => {
-                    assert!(ts_ns > 0, "ts_ns must be monotonic");
-                    assert!((seq as i64) > last_seq, "seq must be monotonic");
-                    last_seq = seq as i64;
-                    observed_slots.push(image_index);
+                EventMsg::FrameReady { frame } => {
+                    assert!(frame.produced_at_ns > 0, "produced_at_ns must be monotonic");
+                    assert!(
+                        (frame.sequence as i64) > last_seq,
+                        "sequence must be monotonic"
+                    );
+                    last_seq = frame.sequence as i64;
+                    observed_slots.push(frame.image_index);
                 }
                 other => panic!("expected FrameReady, got {other:?}"),
             }
@@ -348,7 +344,7 @@ mod lifecycle {
 
     use std::sync::Arc;
     use std::time::Duration;
-    use waywallen::ipc::proto::ControlMsg;
+    use waywallen::ipc::proto::{ControlMsg, ControlTransition, PointerMotion};
     use waywallen::renderer_manager::{RendererManager, SpawnRequest};
 
     #[tokio::test]
@@ -385,26 +381,43 @@ mod lifecycle {
 
         // Push a few control messages. Each one is a fire-and-forget round
         // trip on the unix socket; success means the host's reader thread
-        mgr.send_control(&id, ControlMsg::Play { fade_ms: 0 })
-            .await
-            .expect("Play");
-        mgr.send_control(&id, ControlMsg::Pause { fade_ms: 0 })
-            .await
-            .expect("Pause");
+        mgr.send_control(
+            &id,
+            ControlMsg::Play {
+                transition: ControlTransition { fade_ms: 0 },
+            },
+        )
+        .await
+        .expect("Play");
+        mgr.send_control(
+            &id,
+            ControlMsg::Pause {
+                transition: ControlTransition { fade_ms: 0 },
+            },
+        )
+        .await
+        .expect("Pause");
         mgr.send_control(
             &id,
             ControlMsg::PointerMotion {
-                x: 0.5,
-                y: 0.25,
-                timestamp_us: 0,
-                modifiers: 0,
+                event: PointerMotion {
+                    x: 0.5,
+                    y: 0.25,
+                    timestamp_us: 0,
+                    modifiers: 0,
+                },
             },
         )
         .await
         .expect("PointerMotion");
-        mgr.send_control(&id, ControlMsg::SetFps { fps: 24 })
-            .await
-            .expect("SetFps");
+        mgr.send_control(
+            &id,
+            ControlMsg::SettingChanged {
+                settings: vec![("fps".into(), "24".into())],
+            },
+        )
+        .await
+        .expect("SettingChanged");
 
         // Tiny delay to let the host process the messages before we tear it
         // down — without this we sometimes race the kill ahead of the host's
@@ -420,7 +433,12 @@ mod lifecycle {
 
         // send_control on a killed renderer must error.
         let err = mgr
-            .send_control(&id, ControlMsg::Play { fade_ms: 0 })
+            .send_control(
+                &id,
+                ControlMsg::Play {
+                    transition: ControlTransition { fade_ms: 0 },
+                },
+            )
             .await
             .expect_err("send to dead renderer should error");
         assert!(err.to_string().contains("unknown renderer"));

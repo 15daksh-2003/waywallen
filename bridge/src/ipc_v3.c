@@ -399,13 +399,757 @@ static void free_kv_list(ww_kv_list_t *a) {
  * Per-message implementations
  * ====================================================================== */
 
+static int w_pointer_button_state(ww_buf_t *b, waywallen_pointer_button_state_t v) {
+    return w_u32(b, (uint32_t)v);
+}
+
+static int rd_pointer_button_state(ww_rd_t *r, waywallen_pointer_button_state_t *out) {
+    uint32_t value;
+    int rc = rd_u32(r, &value);
+    if (rc) return rc;
+    switch (value) {
+    case 0: *out = WAYWALLEN_POINTER_BUTTON_STATE_RELEASED; return WW_OK;
+    case 1: *out = WAYWALLEN_POINTER_BUTTON_STATE_PRESSED; return WW_OK;
+    default: return WW_ERR_BAD_ENUM;
+    }
+}
+
+static int w_pointer_axis_source(ww_buf_t *b, waywallen_pointer_axis_source_t v) {
+    return w_u32(b, (uint32_t)v);
+}
+
+static int rd_pointer_axis_source(ww_rd_t *r, waywallen_pointer_axis_source_t *out) {
+    uint32_t value;
+    int rc = rd_u32(r, &value);
+    if (rc) return rc;
+    switch (value) {
+    case 0: *out = WAYWALLEN_POINTER_AXIS_SOURCE_WHEEL; return WW_OK;
+    case 1: *out = WAYWALLEN_POINTER_AXIS_SOURCE_FINGER; return WW_OK;
+    case 2: *out = WAYWALLEN_POINTER_AXIS_SOURCE_CONTINUOUS; return WW_OK;
+    default: return WW_ERR_BAD_ENUM;
+    }
+}
+
+static int w_media_playback_state(ww_buf_t *b, waywallen_media_playback_state_t v) {
+    return w_u32(b, (uint32_t)v);
+}
+
+static int rd_media_playback_state(ww_rd_t *r, waywallen_media_playback_state_t *out) {
+    uint32_t value;
+    int rc = rd_u32(r, &value);
+    if (rc) return rc;
+    switch (value) {
+    case 0: *out = WAYWALLEN_MEDIA_PLAYBACK_STATE_STOPPED; return WW_OK;
+    case 1: *out = WAYWALLEN_MEDIA_PLAYBACK_STATE_PLAYING; return WW_OK;
+    case 2: *out = WAYWALLEN_MEDIA_PLAYBACK_STATE_PAUSED; return WW_OK;
+    default: return WW_ERR_BAD_ENUM;
+    }
+}
+
+static int w_event_subscription_status(ww_buf_t *b, waywallen_event_subscription_status_t v) {
+    return w_u32(b, (uint32_t)v);
+}
+
+static int rd_event_subscription_status(ww_rd_t *r, waywallen_event_subscription_status_t *out) {
+    uint32_t value;
+    int rc = rd_u32(r, &value);
+    if (rc) return rc;
+    switch (value) {
+    case 0: *out = WAYWALLEN_EVENT_SUBSCRIPTION_STATUS_APPLIED; return WW_OK;
+    case 1: *out = WAYWALLEN_EVENT_SUBSCRIPTION_STATUS_INVALID; return WW_OK;
+    case 2: *out = WAYWALLEN_EVENT_SUBSCRIPTION_STATUS_STALE_REVISION; return WW_OK;
+    case 3: *out = WAYWALLEN_EVENT_SUBSCRIPTION_STATUS_REVISION_CONFLICT; return WW_OK;
+    case 4: *out = WAYWALLEN_EVENT_SUBSCRIPTION_STATUS_LIMIT_EXCEEDED; return WW_OK;
+    default: return WW_ERR_BAD_ENUM;
+    }
+}
+
+static int w_buffer_path(ww_buf_t *b, waywallen_buffer_path_t v) {
+    return w_u32(b, (uint32_t)v);
+}
+
+static int rd_buffer_path(ww_rd_t *r, waywallen_buffer_path_t *out) {
+    uint32_t value;
+    int rc = rd_u32(r, &value);
+    if (rc) return rc;
+    switch (value) {
+    case 0: *out = WAYWALLEN_BUFFER_PATH_OPTIMIZED_SAME_DEVICE; return WW_OK;
+    case 1: *out = WAYWALLEN_BUFFER_PATH_OPTIMIZED_SAME_VENDOR; return WW_OK;
+    case 2: *out = WAYWALLEN_BUFFER_PATH_COMPAT_LINEAR; return WW_OK;
+    case 3: *out = WAYWALLEN_BUFFER_PATH_COMPAT_CPU_READBACK; return WW_OK;
+    default: return WW_ERR_BAD_ENUM;
+    }
+}
+
+static int w_buffer_memory_source(ww_buf_t *b, waywallen_buffer_memory_source_t v) {
+    return w_u32(b, (uint32_t)v);
+}
+
+static int rd_buffer_memory_source(ww_rd_t *r, waywallen_buffer_memory_source_t *out) {
+    uint32_t value;
+    int rc = rd_u32(r, &value);
+    if (rc) return rc;
+    switch (value) {
+    case 0: *out = WAYWALLEN_BUFFER_MEMORY_SOURCE_GPU_NATIVE; return WW_OK;
+    case 1: *out = WAYWALLEN_BUFFER_MEMORY_SOURCE_GPU_LINEAR; return WW_OK;
+    case 2: *out = WAYWALLEN_BUFFER_MEMORY_SOURCE_DMABUF_HEAP; return WW_OK;
+    default: return WW_ERR_BAD_ENUM;
+    }
+}
+
+static int w_buffer_allocation_failure_kind(ww_buf_t *b, waywallen_buffer_allocation_failure_kind_t v) {
+    return w_u32(b, (uint32_t)v);
+}
+
+static int rd_buffer_allocation_failure_kind(ww_rd_t *r, waywallen_buffer_allocation_failure_kind_t *out) {
+    uint32_t value;
+    int rc = rd_u32(r, &value);
+    if (rc) return rc;
+    switch (value) {
+    case 0: *out = WAYWALLEN_BUFFER_ALLOCATION_FAILURE_KIND_ALLOCATOR_REJECTED; return WW_OK;
+    case 1: *out = WAYWALLEN_BUFFER_ALLOCATION_FAILURE_KIND_RESOURCE_EXHAUSTED; return WW_OK;
+    case 2: *out = WAYWALLEN_BUFFER_ALLOCATION_FAILURE_KIND_UNSUPPORTED; return WW_OK;
+    case 3: *out = WAYWALLEN_BUFFER_ALLOCATION_FAILURE_KIND_OTHER; return WW_OK;
+    default: return WW_ERR_BAD_ENUM;
+    }
+}
+
+static int w_audio_stream_format(ww_buf_t *b, const waywallen_audio_stream_format_t *v) {
+    int rc;
+    if ((rc = w_u32(b, v->sample_rate_hz))) return rc;
+    if ((rc = w_u32(b, v->channels))) return rc;
+    return WW_OK;
+}
+
+static int rd_audio_stream_format(ww_rd_t *r, waywallen_audio_stream_format_t *v) {
+    int rc;
+    if ((rc = rd_u32(r, &v->sample_rate_hz))) return rc;
+    if ((rc = rd_u32(r, &v->channels))) return rc;
+    return WW_OK;
+}
+
+static void free_audio_stream_format(waywallen_audio_stream_format_t *v) {
+    (void)v;
+}
+
+void waywallen_audio_stream_format_free(waywallen_audio_stream_format_t *value) {
+    if (!value) return;
+    free_audio_stream_format(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_audio_window(ww_buf_t *b, const waywallen_audio_window_t *v) {
+    int rc;
+    if ((rc = w_u64(b, v->subscription_revision))) return rc;
+    if ((rc = w_u64(b, v->generation))) return rc;
+    if ((rc = w_u64(b, v->sequence))) return rc;
+    if ((rc = w_u64(b, v->captured_at_ns))) return rc;
+    if ((rc = w_u64(b, v->end_sample_frame))) return rc;
+    if ((rc = w_audio_stream_format(b, &v->format))) return rc;
+    if ((rc = w_u32(b, v->frames))) return rc;
+    if ((rc = w_u32(b, v->flags))) return rc;
+    if ((rc = w_array_f32(b, &v->samples))) return rc;
+    return WW_OK;
+}
+
+static int rd_audio_window(ww_rd_t *r, waywallen_audio_window_t *v) {
+    int rc;
+    if ((rc = rd_u64(r, &v->subscription_revision))) return rc;
+    if ((rc = rd_u64(r, &v->generation))) return rc;
+    if ((rc = rd_u64(r, &v->sequence))) return rc;
+    if ((rc = rd_u64(r, &v->captured_at_ns))) return rc;
+    if ((rc = rd_u64(r, &v->end_sample_frame))) return rc;
+    if ((rc = rd_audio_stream_format(r, &v->format))) return rc;
+    if ((rc = rd_u32(r, &v->frames))) return rc;
+    if ((rc = rd_u32(r, &v->flags))) return rc;
+    if ((rc = rd_array_f32(r, &v->samples))) return rc;
+    return WW_OK;
+}
+
+static void free_audio_window(waywallen_audio_window_t *v) {
+    free_audio_stream_format(&v->format);
+    free(v->samples.data); v->samples.data = NULL; v->samples.count = 0;
+}
+
+void waywallen_audio_window_free(waywallen_audio_window_t *value) {
+    if (!value) return;
+    free_audio_window(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_buffer_format(ww_buf_t *b, const waywallen_buffer_format_t *v) {
+    int rc;
+    if ((rc = w_u32(b, v->fourcc))) return rc;
+    if ((rc = w_u64(b, v->modifier))) return rc;
+    if ((rc = w_u32(b, v->plane_count))) return rc;
+    return WW_OK;
+}
+
+static int rd_buffer_format(ww_rd_t *r, waywallen_buffer_format_t *v) {
+    int rc;
+    if ((rc = rd_u32(r, &v->fourcc))) return rc;
+    if ((rc = rd_u64(r, &v->modifier))) return rc;
+    if ((rc = rd_u32(r, &v->plane_count))) return rc;
+    return WW_OK;
+}
+
+static void free_buffer_format(waywallen_buffer_format_t *v) {
+    (void)v;
+}
+
+void waywallen_buffer_format_free(waywallen_buffer_format_t *value) {
+    if (!value) return;
+    free_buffer_format(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_bind_failure(ww_buf_t *b, const waywallen_bind_failure_t *v) {
+    int rc;
+    if ((rc = w_buffer_format(b, &v->format))) return rc;
+    if ((rc = w_buffer_allocation_failure_kind(b, v->kind))) return rc;
+    if ((rc = w_string(b, v->message))) return rc;
+    return WW_OK;
+}
+
+static int rd_bind_failure(ww_rd_t *r, waywallen_bind_failure_t *v) {
+    int rc;
+    if ((rc = rd_buffer_format(r, &v->format))) return rc;
+    if ((rc = rd_buffer_allocation_failure_kind(r, &v->kind))) return rc;
+    if ((rc = rd_string(r, &v->message))) return rc;
+    return WW_OK;
+}
+
+static void free_bind_failure(waywallen_bind_failure_t *v) {
+    free_buffer_format(&v->format);
+    free(v->message); v->message = NULL;
+}
+
+void waywallen_bind_failure_free(waywallen_bind_failure_t *value) {
+    if (!value) return;
+    free_bind_failure(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_buffer_directive(ww_buf_t *b, const waywallen_buffer_directive_t *v) {
+    int rc;
+    if ((rc = w_buffer_format(b, &v->format))) return rc;
+    if ((rc = w_u32(b, v->sync_mode))) return rc;
+    if ((rc = w_u32(b, v->color))) return rc;
+    if ((rc = w_u32(b, v->mem_hint))) return rc;
+    if ((rc = w_u32(b, v->count))) return rc;
+    if ((rc = w_buffer_path(b, v->path))) return rc;
+    if ((rc = w_buffer_memory_source(b, v->memory_source))) return rc;
+    return WW_OK;
+}
+
+static int rd_buffer_directive(ww_rd_t *r, waywallen_buffer_directive_t *v) {
+    int rc;
+    if ((rc = rd_buffer_format(r, &v->format))) return rc;
+    if ((rc = rd_u32(r, &v->sync_mode))) return rc;
+    if ((rc = rd_u32(r, &v->color))) return rc;
+    if ((rc = rd_u32(r, &v->mem_hint))) return rc;
+    if ((rc = rd_u32(r, &v->count))) return rc;
+    if ((rc = rd_buffer_path(r, &v->path))) return rc;
+    if ((rc = rd_buffer_memory_source(r, &v->memory_source))) return rc;
+    return WW_OK;
+}
+
+static void free_buffer_directive(waywallen_buffer_directive_t *v) {
+    free_buffer_format(&v->format);
+}
+
+void waywallen_buffer_directive_free(waywallen_buffer_directive_t *value) {
+    if (!value) return;
+    free_buffer_directive(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_extent(ww_buf_t *b, const waywallen_extent_t *v) {
+    int rc;
+    if ((rc = w_u32(b, v->width))) return rc;
+    if ((rc = w_u32(b, v->height))) return rc;
+    return WW_OK;
+}
+
+static int rd_extent(ww_rd_t *r, waywallen_extent_t *v) {
+    int rc;
+    if ((rc = rd_u32(r, &v->width))) return rc;
+    if ((rc = rd_u32(r, &v->height))) return rc;
+    return WW_OK;
+}
+
+static void free_extent(waywallen_extent_t *v) {
+    (void)v;
+}
+
+void waywallen_extent_free(waywallen_extent_t *value) {
+    if (!value) return;
+    free_extent(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_buffer_pool(ww_buf_t *b, const waywallen_buffer_pool_t *v) {
+    int rc;
+    if ((rc = w_u64(b, v->generation))) return rc;
+    if ((rc = w_u32(b, v->flags))) return rc;
+    if ((rc = w_u32(b, v->count))) return rc;
+    if ((rc = w_buffer_format(b, &v->format))) return rc;
+    if ((rc = w_extent(b, &v->extent))) return rc;
+    if ((rc = w_array_u32(b, &v->stride))) return rc;
+    if ((rc = w_array_u32(b, &v->plane_offset))) return rc;
+    if ((rc = w_array_u64(b, &v->size))) return rc;
+    return WW_OK;
+}
+
+static int rd_buffer_pool(ww_rd_t *r, waywallen_buffer_pool_t *v) {
+    int rc;
+    if ((rc = rd_u64(r, &v->generation))) return rc;
+    if ((rc = rd_u32(r, &v->flags))) return rc;
+    if ((rc = rd_u32(r, &v->count))) return rc;
+    if ((rc = rd_buffer_format(r, &v->format))) return rc;
+    if ((rc = rd_extent(r, &v->extent))) return rc;
+    if ((rc = rd_array_u32(r, &v->stride))) return rc;
+    if ((rc = rd_array_u32(r, &v->plane_offset))) return rc;
+    if ((rc = rd_array_u64(r, &v->size))) return rc;
+    return WW_OK;
+}
+
+static void free_buffer_pool(waywallen_buffer_pool_t *v) {
+    free_buffer_format(&v->format);
+    free_extent(&v->extent);
+    free(v->stride.data); v->stride.data = NULL; v->stride.count = 0;
+    free(v->plane_offset.data); v->plane_offset.data = NULL; v->plane_offset.count = 0;
+    free(v->size.data); v->size.data = NULL; v->size.count = 0;
+}
+
+void waywallen_buffer_pool_free(waywallen_buffer_pool_t *value) {
+    if (!value) return;
+    free_buffer_pool(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_control_transition(ww_buf_t *b, const waywallen_control_transition_t *v) {
+    int rc;
+    if ((rc = w_u32(b, v->fade_ms))) return rc;
+    return WW_OK;
+}
+
+static int rd_control_transition(ww_rd_t *r, waywallen_control_transition_t *v) {
+    int rc;
+    if ((rc = rd_u32(r, &v->fade_ms))) return rc;
+    return WW_OK;
+}
+
+static void free_control_transition(waywallen_control_transition_t *v) {
+    (void)v;
+}
+
+void waywallen_control_transition_free(waywallen_control_transition_t *value) {
+    if (!value) return;
+    free_control_transition(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_drm_node(ww_buf_t *b, const waywallen_drm_node_t *v) {
+    int rc;
+    if ((rc = w_u32(b, v->major))) return rc;
+    if ((rc = w_u32(b, v->minor))) return rc;
+    return WW_OK;
+}
+
+static int rd_drm_node(ww_rd_t *r, waywallen_drm_node_t *v) {
+    int rc;
+    if ((rc = rd_u32(r, &v->major))) return rc;
+    if ((rc = rd_u32(r, &v->minor))) return rc;
+    return WW_OK;
+}
+
+static void free_drm_node(waywallen_drm_node_t *v) {
+    (void)v;
+}
+
+void waywallen_drm_node_free(waywallen_drm_node_t *value) {
+    if (!value) return;
+    free_drm_node(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_event_subscription(ww_buf_t *b, const waywallen_event_subscription_t *v) {
+    int rc;
+    if ((rc = w_u64(b, v->revision))) return rc;
+    if ((rc = w_array_string(b, &v->kinds))) return rc;
+    return WW_OK;
+}
+
+static int rd_event_subscription(ww_rd_t *r, waywallen_event_subscription_t *v) {
+    int rc;
+    if ((rc = rd_u64(r, &v->revision))) return rc;
+    if ((rc = rd_array_string(r, &v->kinds))) return rc;
+    return WW_OK;
+}
+
+static void free_event_subscription(waywallen_event_subscription_t *v) {
+    free_array_string(&v->kinds);
+}
+
+void waywallen_event_subscription_free(waywallen_event_subscription_t *value) {
+    if (!value) return;
+    free_event_subscription(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_event_subscription_result(ww_buf_t *b, const waywallen_event_subscription_result_t *v) {
+    int rc;
+    if ((rc = w_u64(b, v->revision))) return rc;
+    if ((rc = w_event_subscription_status(b, v->status))) return rc;
+    if ((rc = w_array_string(b, &v->kinds))) return rc;
+    if ((rc = w_string(b, v->reason))) return rc;
+    return WW_OK;
+}
+
+static int rd_event_subscription_result(ww_rd_t *r, waywallen_event_subscription_result_t *v) {
+    int rc;
+    if ((rc = rd_u64(r, &v->revision))) return rc;
+    if ((rc = rd_event_subscription_status(r, &v->status))) return rc;
+    if ((rc = rd_array_string(r, &v->kinds))) return rc;
+    if ((rc = rd_string(r, &v->reason))) return rc;
+    return WW_OK;
+}
+
+static void free_event_subscription_result(waywallen_event_subscription_result_t *v) {
+    free_array_string(&v->kinds);
+    free(v->reason); v->reason = NULL;
+}
+
+void waywallen_event_subscription_result_free(waywallen_event_subscription_result_t *value) {
+    if (!value) return;
+    free_event_subscription_result(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_frame(ww_buf_t *b, const waywallen_frame_t *v) {
+    int rc;
+    if ((rc = w_u32(b, v->image_index))) return rc;
+    if ((rc = w_u64(b, v->sequence))) return rc;
+    if ((rc = w_u64(b, v->produced_at_ns))) return rc;
+    if ((rc = w_u64(b, v->release_point))) return rc;
+    return WW_OK;
+}
+
+static int rd_frame(ww_rd_t *r, waywallen_frame_t *v) {
+    int rc;
+    if ((rc = rd_u32(r, &v->image_index))) return rc;
+    if ((rc = rd_u64(r, &v->sequence))) return rc;
+    if ((rc = rd_u64(r, &v->produced_at_ns))) return rc;
+    if ((rc = rd_u64(r, &v->release_point))) return rc;
+    return WW_OK;
+}
+
+static void free_frame(waywallen_frame_t *v) {
+    (void)v;
+}
+
+void waywallen_frame_free(waywallen_frame_t *value) {
+    if (!value) return;
+    free_frame(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_init_rejection(ww_buf_t *b, const waywallen_init_rejection_t *v) {
+    int rc;
+    if ((rc = w_u32(b, v->received_protocol_version))) return rc;
+    if ((rc = w_u32(b, v->supported_protocol_version))) return rc;
+    if ((rc = w_u32(b, v->received_spawn_version))) return rc;
+    if ((rc = w_u32(b, v->supported_spawn_version))) return rc;
+    if ((rc = w_string(b, v->reason))) return rc;
+    return WW_OK;
+}
+
+static int rd_init_rejection(ww_rd_t *r, waywallen_init_rejection_t *v) {
+    int rc;
+    if ((rc = rd_u32(r, &v->received_protocol_version))) return rc;
+    if ((rc = rd_u32(r, &v->supported_protocol_version))) return rc;
+    if ((rc = rd_u32(r, &v->received_spawn_version))) return rc;
+    if ((rc = rd_u32(r, &v->supported_spawn_version))) return rc;
+    if ((rc = rd_string(r, &v->reason))) return rc;
+    return WW_OK;
+}
+
+static void free_init_rejection(waywallen_init_rejection_t *v) {
+    free(v->reason); v->reason = NULL;
+}
+
+void waywallen_init_rejection_free(waywallen_init_rejection_t *value) {
+    if (!value) return;
+    free_init_rejection(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_mpris_snapshot(ww_buf_t *b, const waywallen_mpris_snapshot_t *v) {
+    int rc;
+    if ((rc = w_media_playback_state(b, v->state))) return rc;
+    if ((rc = w_string(b, v->title))) return rc;
+    if ((rc = w_string(b, v->artist))) return rc;
+    if ((rc = w_string(b, v->album))) return rc;
+    if ((rc = w_string(b, v->album_artist))) return rc;
+    if ((rc = w_string(b, v->art_url))) return rc;
+    if ((rc = w_string(b, v->previous_art_url))) return rc;
+    return WW_OK;
+}
+
+static int rd_mpris_snapshot(ww_rd_t *r, waywallen_mpris_snapshot_t *v) {
+    int rc;
+    if ((rc = rd_media_playback_state(r, &v->state))) return rc;
+    if ((rc = rd_string(r, &v->title))) return rc;
+    if ((rc = rd_string(r, &v->artist))) return rc;
+    if ((rc = rd_string(r, &v->album))) return rc;
+    if ((rc = rd_string(r, &v->album_artist))) return rc;
+    if ((rc = rd_string(r, &v->art_url))) return rc;
+    if ((rc = rd_string(r, &v->previous_art_url))) return rc;
+    return WW_OK;
+}
+
+static void free_mpris_snapshot(waywallen_mpris_snapshot_t *v) {
+    free(v->title); v->title = NULL;
+    free(v->artist); v->artist = NULL;
+    free(v->album); v->album = NULL;
+    free(v->album_artist); v->album_artist = NULL;
+    free(v->art_url); v->art_url = NULL;
+    free(v->previous_art_url); v->previous_art_url = NULL;
+}
+
+void waywallen_mpris_snapshot_free(waywallen_mpris_snapshot_t *value) {
+    if (!value) return;
+    free_mpris_snapshot(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_pointer_axis(ww_buf_t *b, const waywallen_pointer_axis_t *v) {
+    int rc;
+    if ((rc = w_f32(b, v->x))) return rc;
+    if ((rc = w_f32(b, v->y))) return rc;
+    if ((rc = w_f32(b, v->delta_x))) return rc;
+    if ((rc = w_f32(b, v->delta_y))) return rc;
+    if ((rc = w_pointer_axis_source(b, v->source))) return rc;
+    if ((rc = w_u64(b, v->timestamp_us))) return rc;
+    if ((rc = w_u32(b, v->modifiers))) return rc;
+    return WW_OK;
+}
+
+static int rd_pointer_axis(ww_rd_t *r, waywallen_pointer_axis_t *v) {
+    int rc;
+    if ((rc = rd_f32(r, &v->x))) return rc;
+    if ((rc = rd_f32(r, &v->y))) return rc;
+    if ((rc = rd_f32(r, &v->delta_x))) return rc;
+    if ((rc = rd_f32(r, &v->delta_y))) return rc;
+    if ((rc = rd_pointer_axis_source(r, &v->source))) return rc;
+    if ((rc = rd_u64(r, &v->timestamp_us))) return rc;
+    if ((rc = rd_u32(r, &v->modifiers))) return rc;
+    return WW_OK;
+}
+
+static void free_pointer_axis(waywallen_pointer_axis_t *v) {
+    (void)v;
+}
+
+void waywallen_pointer_axis_free(waywallen_pointer_axis_t *value) {
+    if (!value) return;
+    free_pointer_axis(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_pointer_button(ww_buf_t *b, const waywallen_pointer_button_t *v) {
+    int rc;
+    if ((rc = w_f32(b, v->x))) return rc;
+    if ((rc = w_f32(b, v->y))) return rc;
+    if ((rc = w_u32(b, v->button))) return rc;
+    if ((rc = w_pointer_button_state(b, v->state))) return rc;
+    if ((rc = w_u64(b, v->timestamp_us))) return rc;
+    if ((rc = w_u32(b, v->modifiers))) return rc;
+    return WW_OK;
+}
+
+static int rd_pointer_button(ww_rd_t *r, waywallen_pointer_button_t *v) {
+    int rc;
+    if ((rc = rd_f32(r, &v->x))) return rc;
+    if ((rc = rd_f32(r, &v->y))) return rc;
+    if ((rc = rd_u32(r, &v->button))) return rc;
+    if ((rc = rd_pointer_button_state(r, &v->state))) return rc;
+    if ((rc = rd_u64(r, &v->timestamp_us))) return rc;
+    if ((rc = rd_u32(r, &v->modifiers))) return rc;
+    return WW_OK;
+}
+
+static void free_pointer_button(waywallen_pointer_button_t *v) {
+    (void)v;
+}
+
+void waywallen_pointer_button_free(waywallen_pointer_button_t *value) {
+    if (!value) return;
+    free_pointer_button(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_pointer_motion(ww_buf_t *b, const waywallen_pointer_motion_t *v) {
+    int rc;
+    if ((rc = w_f32(b, v->x))) return rc;
+    if ((rc = w_f32(b, v->y))) return rc;
+    if ((rc = w_u64(b, v->timestamp_us))) return rc;
+    if ((rc = w_u32(b, v->modifiers))) return rc;
+    return WW_OK;
+}
+
+static int rd_pointer_motion(ww_rd_t *r, waywallen_pointer_motion_t *v) {
+    int rc;
+    if ((rc = rd_f32(r, &v->x))) return rc;
+    if ((rc = rd_f32(r, &v->y))) return rc;
+    if ((rc = rd_u64(r, &v->timestamp_us))) return rc;
+    if ((rc = rd_u32(r, &v->modifiers))) return rc;
+    return WW_OK;
+}
+
+static void free_pointer_motion(waywallen_pointer_motion_t *v) {
+    (void)v;
+}
+
+void waywallen_pointer_motion_free(waywallen_pointer_motion_t *value) {
+    if (!value) return;
+    free_pointer_motion(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_producer_capabilities(ww_buf_t *b, const waywallen_producer_capabilities_t *v) {
+    int rc;
+    if ((rc = w_array_u32(b, &v->fourccs))) return rc;
+    if ((rc = w_array_u32(b, &v->mod_counts))) return rc;
+    if ((rc = w_array_u64(b, &v->modifiers))) return rc;
+    if ((rc = w_array_u32(b, &v->plane_counts))) return rc;
+    if ((rc = w_array_u32(b, &v->device_uuid))) return rc;
+    if ((rc = w_array_u32(b, &v->driver_uuid))) return rc;
+    if ((rc = w_drm_node(b, &v->drm_node))) return rc;
+    if ((rc = w_u32(b, v->mem_hints))) return rc;
+    if ((rc = w_u32(b, v->sync_caps))) return rc;
+    if ((rc = w_u32(b, v->color_caps))) return rc;
+    if ((rc = w_extent(b, &v->max_extent))) return rc;
+    return WW_OK;
+}
+
+static int rd_producer_capabilities(ww_rd_t *r, waywallen_producer_capabilities_t *v) {
+    int rc;
+    if ((rc = rd_array_u32(r, &v->fourccs))) return rc;
+    if ((rc = rd_array_u32(r, &v->mod_counts))) return rc;
+    if ((rc = rd_array_u64(r, &v->modifiers))) return rc;
+    if ((rc = rd_array_u32(r, &v->plane_counts))) return rc;
+    if ((rc = rd_array_u32(r, &v->device_uuid))) return rc;
+    if ((rc = rd_array_u32(r, &v->driver_uuid))) return rc;
+    if ((rc = rd_drm_node(r, &v->drm_node))) return rc;
+    if ((rc = rd_u32(r, &v->mem_hints))) return rc;
+    if ((rc = rd_u32(r, &v->sync_caps))) return rc;
+    if ((rc = rd_u32(r, &v->color_caps))) return rc;
+    if ((rc = rd_extent(r, &v->max_extent))) return rc;
+    return WW_OK;
+}
+
+static void free_producer_capabilities(waywallen_producer_capabilities_t *v) {
+    free(v->fourccs.data); v->fourccs.data = NULL; v->fourccs.count = 0;
+    free(v->mod_counts.data); v->mod_counts.data = NULL; v->mod_counts.count = 0;
+    free(v->modifiers.data); v->modifiers.data = NULL; v->modifiers.count = 0;
+    free(v->plane_counts.data); v->plane_counts.data = NULL; v->plane_counts.count = 0;
+    free(v->device_uuid.data); v->device_uuid.data = NULL; v->device_uuid.count = 0;
+    free(v->driver_uuid.data); v->driver_uuid.data = NULL; v->driver_uuid.count = 0;
+    free_drm_node(&v->drm_node);
+    free_extent(&v->max_extent);
+}
+
+void waywallen_producer_capabilities_free(waywallen_producer_capabilities_t *value) {
+    if (!value) return;
+    free_producer_capabilities(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_renderer_init(ww_buf_t *b, const waywallen_renderer_init_t *v) {
+    int rc;
+    if ((rc = w_u32(b, v->protocol_version))) return rc;
+    if ((rc = w_u32(b, v->spawn_version))) return rc;
+    if ((rc = w_kv_list(b, &v->settings))) return rc;
+    if ((rc = w_string(b, v->user_properties))) return rc;
+    return WW_OK;
+}
+
+static int rd_renderer_init(ww_rd_t *r, waywallen_renderer_init_t *v) {
+    int rc;
+    if ((rc = rd_u32(r, &v->protocol_version))) return rc;
+    if ((rc = rd_u32(r, &v->spawn_version))) return rc;
+    if ((rc = rd_kv_list(r, &v->settings))) return rc;
+    if ((rc = rd_string(r, &v->user_properties))) return rc;
+    return WW_OK;
+}
+
+static void free_renderer_init(waywallen_renderer_init_t *v) {
+    free_kv_list(&v->settings);
+    free(v->user_properties); v->user_properties = NULL;
+}
+
+void waywallen_renderer_init_free(waywallen_renderer_init_t *value) {
+    if (!value) return;
+    free_renderer_init(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_rgba_color(ww_buf_t *b, const waywallen_rgba_color_t *v) {
+    int rc;
+    if ((rc = w_f32(b, v->r))) return rc;
+    if ((rc = w_f32(b, v->g))) return rc;
+    if ((rc = w_f32(b, v->b))) return rc;
+    if ((rc = w_f32(b, v->a))) return rc;
+    return WW_OK;
+}
+
+static int rd_rgba_color(ww_rd_t *r, waywallen_rgba_color_t *v) {
+    int rc;
+    if ((rc = rd_f32(r, &v->r))) return rc;
+    if ((rc = rd_f32(r, &v->g))) return rc;
+    if ((rc = rd_f32(r, &v->b))) return rc;
+    if ((rc = rd_f32(r, &v->a))) return rc;
+    return WW_OK;
+}
+
+static void free_rgba_color(waywallen_rgba_color_t *v) {
+    (void)v;
+}
+
+void waywallen_rgba_color_free(waywallen_rgba_color_t *value) {
+    if (!value) return;
+    free_rgba_color(value);
+    memset(value, 0, sizeof(*value));
+}
+
+static int w_renderer_state(ww_buf_t *b, const waywallen_renderer_state_t *v) {
+    int rc;
+    if ((rc = w_rgba_color(b, &v->clear_color))) return rc;
+    return WW_OK;
+}
+
+static int rd_renderer_state(ww_rd_t *r, waywallen_renderer_state_t *v) {
+    int rc;
+    if ((rc = rd_rgba_color(r, &v->clear_color))) return rc;
+    return WW_OK;
+}
+
+static void free_renderer_state(waywallen_renderer_state_t *v) {
+    free_rgba_color(&v->clear_color);
+}
+
+void waywallen_renderer_state_free(waywallen_renderer_state_t *value) {
+    if (!value) return;
+    free_renderer_state(value);
+    memset(value, 0, sizeof(*value));
+}
+
 int ww_evt_in_init_encode(const ww_evt_in_init_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
-    if ((rc = w_u32(out, m->protocol_version))) return rc;
-    if ((rc = w_u32(out, m->spawn_version))) return rc;
-    if ((rc = w_kv_list(out, &m->settings))) return rc;
-    if ((rc = w_string(out, m->user_properties))) return rc;
+    if ((rc = w_renderer_init(out, &m->config))) return rc;
     return WW_OK;
 }
 
@@ -413,10 +1157,7 @@ int ww_evt_in_init_decode(const uint8_t *buf, size_t len, ww_evt_in_init_t *out)
     memset(out, 0, sizeof(*out));
     ww_rd_t r = { buf, 0, len };
     int rc;
-    if ((rc = rd_u32(&r, &out->protocol_version))) goto fail;
-    if ((rc = rd_u32(&r, &out->spawn_version))) goto fail;
-    if ((rc = rd_kv_list(&r, &out->settings))) goto fail;
-    if ((rc = rd_string(&r, &out->user_properties))) goto fail;
+    if ((rc = rd_renderer_init(&r, &out->config))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -430,8 +1171,7 @@ fail:
 }
 
 void ww_evt_in_init_free(ww_evt_in_init_t *m) {
-    free_kv_list(&m->settings);
-    free(m->user_properties); m->user_properties = NULL;
+    free_renderer_init(&m->config);
 }
 
 uint32_t ww_evt_in_init_expected_fds(const ww_evt_in_init_t *m) {
@@ -475,7 +1215,7 @@ uint32_t ww_evt_in_setting_changed_expected_fds(const ww_evt_in_setting_changed_
 int ww_evt_in_play_encode(const ww_evt_in_play_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
-    if ((rc = w_u32(out, m->fade_ms))) return rc;
+    if ((rc = w_control_transition(out, &m->transition))) return rc;
     return WW_OK;
 }
 
@@ -483,7 +1223,7 @@ int ww_evt_in_play_decode(const uint8_t *buf, size_t len, ww_evt_in_play_t *out)
     memset(out, 0, sizeof(*out));
     ww_rd_t r = { buf, 0, len };
     int rc;
-    if ((rc = rd_u32(&r, &out->fade_ms))) goto fail;
+    if ((rc = rd_control_transition(&r, &out->transition))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -497,7 +1237,7 @@ fail:
 }
 
 void ww_evt_in_play_free(ww_evt_in_play_t *m) {
-    (void)m;
+    free_control_transition(&m->transition);
 }
 
 uint32_t ww_evt_in_play_expected_fds(const ww_evt_in_play_t *m) {
@@ -508,7 +1248,7 @@ uint32_t ww_evt_in_play_expected_fds(const ww_evt_in_play_t *m) {
 int ww_evt_in_pause_encode(const ww_evt_in_pause_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
-    if ((rc = w_u32(out, m->fade_ms))) return rc;
+    if ((rc = w_control_transition(out, &m->transition))) return rc;
     return WW_OK;
 }
 
@@ -516,7 +1256,7 @@ int ww_evt_in_pause_decode(const uint8_t *buf, size_t len, ww_evt_in_pause_t *ou
     memset(out, 0, sizeof(*out));
     ww_rd_t r = { buf, 0, len };
     int rc;
-    if ((rc = rd_u32(&r, &out->fade_ms))) goto fail;
+    if ((rc = rd_control_transition(&r, &out->transition))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -530,7 +1270,7 @@ fail:
 }
 
 void ww_evt_in_pause_free(ww_evt_in_pause_t *m) {
-    (void)m;
+    free_control_transition(&m->transition);
 }
 
 uint32_t ww_evt_in_pause_expected_fds(const ww_evt_in_pause_t *m) {
@@ -538,79 +1278,10 @@ uint32_t ww_evt_in_pause_expected_fds(const ww_evt_in_pause_t *m) {
     return 0;
 }
 
-int ww_evt_in_mute_encode(const ww_evt_in_mute_t *m, ww_buf_t *out) {
-    int rc;
-    (void)m;
-    if ((rc = w_u32(out, m->fade_ms))) return rc;
-    return WW_OK;
-}
-
-int ww_evt_in_mute_decode(const uint8_t *buf, size_t len, ww_evt_in_mute_t *out) {
-    memset(out, 0, sizeof(*out));
-    ww_rd_t r = { buf, 0, len };
-    int rc;
-    if ((rc = rd_u32(&r, &out->fade_ms))) goto fail;
-    if (r.pos != r.len) {
-        int rc2 = WW_ERR_TRAILING;
-        (void)rc2;
-        ww_evt_in_mute_free(out);
-        return WW_ERR_TRAILING;
-    }
-    return WW_OK;
-fail:
-    ww_evt_in_mute_free(out);
-    return rc;
-}
-
-void ww_evt_in_mute_free(ww_evt_in_mute_t *m) {
-    (void)m;
-}
-
-uint32_t ww_evt_in_mute_expected_fds(const ww_evt_in_mute_t *m) {
-    (void)m;
-    return 0;
-}
-
-int ww_evt_in_unmute_encode(const ww_evt_in_unmute_t *m, ww_buf_t *out) {
-    int rc;
-    (void)m;
-    if ((rc = w_u32(out, m->fade_ms))) return rc;
-    return WW_OK;
-}
-
-int ww_evt_in_unmute_decode(const uint8_t *buf, size_t len, ww_evt_in_unmute_t *out) {
-    memset(out, 0, sizeof(*out));
-    ww_rd_t r = { buf, 0, len };
-    int rc;
-    if ((rc = rd_u32(&r, &out->fade_ms))) goto fail;
-    if (r.pos != r.len) {
-        int rc2 = WW_ERR_TRAILING;
-        (void)rc2;
-        ww_evt_in_unmute_free(out);
-        return WW_ERR_TRAILING;
-    }
-    return WW_OK;
-fail:
-    ww_evt_in_unmute_free(out);
-    return rc;
-}
-
-void ww_evt_in_unmute_free(ww_evt_in_unmute_t *m) {
-    (void)m;
-}
-
-uint32_t ww_evt_in_unmute_expected_fds(const ww_evt_in_unmute_t *m) {
-    (void)m;
-    return 0;
-}
-
 int ww_evt_in_pointer_motion_encode(const ww_evt_in_pointer_motion_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
-    if ((rc = w_f32(out, m->x))) return rc;
-    if ((rc = w_f32(out, m->y))) return rc;
-    if ((rc = w_u64(out, m->timestamp_us))) return rc;
-    if ((rc = w_u32(out, m->modifiers))) return rc;
+    if ((rc = w_pointer_motion(out, &m->event))) return rc;
     return WW_OK;
 }
 
@@ -618,10 +1289,7 @@ int ww_evt_in_pointer_motion_decode(const uint8_t *buf, size_t len, ww_evt_in_po
     memset(out, 0, sizeof(*out));
     ww_rd_t r = { buf, 0, len };
     int rc;
-    if ((rc = rd_f32(&r, &out->x))) goto fail;
-    if ((rc = rd_f32(&r, &out->y))) goto fail;
-    if ((rc = rd_u64(&r, &out->timestamp_us))) goto fail;
-    if ((rc = rd_u32(&r, &out->modifiers))) goto fail;
+    if ((rc = rd_pointer_motion(&r, &out->event))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -635,43 +1303,10 @@ fail:
 }
 
 void ww_evt_in_pointer_motion_free(ww_evt_in_pointer_motion_t *m) {
-    (void)m;
+    free_pointer_motion(&m->event);
 }
 
 uint32_t ww_evt_in_pointer_motion_expected_fds(const ww_evt_in_pointer_motion_t *m) {
-    (void)m;
-    return 0;
-}
-
-int ww_evt_in_set_fps_encode(const ww_evt_in_set_fps_t *m, ww_buf_t *out) {
-    int rc;
-    (void)m;
-    if ((rc = w_u32(out, m->fps))) return rc;
-    return WW_OK;
-}
-
-int ww_evt_in_set_fps_decode(const uint8_t *buf, size_t len, ww_evt_in_set_fps_t *out) {
-    memset(out, 0, sizeof(*out));
-    ww_rd_t r = { buf, 0, len };
-    int rc;
-    if ((rc = rd_u32(&r, &out->fps))) goto fail;
-    if (r.pos != r.len) {
-        int rc2 = WW_ERR_TRAILING;
-        (void)rc2;
-        ww_evt_in_set_fps_free(out);
-        return WW_ERR_TRAILING;
-    }
-    return WW_OK;
-fail:
-    ww_evt_in_set_fps_free(out);
-    return rc;
-}
-
-void ww_evt_in_set_fps_free(ww_evt_in_set_fps_t *m) {
-    (void)m;
-}
-
-uint32_t ww_evt_in_set_fps_expected_fds(const ww_evt_in_set_fps_t *m) {
     (void)m;
     return 0;
 }
@@ -704,15 +1339,7 @@ uint32_t ww_evt_in_shutdown_expected_fds(const ww_evt_in_shutdown_t *m) {
 int ww_evt_in_negotiate_buffers_encode(const ww_evt_in_negotiate_buffers_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
-    if ((rc = w_u32(out, m->fourcc))) return rc;
-    if ((rc = w_u64(out, m->modifier))) return rc;
-    if ((rc = w_u32(out, m->plane_count))) return rc;
-    if ((rc = w_u32(out, m->sync_mode))) return rc;
-    if ((rc = w_u32(out, m->color))) return rc;
-    if ((rc = w_u32(out, m->mem_hint))) return rc;
-    if ((rc = w_u32(out, m->count))) return rc;
-    if ((rc = w_u32(out, m->path))) return rc;
-    if ((rc = w_u32(out, m->mem_source))) return rc;
+    if ((rc = w_buffer_directive(out, &m->directive))) return rc;
     return WW_OK;
 }
 
@@ -720,15 +1347,7 @@ int ww_evt_in_negotiate_buffers_decode(const uint8_t *buf, size_t len, ww_evt_in
     memset(out, 0, sizeof(*out));
     ww_rd_t r = { buf, 0, len };
     int rc;
-    if ((rc = rd_u32(&r, &out->fourcc))) goto fail;
-    if ((rc = rd_u64(&r, &out->modifier))) goto fail;
-    if ((rc = rd_u32(&r, &out->plane_count))) goto fail;
-    if ((rc = rd_u32(&r, &out->sync_mode))) goto fail;
-    if ((rc = rd_u32(&r, &out->color))) goto fail;
-    if ((rc = rd_u32(&r, &out->mem_hint))) goto fail;
-    if ((rc = rd_u32(&r, &out->count))) goto fail;
-    if ((rc = rd_u32(&r, &out->path))) goto fail;
-    if ((rc = rd_u32(&r, &out->mem_source))) goto fail;
+    if ((rc = rd_buffer_directive(&r, &out->directive))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -742,7 +1361,7 @@ fail:
 }
 
 void ww_evt_in_negotiate_buffers_free(ww_evt_in_negotiate_buffers_t *m) {
-    (void)m;
+    free_buffer_directive(&m->directive);
 }
 
 uint32_t ww_evt_in_negotiate_buffers_expected_fds(const ww_evt_in_negotiate_buffers_t *m) {
@@ -753,12 +1372,7 @@ uint32_t ww_evt_in_negotiate_buffers_expected_fds(const ww_evt_in_negotiate_buff
 int ww_evt_in_pointer_button_encode(const ww_evt_in_pointer_button_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
-    if ((rc = w_f32(out, m->x))) return rc;
-    if ((rc = w_f32(out, m->y))) return rc;
-    if ((rc = w_u32(out, m->button))) return rc;
-    if ((rc = w_u32(out, m->state))) return rc;
-    if ((rc = w_u64(out, m->timestamp_us))) return rc;
-    if ((rc = w_u32(out, m->modifiers))) return rc;
+    if ((rc = w_pointer_button(out, &m->event))) return rc;
     return WW_OK;
 }
 
@@ -766,12 +1380,7 @@ int ww_evt_in_pointer_button_decode(const uint8_t *buf, size_t len, ww_evt_in_po
     memset(out, 0, sizeof(*out));
     ww_rd_t r = { buf, 0, len };
     int rc;
-    if ((rc = rd_f32(&r, &out->x))) goto fail;
-    if ((rc = rd_f32(&r, &out->y))) goto fail;
-    if ((rc = rd_u32(&r, &out->button))) goto fail;
-    if ((rc = rd_u32(&r, &out->state))) goto fail;
-    if ((rc = rd_u64(&r, &out->timestamp_us))) goto fail;
-    if ((rc = rd_u32(&r, &out->modifiers))) goto fail;
+    if ((rc = rd_pointer_button(&r, &out->event))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -785,7 +1394,7 @@ fail:
 }
 
 void ww_evt_in_pointer_button_free(ww_evt_in_pointer_button_t *m) {
-    (void)m;
+    free_pointer_button(&m->event);
 }
 
 uint32_t ww_evt_in_pointer_button_expected_fds(const ww_evt_in_pointer_button_t *m) {
@@ -796,13 +1405,7 @@ uint32_t ww_evt_in_pointer_button_expected_fds(const ww_evt_in_pointer_button_t 
 int ww_evt_in_pointer_axis_encode(const ww_evt_in_pointer_axis_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
-    if ((rc = w_f32(out, m->x))) return rc;
-    if ((rc = w_f32(out, m->y))) return rc;
-    if ((rc = w_f32(out, m->delta_x))) return rc;
-    if ((rc = w_f32(out, m->delta_y))) return rc;
-    if ((rc = w_u32(out, m->source))) return rc;
-    if ((rc = w_u64(out, m->timestamp_us))) return rc;
-    if ((rc = w_u32(out, m->modifiers))) return rc;
+    if ((rc = w_pointer_axis(out, &m->event))) return rc;
     return WW_OK;
 }
 
@@ -810,13 +1413,7 @@ int ww_evt_in_pointer_axis_decode(const uint8_t *buf, size_t len, ww_evt_in_poin
     memset(out, 0, sizeof(*out));
     ww_rd_t r = { buf, 0, len };
     int rc;
-    if ((rc = rd_f32(&r, &out->x))) goto fail;
-    if ((rc = rd_f32(&r, &out->y))) goto fail;
-    if ((rc = rd_f32(&r, &out->delta_x))) goto fail;
-    if ((rc = rd_f32(&r, &out->delta_y))) goto fail;
-    if ((rc = rd_u32(&r, &out->source))) goto fail;
-    if ((rc = rd_u64(&r, &out->timestamp_us))) goto fail;
-    if ((rc = rd_u32(&r, &out->modifiers))) goto fail;
+    if ((rc = rd_pointer_axis(&r, &out->event))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -830,7 +1427,7 @@ fail:
 }
 
 void ww_evt_in_pointer_axis_free(ww_evt_in_pointer_axis_t *m) {
-    (void)m;
+    free_pointer_axis(&m->event);
 }
 
 uint32_t ww_evt_in_pointer_axis_expected_fds(const ww_evt_in_pointer_axis_t *m) {
@@ -838,16 +1435,76 @@ uint32_t ww_evt_in_pointer_axis_expected_fds(const ww_evt_in_pointer_axis_t *m) 
     return 0;
 }
 
+int ww_evt_in_mute_encode(const ww_evt_in_mute_t *m, ww_buf_t *out) {
+    int rc;
+    (void)m;
+    if ((rc = w_control_transition(out, &m->transition))) return rc;
+    return WW_OK;
+}
+
+int ww_evt_in_mute_decode(const uint8_t *buf, size_t len, ww_evt_in_mute_t *out) {
+    memset(out, 0, sizeof(*out));
+    ww_rd_t r = { buf, 0, len };
+    int rc;
+    if ((rc = rd_control_transition(&r, &out->transition))) goto fail;
+    if (r.pos != r.len) {
+        int rc2 = WW_ERR_TRAILING;
+        (void)rc2;
+        ww_evt_in_mute_free(out);
+        return WW_ERR_TRAILING;
+    }
+    return WW_OK;
+fail:
+    ww_evt_in_mute_free(out);
+    return rc;
+}
+
+void ww_evt_in_mute_free(ww_evt_in_mute_t *m) {
+    free_control_transition(&m->transition);
+}
+
+uint32_t ww_evt_in_mute_expected_fds(const ww_evt_in_mute_t *m) {
+    (void)m;
+    return 0;
+}
+
+int ww_evt_in_unmute_encode(const ww_evt_in_unmute_t *m, ww_buf_t *out) {
+    int rc;
+    (void)m;
+    if ((rc = w_control_transition(out, &m->transition))) return rc;
+    return WW_OK;
+}
+
+int ww_evt_in_unmute_decode(const uint8_t *buf, size_t len, ww_evt_in_unmute_t *out) {
+    memset(out, 0, sizeof(*out));
+    ww_rd_t r = { buf, 0, len };
+    int rc;
+    if ((rc = rd_control_transition(&r, &out->transition))) goto fail;
+    if (r.pos != r.len) {
+        int rc2 = WW_ERR_TRAILING;
+        (void)rc2;
+        ww_evt_in_unmute_free(out);
+        return WW_ERR_TRAILING;
+    }
+    return WW_OK;
+fail:
+    ww_evt_in_unmute_free(out);
+    return rc;
+}
+
+void ww_evt_in_unmute_free(ww_evt_in_unmute_t *m) {
+    free_control_transition(&m->transition);
+}
+
+uint32_t ww_evt_in_unmute_expected_fds(const ww_evt_in_unmute_t *m) {
+    (void)m;
+    return 0;
+}
+
 int ww_evt_in_mpris_encode(const ww_evt_in_mpris_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
-    if ((rc = w_u32(out, m->state))) return rc;
-    if ((rc = w_string(out, m->title))) return rc;
-    if ((rc = w_string(out, m->artist))) return rc;
-    if ((rc = w_string(out, m->album))) return rc;
-    if ((rc = w_string(out, m->album_artist))) return rc;
-    if ((rc = w_string(out, m->art_url))) return rc;
-    if ((rc = w_string(out, m->previous_art_url))) return rc;
+    if ((rc = w_mpris_snapshot(out, &m->snapshot))) return rc;
     return WW_OK;
 }
 
@@ -855,13 +1512,7 @@ int ww_evt_in_mpris_decode(const uint8_t *buf, size_t len, ww_evt_in_mpris_t *ou
     memset(out, 0, sizeof(*out));
     ww_rd_t r = { buf, 0, len };
     int rc;
-    if ((rc = rd_u32(&r, &out->state))) goto fail;
-    if ((rc = rd_string(&r, &out->title))) goto fail;
-    if ((rc = rd_string(&r, &out->artist))) goto fail;
-    if ((rc = rd_string(&r, &out->album))) goto fail;
-    if ((rc = rd_string(&r, &out->album_artist))) goto fail;
-    if ((rc = rd_string(&r, &out->art_url))) goto fail;
-    if ((rc = rd_string(&r, &out->previous_art_url))) goto fail;
+    if ((rc = rd_mpris_snapshot(&r, &out->snapshot))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -875,12 +1526,7 @@ fail:
 }
 
 void ww_evt_in_mpris_free(ww_evt_in_mpris_t *m) {
-    free(m->title); m->title = NULL;
-    free(m->artist); m->artist = NULL;
-    free(m->album); m->album = NULL;
-    free(m->album_artist); m->album_artist = NULL;
-    free(m->art_url); m->art_url = NULL;
-    free(m->previous_art_url); m->previous_art_url = NULL;
+    free_mpris_snapshot(&m->snapshot);
 }
 
 uint32_t ww_evt_in_mpris_expected_fds(const ww_evt_in_mpris_t *m) {
@@ -891,10 +1537,7 @@ uint32_t ww_evt_in_mpris_expected_fds(const ww_evt_in_mpris_t *m) {
 int ww_evt_in_event_subscriptions_applied_encode(const ww_evt_in_event_subscriptions_applied_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
-    if ((rc = w_u64(out, m->revision))) return rc;
-    if ((rc = w_u32(out, m->status))) return rc;
-    if ((rc = w_array_string(out, &m->kinds))) return rc;
-    if ((rc = w_string(out, m->reason))) return rc;
+    if ((rc = w_event_subscription_result(out, &m->result))) return rc;
     return WW_OK;
 }
 
@@ -902,10 +1545,7 @@ int ww_evt_in_event_subscriptions_applied_decode(const uint8_t *buf, size_t len,
     memset(out, 0, sizeof(*out));
     ww_rd_t r = { buf, 0, len };
     int rc;
-    if ((rc = rd_u64(&r, &out->revision))) goto fail;
-    if ((rc = rd_u32(&r, &out->status))) goto fail;
-    if ((rc = rd_array_string(&r, &out->kinds))) goto fail;
-    if ((rc = rd_string(&r, &out->reason))) goto fail;
+    if ((rc = rd_event_subscription_result(&r, &out->result))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -919,8 +1559,7 @@ fail:
 }
 
 void ww_evt_in_event_subscriptions_applied_free(ww_evt_in_event_subscriptions_applied_t *m) {
-    free_array_string(&m->kinds);
-    free(m->reason); m->reason = NULL;
+    free_event_subscription_result(&m->result);
 }
 
 uint32_t ww_evt_in_event_subscriptions_applied_expected_fds(const ww_evt_in_event_subscriptions_applied_t *m) {
@@ -931,16 +1570,7 @@ uint32_t ww_evt_in_event_subscriptions_applied_expected_fds(const ww_evt_in_even
 int ww_evt_in_audio_window_encode(const ww_evt_in_audio_window_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
-    if ((rc = w_u64(out, m->subscription_revision))) return rc;
-    if ((rc = w_u64(out, m->generation))) return rc;
-    if ((rc = w_u64(out, m->sequence))) return rc;
-    if ((rc = w_u64(out, m->captured_at_ns))) return rc;
-    if ((rc = w_u64(out, m->end_sample_frame))) return rc;
-    if ((rc = w_u32(out, m->sample_rate_hz))) return rc;
-    if ((rc = w_u32(out, m->channels))) return rc;
-    if ((rc = w_u32(out, m->frames))) return rc;
-    if ((rc = w_u32(out, m->flags))) return rc;
-    if ((rc = w_array_f32(out, &m->samples))) return rc;
+    if ((rc = w_audio_window(out, &m->window))) return rc;
     return WW_OK;
 }
 
@@ -948,16 +1578,7 @@ int ww_evt_in_audio_window_decode(const uint8_t *buf, size_t len, ww_evt_in_audi
     memset(out, 0, sizeof(*out));
     ww_rd_t r = { buf, 0, len };
     int rc;
-    if ((rc = rd_u64(&r, &out->subscription_revision))) goto fail;
-    if ((rc = rd_u64(&r, &out->generation))) goto fail;
-    if ((rc = rd_u64(&r, &out->sequence))) goto fail;
-    if ((rc = rd_u64(&r, &out->captured_at_ns))) goto fail;
-    if ((rc = rd_u64(&r, &out->end_sample_frame))) goto fail;
-    if ((rc = rd_u32(&r, &out->sample_rate_hz))) goto fail;
-    if ((rc = rd_u32(&r, &out->channels))) goto fail;
-    if ((rc = rd_u32(&r, &out->frames))) goto fail;
-    if ((rc = rd_u32(&r, &out->flags))) goto fail;
-    if ((rc = rd_array_f32(&r, &out->samples))) goto fail;
+    if ((rc = rd_audio_window(&r, &out->window))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -971,7 +1592,7 @@ fail:
 }
 
 void ww_evt_in_audio_window_free(ww_evt_in_audio_window_t *m) {
-    free(m->samples.data); m->samples.data = NULL; m->samples.count = 0;
+    free_audio_window(&m->window);
 }
 
 uint32_t ww_evt_in_audio_window_expected_fds(const ww_evt_in_audio_window_t *m) {
@@ -982,8 +1603,7 @@ uint32_t ww_evt_in_audio_window_expected_fds(const ww_evt_in_audio_window_t *m) 
 int ww_evt_ready_encode(const ww_evt_ready_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
-    if ((rc = w_u32(out, m->drm_render_major))) return rc;
-    if ((rc = w_u32(out, m->drm_render_minor))) return rc;
+    if ((rc = w_drm_node(out, &m->drm_node))) return rc;
     return WW_OK;
 }
 
@@ -991,8 +1611,7 @@ int ww_evt_ready_decode(const uint8_t *buf, size_t len, ww_evt_ready_t *out) {
     memset(out, 0, sizeof(*out));
     ww_rd_t r = { buf, 0, len };
     int rc;
-    if ((rc = rd_u32(&r, &out->drm_render_major))) goto fail;
-    if ((rc = rd_u32(&r, &out->drm_render_minor))) goto fail;
+    if ((rc = rd_drm_node(&r, &out->drm_node))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -1006,7 +1625,7 @@ fail:
 }
 
 void ww_evt_ready_free(ww_evt_ready_t *m) {
-    (void)m;
+    free_drm_node(&m->drm_node);
 }
 
 uint32_t ww_evt_ready_expected_fds(const ww_evt_ready_t *m) {
@@ -1017,17 +1636,7 @@ uint32_t ww_evt_ready_expected_fds(const ww_evt_ready_t *m) {
 int ww_evt_bind_buffers_encode(const ww_evt_bind_buffers_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
-    if ((rc = w_u64(out, m->generation))) return rc;
-    if ((rc = w_u32(out, m->flags))) return rc;
-    if ((rc = w_u32(out, m->count))) return rc;
-    if ((rc = w_u32(out, m->fourcc))) return rc;
-    if ((rc = w_u32(out, m->width))) return rc;
-    if ((rc = w_u32(out, m->height))) return rc;
-    if ((rc = w_u64(out, m->modifier))) return rc;
-    if ((rc = w_u32(out, m->planes_per_buffer))) return rc;
-    if ((rc = w_array_u32(out, &m->stride))) return rc;
-    if ((rc = w_array_u32(out, &m->plane_offset))) return rc;
-    if ((rc = w_array_u64(out, &m->size))) return rc;
+    if ((rc = w_buffer_pool(out, &m->pool))) return rc;
     return WW_OK;
 }
 
@@ -1035,17 +1644,7 @@ int ww_evt_bind_buffers_decode(const uint8_t *buf, size_t len, ww_evt_bind_buffe
     memset(out, 0, sizeof(*out));
     ww_rd_t r = { buf, 0, len };
     int rc;
-    if ((rc = rd_u64(&r, &out->generation))) goto fail;
-    if ((rc = rd_u32(&r, &out->flags))) goto fail;
-    if ((rc = rd_u32(&r, &out->count))) goto fail;
-    if ((rc = rd_u32(&r, &out->fourcc))) goto fail;
-    if ((rc = rd_u32(&r, &out->width))) goto fail;
-    if ((rc = rd_u32(&r, &out->height))) goto fail;
-    if ((rc = rd_u64(&r, &out->modifier))) goto fail;
-    if ((rc = rd_u32(&r, &out->planes_per_buffer))) goto fail;
-    if ((rc = rd_array_u32(&r, &out->stride))) goto fail;
-    if ((rc = rd_array_u32(&r, &out->plane_offset))) goto fail;
-    if ((rc = rd_array_u64(&r, &out->size))) goto fail;
+    if ((rc = rd_buffer_pool(&r, &out->pool))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -1059,22 +1658,17 @@ fail:
 }
 
 void ww_evt_bind_buffers_free(ww_evt_bind_buffers_t *m) {
-    free(m->stride.data); m->stride.data = NULL; m->stride.count = 0;
-    free(m->plane_offset.data); m->plane_offset.data = NULL; m->plane_offset.count = 0;
-    free(m->size.data); m->size.data = NULL; m->size.count = 0;
+    free_buffer_pool(&m->pool);
 }
 
 uint32_t ww_evt_bind_buffers_expected_fds(const ww_evt_bind_buffers_t *m) {
-    return (uint32_t)((uint64_t)m->count * (uint64_t)m->planes_per_buffer);
+    return (uint32_t)((uint64_t)m->pool.count * (uint64_t)m->pool.format.plane_count);
 }
 
 int ww_evt_frame_ready_encode(const ww_evt_frame_ready_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
-    if ((rc = w_u32(out, m->image_index))) return rc;
-    if ((rc = w_u64(out, m->seq))) return rc;
-    if ((rc = w_u64(out, m->ts_ns))) return rc;
-    if ((rc = w_u64(out, m->release_point))) return rc;
+    if ((rc = w_frame(out, &m->frame))) return rc;
     return WW_OK;
 }
 
@@ -1082,10 +1676,7 @@ int ww_evt_frame_ready_decode(const uint8_t *buf, size_t len, ww_evt_frame_ready
     memset(out, 0, sizeof(*out));
     ww_rd_t r = { buf, 0, len };
     int rc;
-    if ((rc = rd_u32(&r, &out->image_index))) goto fail;
-    if ((rc = rd_u64(&r, &out->seq))) goto fail;
-    if ((rc = rd_u64(&r, &out->ts_ns))) goto fail;
-    if ((rc = rd_u64(&r, &out->release_point))) goto fail;
+    if ((rc = rd_frame(&r, &out->frame))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -1099,7 +1690,7 @@ fail:
 }
 
 void ww_evt_frame_ready_free(ww_evt_frame_ready_t *m) {
-    (void)m;
+    free_frame(&m->frame);
 }
 
 uint32_t ww_evt_frame_ready_expected_fds(const ww_evt_frame_ready_t *m) {
@@ -1110,7 +1701,7 @@ uint32_t ww_evt_frame_ready_expected_fds(const ww_evt_frame_ready_t *m) {
 int ww_evt_error_encode(const ww_evt_error_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
-    if ((rc = w_string(out, m->msg))) return rc;
+    if ((rc = w_string(out, m->message))) return rc;
     return WW_OK;
 }
 
@@ -1118,7 +1709,7 @@ int ww_evt_error_decode(const uint8_t *buf, size_t len, ww_evt_error_t *out) {
     memset(out, 0, sizeof(*out));
     ww_rd_t r = { buf, 0, len };
     int rc;
-    if ((rc = rd_string(&r, &out->msg))) goto fail;
+    if ((rc = rd_string(&r, &out->message))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -1132,7 +1723,7 @@ fail:
 }
 
 void ww_evt_error_free(ww_evt_error_t *m) {
-    free(m->msg); m->msg = NULL;
+    free(m->message); m->message = NULL;
 }
 
 uint32_t ww_evt_error_expected_fds(const ww_evt_error_t *m) {
@@ -1168,19 +1759,7 @@ uint32_t ww_evt_release_syncobj_expected_fds(const ww_evt_release_syncobj_t *m) 
 int ww_evt_format_caps_encode(const ww_evt_format_caps_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
-    if ((rc = w_array_u32(out, &m->fourccs))) return rc;
-    if ((rc = w_array_u32(out, &m->mod_counts))) return rc;
-    if ((rc = w_array_u64(out, &m->modifiers))) return rc;
-    if ((rc = w_array_u32(out, &m->plane_counts))) return rc;
-    if ((rc = w_array_u32(out, &m->device_uuid))) return rc;
-    if ((rc = w_array_u32(out, &m->driver_uuid))) return rc;
-    if ((rc = w_u32(out, m->drm_render_major))) return rc;
-    if ((rc = w_u32(out, m->drm_render_minor))) return rc;
-    if ((rc = w_u32(out, m->mem_hints))) return rc;
-    if ((rc = w_u32(out, m->sync_caps))) return rc;
-    if ((rc = w_u32(out, m->color_caps))) return rc;
-    if ((rc = w_u32(out, m->extent_max_w))) return rc;
-    if ((rc = w_u32(out, m->extent_max_h))) return rc;
+    if ((rc = w_producer_capabilities(out, &m->capabilities))) return rc;
     return WW_OK;
 }
 
@@ -1188,19 +1767,7 @@ int ww_evt_format_caps_decode(const uint8_t *buf, size_t len, ww_evt_format_caps
     memset(out, 0, sizeof(*out));
     ww_rd_t r = { buf, 0, len };
     int rc;
-    if ((rc = rd_array_u32(&r, &out->fourccs))) goto fail;
-    if ((rc = rd_array_u32(&r, &out->mod_counts))) goto fail;
-    if ((rc = rd_array_u64(&r, &out->modifiers))) goto fail;
-    if ((rc = rd_array_u32(&r, &out->plane_counts))) goto fail;
-    if ((rc = rd_array_u32(&r, &out->device_uuid))) goto fail;
-    if ((rc = rd_array_u32(&r, &out->driver_uuid))) goto fail;
-    if ((rc = rd_u32(&r, &out->drm_render_major))) goto fail;
-    if ((rc = rd_u32(&r, &out->drm_render_minor))) goto fail;
-    if ((rc = rd_u32(&r, &out->mem_hints))) goto fail;
-    if ((rc = rd_u32(&r, &out->sync_caps))) goto fail;
-    if ((rc = rd_u32(&r, &out->color_caps))) goto fail;
-    if ((rc = rd_u32(&r, &out->extent_max_w))) goto fail;
-    if ((rc = rd_u32(&r, &out->extent_max_h))) goto fail;
+    if ((rc = rd_producer_capabilities(&r, &out->capabilities))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -1214,12 +1781,7 @@ fail:
 }
 
 void ww_evt_format_caps_free(ww_evt_format_caps_t *m) {
-    free(m->fourccs.data); m->fourccs.data = NULL; m->fourccs.count = 0;
-    free(m->mod_counts.data); m->mod_counts.data = NULL; m->mod_counts.count = 0;
-    free(m->modifiers.data); m->modifiers.data = NULL; m->modifiers.count = 0;
-    free(m->plane_counts.data); m->plane_counts.data = NULL; m->plane_counts.count = 0;
-    free(m->device_uuid.data); m->device_uuid.data = NULL; m->device_uuid.count = 0;
-    free(m->driver_uuid.data); m->driver_uuid.data = NULL; m->driver_uuid.count = 0;
+    free_producer_capabilities(&m->capabilities);
 }
 
 uint32_t ww_evt_format_caps_expected_fds(const ww_evt_format_caps_t *m) {
@@ -1230,10 +1792,7 @@ uint32_t ww_evt_format_caps_expected_fds(const ww_evt_format_caps_t *m) {
 int ww_evt_bind_failed_encode(const ww_evt_bind_failed_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
-    if ((rc = w_u32(out, m->fourcc))) return rc;
-    if ((rc = w_u64(out, m->modifier))) return rc;
-    if ((rc = w_u32(out, m->reason))) return rc;
-    if ((rc = w_string(out, m->message))) return rc;
+    if ((rc = w_bind_failure(out, &m->failure))) return rc;
     return WW_OK;
 }
 
@@ -1241,10 +1800,7 @@ int ww_evt_bind_failed_decode(const uint8_t *buf, size_t len, ww_evt_bind_failed
     memset(out, 0, sizeof(*out));
     ww_rd_t r = { buf, 0, len };
     int rc;
-    if ((rc = rd_u32(&r, &out->fourcc))) goto fail;
-    if ((rc = rd_u64(&r, &out->modifier))) goto fail;
-    if ((rc = rd_u32(&r, &out->reason))) goto fail;
-    if ((rc = rd_string(&r, &out->message))) goto fail;
+    if ((rc = rd_bind_failure(&r, &out->failure))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -1258,7 +1814,7 @@ fail:
 }
 
 void ww_evt_bind_failed_free(ww_evt_bind_failed_t *m) {
-    free(m->message); m->message = NULL;
+    free_bind_failure(&m->failure);
 }
 
 uint32_t ww_evt_bind_failed_expected_fds(const ww_evt_bind_failed_t *m) {
@@ -1269,9 +1825,7 @@ uint32_t ww_evt_bind_failed_expected_fds(const ww_evt_bind_failed_t *m) {
 int ww_evt_init_nack_encode(const ww_evt_init_nack_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
-    if ((rc = w_u32(out, m->received_spawn_version))) return rc;
-    if ((rc = w_u32(out, m->supported_spawn_version))) return rc;
-    if ((rc = w_string(out, m->reason))) return rc;
+    if ((rc = w_init_rejection(out, &m->rejection))) return rc;
     return WW_OK;
 }
 
@@ -1279,9 +1833,7 @@ int ww_evt_init_nack_decode(const uint8_t *buf, size_t len, ww_evt_init_nack_t *
     memset(out, 0, sizeof(*out));
     ww_rd_t r = { buf, 0, len };
     int rc;
-    if ((rc = rd_u32(&r, &out->received_spawn_version))) goto fail;
-    if ((rc = rd_u32(&r, &out->supported_spawn_version))) goto fail;
-    if ((rc = rd_string(&r, &out->reason))) goto fail;
+    if ((rc = rd_init_rejection(&r, &out->rejection))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -1295,7 +1847,7 @@ fail:
 }
 
 void ww_evt_init_nack_free(ww_evt_init_nack_t *m) {
-    free(m->reason); m->reason = NULL;
+    free_init_rejection(&m->rejection);
 }
 
 uint32_t ww_evt_init_nack_expected_fds(const ww_evt_init_nack_t *m) {
@@ -1306,7 +1858,7 @@ uint32_t ww_evt_init_nack_expected_fds(const ww_evt_init_nack_t *m) {
 int ww_evt_report_state_encode(const ww_evt_report_state_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
-    if ((rc = w_kv_list(out, &m->state))) return rc;
+    if ((rc = w_renderer_state(out, &m->state))) return rc;
     return WW_OK;
 }
 
@@ -1314,7 +1866,7 @@ int ww_evt_report_state_decode(const uint8_t *buf, size_t len, ww_evt_report_sta
     memset(out, 0, sizeof(*out));
     ww_rd_t r = { buf, 0, len };
     int rc;
-    if ((rc = rd_kv_list(&r, &out->state))) goto fail;
+    if ((rc = rd_renderer_state(&r, &out->state))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -1328,7 +1880,7 @@ fail:
 }
 
 void ww_evt_report_state_free(ww_evt_report_state_t *m) {
-    free_kv_list(&m->state);
+    free_renderer_state(&m->state);
 }
 
 uint32_t ww_evt_report_state_expected_fds(const ww_evt_report_state_t *m) {
@@ -1339,8 +1891,7 @@ uint32_t ww_evt_report_state_expected_fds(const ww_evt_report_state_t *m) {
 int ww_evt_set_event_subscriptions_encode(const ww_evt_set_event_subscriptions_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
-    if ((rc = w_u64(out, m->revision))) return rc;
-    if ((rc = w_array_string(out, &m->kinds))) return rc;
+    if ((rc = w_event_subscription(out, &m->subscription))) return rc;
     return WW_OK;
 }
 
@@ -1348,8 +1899,7 @@ int ww_evt_set_event_subscriptions_decode(const uint8_t *buf, size_t len, ww_evt
     memset(out, 0, sizeof(*out));
     ww_rd_t r = { buf, 0, len };
     int rc;
-    if ((rc = rd_u64(&r, &out->revision))) goto fail;
-    if ((rc = rd_array_string(&r, &out->kinds))) goto fail;
+    if ((rc = rd_event_subscription(&r, &out->subscription))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -1363,7 +1913,7 @@ fail:
 }
 
 void ww_evt_set_event_subscriptions_free(ww_evt_set_event_subscriptions_t *m) {
-    free_array_string(&m->kinds);
+    free_event_subscription(&m->subscription);
 }
 
 uint32_t ww_evt_set_event_subscriptions_expected_fds(const ww_evt_set_event_subscriptions_t *m) {

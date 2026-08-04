@@ -16,7 +16,7 @@ use crate::control;
 use crate::control_proto as pb;
 use crate::error::{ok_response, Error};
 use crate::events::GlobalEvent;
-use crate::ipc::proto::ControlMsg;
+use crate::ipc::proto::{ControlMsg, ControlTransition};
 use crate::model::repo;
 use crate::plugin::source_manager::DiscoverDownload;
 use crate::queue;
@@ -1410,7 +1410,12 @@ async fn dispatch_inner(
             let fade_ms = state.settings.global().effective_audio_fade_ms();
             state
                 .renderer_manager
-                .send_control(&r.renderer_id, ControlMsg::Play { fade_ms })
+                .send_control(
+                    &r.renderer_id,
+                    ControlMsg::Play {
+                        transition: ControlTransition { fade_ms },
+                    },
+                )
                 .await?;
             Res::RendererPlay(pb::Empty {})
         }
@@ -1419,7 +1424,12 @@ async fn dispatch_inner(
             let fade_ms = state.settings.global().effective_audio_fade_ms();
             state
                 .renderer_manager
-                .send_control(&r.renderer_id, ControlMsg::Pause { fade_ms })
+                .send_control(
+                    &r.renderer_id,
+                    ControlMsg::Pause {
+                        transition: ControlTransition { fade_ms },
+                    },
+                )
                 .await?;
             Res::RendererPause(pb::Empty {})
         }
@@ -1444,7 +1454,15 @@ async fn dispatch_inner(
             // renderer has not registered the pointer event.
             state
                 .renderer_manager
-                .send_pointer_motion(&r.renderer_id, r.x as f32, r.y as f32, 0, 0)
+                .send_pointer_motion(
+                    &r.renderer_id,
+                    crate::ipc::proto::PointerMotion {
+                        x: r.x as f32,
+                        y: r.y as f32,
+                        timestamp_us: 0,
+                        modifiers: 0,
+                    },
+                )
                 .await?;
             Res::RendererMouse(pb::Empty {})
         }
@@ -1452,7 +1470,7 @@ async fn dispatch_inner(
         Req::RendererFps(r) => {
             state
                 .renderer_manager
-                .send_control(&r.renderer_id, ControlMsg::SetFps { fps: r.fps })
+                .send_setting_changed(&r.renderer_id, Vec::new(), Some(r.fps))
                 .await?;
             Res::RendererFps(pb::Empty {})
         }

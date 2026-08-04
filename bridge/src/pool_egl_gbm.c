@@ -184,8 +184,7 @@ static int gbm_probe_one_modifier(struct gbm_device* gbm, uint32_t fourcc, uint6
 /* probe_caps: walk every candidate fourcc, enumerate modifier-aware
  * (EGL importer ∩ GBM producer) entries, and append them to the pool's
  * advertised set. If the modifier-aware probe yields zero entries
- * across every fourcc, append exactly one (ABGR8888, LINEAR, 1) entry
- * and set MEM_HINT_LINEAR_ONLY. */
+ * across every fourcc, append exactly one (ABGR8888, LINEAR, 1) entry. */
 static int probe_caps(ww_pool_t* pool, uint32_t width, uint32_t height) {
     egl_gbm_state_t* st = (egl_gbm_state_t*)pool->backend_data;
 
@@ -351,35 +350,44 @@ static int alloc_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_layout_
     egl_gbm_state_t* st = (egl_gbm_state_t*)pool->backend_data;
     if (slot_index >= WW_POOL_MAX_SLOTS) return -EINVAL;
 
-    const ww_pool_directive_t* d = &pool->cur;
-    bool                       linear_path =
-        (d->category == WW_PATH_COMPAT_LINEAR) || (d->mem_source == WW_MEM_SRC_GPU_LINEAR);
+    const waywallen_buffer_directive_t* d      = &pool->cur.directive;
+    const waywallen_extent_t*           extent = &pool->cur.extent;
+    bool linear_path = (d->path == WAYWALLEN_BUFFER_PATH_COMPAT_LINEAR) ||
+                       (d->memory_source == WAYWALLEN_BUFFER_MEMORY_SOURCE_GPU_LINEAR);
 
     struct gbm_bo* bo = NULL;
     if (linear_path) {
-        bo = gbm_bo_create(
-            st->gbm, d->width, d->height, d->fourcc, GBM_BO_USE_LINEAR | GBM_BO_USE_RENDERING);
+        bo = gbm_bo_create(st->gbm,
+                           extent->width,
+                           extent->height,
+                           d->format.fourcc,
+                           GBM_BO_USE_LINEAR | GBM_BO_USE_RENDERING);
         if (! bo) {
             ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
                            "ww_pool[egl_gbm]: gbm_bo_create(USE_LINEAR) failed for "
                            "fourcc=0x%08x %ux%u",
-                           d->fourcc,
-                           d->width,
-                           d->height);
+                           d->format.fourcc,
+                           extent->width,
+                           extent->height);
             return -EIO;
         }
     } else {
-        uint64_t mods[1] = { d->modifier };
-        bo               = gbm_bo_create_with_modifiers2(
-            st->gbm, d->width, d->height, d->fourcc, mods, 1, GBM_BO_USE_RENDERING);
+        uint64_t mods[1] = { d->format.modifier };
+        bo               = gbm_bo_create_with_modifiers2(st->gbm,
+                                                         extent->width,
+                                                         extent->height,
+                                                         d->format.fourcc,
+                                                         mods,
+                                                         1,
+                                                         GBM_BO_USE_RENDERING);
         if (! bo) {
             ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
                            "ww_pool[egl_gbm]: gbm_bo_create_with_modifiers2 failed for "
                            "fourcc=0x%08x mod=0x%016llx %ux%u",
-                           d->fourcc,
-                           (unsigned long long)d->modifier,
-                           d->width,
-                           d->height);
+                           d->format.fourcc,
+                           (unsigned long long)d->format.modifier,
+                           extent->width,
+                           extent->height);
             return -EIO;
         }
     }
@@ -425,7 +433,7 @@ static int alloc_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_layout_
         if (p + 1 < gbm_planes) {
             plane_sizes[p] = (uint64_t)plane_offsets[p + 1] - plane_offsets[p];
         } else {
-            plane_sizes[p] = (uint64_t)plane_strides[p] * d->height;
+            plane_sizes[p] = (uint64_t)plane_strides[p] * extent->height;
         }
     }
 
@@ -433,9 +441,9 @@ static int alloc_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_layout_
                    "ww_pool[egl_gbm]: alloc_slot[%u] %ux%u fourcc=0x%08x "
                    "mod=0x%016llx linear=%d gbm_planes=%d",
                    slot_index,
-                   d->width,
-                   d->height,
-                   d->fourcc,
+                   extent->width,
+                   extent->height,
+                   d->format.fourcc,
                    (unsigned long long)actual_mod,
                    linear_path ? 1 : 0,
                    gbm_planes);
@@ -455,16 +463,16 @@ static int alloc_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_layout_
      * so DCC metadata, retile data, etc., land where the driver
      * expects. */
     EGLImageKHR img = linear_path ? import_without_modifier(st,
-                                                            d->fourcc,
-                                                            d->width,
-                                                            d->height,
+                                                            d->format.fourcc,
+                                                            extent->width,
+                                                            extent->height,
                                                             plane_fds[0],
                                                             plane_strides[0],
                                                             plane_offsets[0])
                                   : import_with_modifier(st,
-                                                         d->fourcc,
-                                                         d->width,
-                                                         d->height,
+                                                         d->format.fourcc,
+                                                         extent->width,
+                                                         extent->height,
                                                          plane_fds,
                                                          plane_strides,
                                                          plane_offsets,
@@ -475,7 +483,7 @@ static int alloc_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_layout_
                        "ww_pool[egl_gbm]: eglCreateImageKHR failed (egl_err=0x%04x) "
                        "fourcc=0x%08x mod=0x%016llx linear=%d planes=%d",
                        st->edt.eglGetError(),
-                       d->fourcc,
+                       d->format.fourcc,
                        (unsigned long long)actual_mod,
                        linear_path ? 1 : 0,
                        gbm_planes);
@@ -510,7 +518,7 @@ static int alloc_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_layout_
                        fbo_status,
                        gl_err,
                        (unsigned long long)actual_mod,
-                       d->fourcc,
+                       d->format.fourcc,
                        linear_path ? 1 : 0);
         st->glDeleteFramebuffers(1, &fbo);
         st->glDeleteTextures(1, &tex);
@@ -544,10 +552,10 @@ static int alloc_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_layout_
      * drmFormatModifier=...), which Vulkan's spec doesn't define for
      * INVALID, and radv ends up with a layout that mismatches the
      * actual buffer → blit GPUVM fault. We know what we asked for —
-     * substitute LINEAR (== d->modifier on the linear_path; for the
-     * tiled path d->modifier is the requested tile, also a sane
+     * substitute LINEAR (== d->format.modifier on the linear path; for the
+     * tiled path d->format.modifier is the requested tile, also a sane
      * fallback if gbm couldn't tell us). */
-    out->modifier = (actual_mod == DRM_FORMAT_MOD_INVALID) ? d->modifier : actual_mod;
+    out->modifier = (actual_mod == DRM_FORMAT_MOD_INVALID) ? d->format.modifier : actual_mod;
     return 0;
 }
 

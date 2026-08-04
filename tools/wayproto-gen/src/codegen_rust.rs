@@ -477,16 +477,31 @@ fn emit_enum(out: &mut String, enum_name: &str, msgs: &[Message], opcode_mod: &s
                 writeln!(out, "            {pat} => {n},").unwrap();
             }
             FdSpec::Product(fields) => {
-                // Build a destructure binding each referenced field.
-                let fs: Vec<String> = fields.iter().map(|f| field_name(f)).collect();
-                let bindings = fs.join(", ");
+                let mut bindings = Vec::new();
+                for path in fields {
+                    let root = field_name(path.split('.').next().expect("non-empty fd path"));
+                    if !bindings.contains(&root) {
+                        bindings.push(root);
+                    }
+                }
                 writeln!(
                     out,
                     "            Self::{variant} {{ {bindings}, .. }} => ({}) as u32,",
-                    fs.iter()
-                        .map(|f| format!("*{f} as u64"))
+                    fields
+                        .iter()
+                        .map(|path| {
+                            let mut segments = path.split('.');
+                            let root = field_name(segments.next().expect("non-empty fd path"));
+                            let tail = segments.map(field_name).collect::<Vec<_>>().join(".");
+                            if tail.is_empty() {
+                                format!("*{root} as u64")
+                            } else {
+                                format!("{root}.{tail} as u64")
+                            }
+                        })
                         .collect::<Vec<_>>()
-                        .join(" * ")
+                        .join(" * "),
+                    bindings = bindings.join(", ")
                 )
                 .unwrap();
             }
@@ -724,5 +739,26 @@ mod tests {
             rust_type(&ArgType::Named("presentation_config".into())),
             "PresentationConfig"
         );
+    }
+
+    #[test]
+    fn nested_struct_fields_drive_fd_count() {
+        let protocol = crate::parser::parse_protocol(
+            r#"<protocol name="t" version="1">
+                <struct name="pool">
+                    <field name="count" type="u32"/>
+                    <field name="planes" type="u32"/>
+                </struct>
+                <event name="bind" opcode="1">
+                    <arg name="pool" type="pool"/>
+                    <fds count_expr="pool.count * pool.planes"/>
+                </event>
+            </protocol>"#,
+        )
+        .unwrap();
+        let generated = emit(&protocol);
+        assert!(generated.contains(
+            "Self::Bind { pool, .. } => (pool.count as u64 * pool.planes as u64) as u32"
+        ));
     }
 }

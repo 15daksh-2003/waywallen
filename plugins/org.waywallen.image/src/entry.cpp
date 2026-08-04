@@ -253,8 +253,8 @@ static void maybe_dump_producer_frame(const HostState& host, const ww_pool_direc
                   "%s/producer-%06llu-0x%08x-0x%016llx.bin",
                   dir,
                   static_cast<unsigned long long>(seq),
-                  d.fourcc,
-                  static_cast<unsigned long long>(d.modifier));
+                  d.format.fourcc,
+                  static_cast<unsigned long long>(d.format.modifier));
     FILE* f = std::fopen(path, "wb");
     if (! f) {
         rstd_warn("waywallen-image-renderer: dump open {}: {}",
@@ -278,8 +278,8 @@ static void maybe_dump_producer_frame(const HostState& host, const ww_pool_direc
                   "%s/producer-%06llu-0x%08x-0x%016llx.json",
                   dir,
                   static_cast<unsigned long long>(seq),
-                  d.fourcc,
-                  static_cast<unsigned long long>(d.modifier));
+                  d.format.fourcc,
+                  static_cast<unsigned long long>(d.format.modifier));
     FILE* sf = std::fopen(sidecar, "w");
     if (! sf) return;
     // Note: the dump is always tightly-packed RGBA8 (`width*height*4`
@@ -304,8 +304,8 @@ static void maybe_dump_producer_frame(const HostState& host, const ww_pool_direc
                  "  \"dump_layout\": \"tightly_packed_rgba8\"\n"
                  "}\n",
                  static_cast<unsigned long long>(seq),
-                 d.fourcc,
-                 static_cast<unsigned long long>(d.modifier),
+                 d.format.fourcc,
+                 static_cast<unsigned long long>(d.format.modifier),
                  s.width,
                  s.height,
                  s.stride,
@@ -452,9 +452,9 @@ void apply_negotiate_request(HostState& host, wavsen::video::Producer& producer,
     host.negotiated.store(true, std::memory_order_release);
     rstd_info("waywallen-image-renderer: NegotiateBuffers honored "
               "(path={} mem_source={} modifier=0x{:016x}) — bind+frame emitted",
-              d.category,
-              d.mem_source,
-              static_cast<unsigned long long>(d.modifier));
+              static_cast<uint32_t>(d.path),
+              static_cast<uint32_t>(d.memory_source),
+              static_cast<unsigned long long>(d.format.modifier));
 }
 
 void apply_control(HostState& host, ww_bridge_control_t& c) {
@@ -468,7 +468,6 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
         break;
     case WW_EVT_IN_PLAY:
     case WW_EVT_IN_PAUSE:
-    case WW_EVT_IN_SET_FPS:
     case WW_EVT_IN_POINTER_MOTION:
     case WW_EVT_IN_POINTER_BUTTON:
     case WW_EVT_IN_POINTER_AXIS:
@@ -477,11 +476,11 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
         // permissive in case a misconfigured daemon forwards anyway.
         break;
     case WW_EVT_IN_SETTING_CHANGED: {
-        ww_bridge_setting_changed_t as {};
-        if (ww_bridge_setting_changed_from_control(&c, &as) == 0) {
-            for (uint32_t i = 0; i < as.settings.count; ++i) {
-                const char* key = as.settings.data[i].key;
-                const char* val = as.settings.data[i].value;
+        const auto& settings = c.u.setting_changed.settings;
+        {
+            for (uint32_t i = 0; i < settings.count; ++i) {
+                const char* key = settings.data[i].key;
+                const char* val = settings.data[i].value;
                 if (! key || ! val) continue;
                 if (std::strcmp(key, kSchemeColorKey) == 0) {
                     set_scheme_color(host, val, true);
@@ -491,22 +490,12 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
                               static_cast<const char*>(key));
                 }
             }
-            ww_bridge_setting_changed_free(&as);
         }
         break;
     }
     case WW_EVT_IN_SHUTDOWN: signal_shutdown(host); break;
     case WW_EVT_IN_NEGOTIATE_BUFFERS: {
-        const auto&         nb = c.u.negotiate_buffers;
-        ww_pool_directive_t d {};
-        d.category    = nb.path;
-        d.mem_source  = nb.mem_source;
-        d.fourcc      = nb.fourcc;
-        d.modifier    = nb.modifier;
-        d.plane_count = nb.plane_count;
-        d.sync_mode   = nb.sync_mode;
-        d.color       = nb.color;
-        d.mem_hint    = nb.mem_hint;
+        ww_pool_directive_t d = c.u.negotiate_buffers.directive;
         /* Static image: one slot is enough. */
         d.count = 1;
         {
@@ -654,6 +643,7 @@ static int print_caps_json(const Options& opt) {
         rstd_error("waywallen-image-renderer: did not observe FormatCaps");
         return 1;
     }
+    const auto& capabilities = caps.capabilities;
 
     auto put_uuid = [](const ww_array_u32_t& a) -> std::string {
         // device_uuid / driver_uuid are 16 bytes packed as 4×u32 LE on
@@ -679,29 +669,29 @@ static int print_caps_json(const Options& opt) {
     std::printf("{\n");
     std::printf("  \"by_fourcc\": {\n");
     size_t cursor = 0;
-    for (uint32_t i = 0; i < caps.fourccs.count; ++i) {
-        const uint32_t fc = caps.fourccs.data[i];
-        const uint32_t n  = caps.mod_counts.data[i];
+    for (uint32_t i = 0; i < capabilities.fourccs.count; ++i) {
+        const uint32_t fc = capabilities.fourccs.data[i];
+        const uint32_t n  = capabilities.mod_counts.data[i];
         std::printf("    \"0x%08x\": [", fc);
         for (uint32_t j = 0; j < n; ++j) {
             std::printf("%s\n      {\"modifier\": %llu, \"plane_count\": %u}",
                         j ? "," : "",
-                        static_cast<unsigned long long>(caps.modifiers.data[cursor + j]),
-                        caps.plane_counts.data[cursor + j]);
+                        static_cast<unsigned long long>(capabilities.modifiers.data[cursor + j]),
+                        capabilities.plane_counts.data[cursor + j]);
         }
         cursor += n;
-        std::printf("\n    ]%s\n", (i + 1 < caps.fourccs.count) ? "," : "");
+        std::printf("\n    ]%s\n", (i + 1 < capabilities.fourccs.count) ? "," : "");
     }
     std::printf("  },\n");
-    std::printf("  \"device_uuid\": %s,\n", put_uuid(caps.device_uuid).c_str());
-    std::printf("  \"driver_uuid\": %s,\n", put_uuid(caps.driver_uuid).c_str());
-    std::printf("  \"drm_render_major\": %u,\n", caps.drm_render_major);
-    std::printf("  \"drm_render_minor\": %u,\n", caps.drm_render_minor);
-    std::printf("  \"sync\": %u,\n", caps.sync_caps);
-    std::printf("  \"color\": %u,\n", caps.color_caps);
-    std::printf("  \"mem_hint\": %u,\n", caps.mem_hints);
-    std::printf("  \"extent_max_w\": %u,\n", caps.extent_max_w);
-    std::printf("  \"extent_max_h\": %u\n", caps.extent_max_h);
+    std::printf("  \"device_uuid\": %s,\n", put_uuid(capabilities.device_uuid).c_str());
+    std::printf("  \"driver_uuid\": %s,\n", put_uuid(capabilities.driver_uuid).c_str());
+    std::printf("  \"drm_render_major\": %u,\n", capabilities.drm_node.major);
+    std::printf("  \"drm_render_minor\": %u,\n", capabilities.drm_node.minor);
+    std::printf("  \"sync\": %u,\n", capabilities.sync_caps);
+    std::printf("  \"color\": %u,\n", capabilities.color_caps);
+    std::printf("  \"mem_hint\": %u,\n", capabilities.mem_hints);
+    std::printf("  \"extent_max_w\": %u,\n", capabilities.max_extent.width);
+    std::printf("  \"extent_max_h\": %u\n", capabilities.max_extent.height);
     std::printf("}\n");
     std::fflush(stdout);
     ww_evt_format_caps_free(&caps);
@@ -796,16 +786,22 @@ int run(int argc, char** argv) {
     host.sock = ww_bridge_connect(opt.ipc_path.c_str());
     if (host.sock < 0) die("ww_bridge_connect: " + std::string(std::strerror(-host.sock)));
 
-    ww_bridge_init_t init {};
+    waywallen_renderer_init_t init {};
     if (int rc = ww_bridge_recv_init(host.sock, &init); rc < 0) {
         // Surface the rejection structured-ly so the daemon's spawn()
         // gets a useful error string. `init.spawn_version` is filled
         // by recv_init even on -EPROTO (version mismatch).
         const char* reason = (rc == -EPROTO) ? "init: protocol error or unsupported spawn_version"
                                              : "init: recv failed";
-        ww_bridge_send_init_nack(
-            host.sock, init.spawn_version, WW_BRIDGE_SUPPORTED_SPAWN_VERSION, reason);
-        ww_bridge_init_free(&init);
+        waywallen_init_rejection_t rejection {
+            .received_protocol_version  = init.protocol_version,
+            .supported_protocol_version = WW_BRIDGE_SUPPORTED_PROTOCOL_VERSION,
+            .received_spawn_version     = init.spawn_version,
+            .supported_spawn_version    = WW_BRIDGE_SUPPORTED_SPAWN_VERSION,
+            .reason                     = const_cast<char*>(reason),
+        };
+        ww_bridge_send_init_nack(host.sock, &rejection);
+        waywallen_renderer_init_free(&init);
         die(std::string(reason) + " rc=" + std::to_string(rc));
     }
 
@@ -824,7 +820,7 @@ int run(int argc, char** argv) {
         }
     }
     apply_user_properties(host, init.user_properties);
-    ww_bridge_init_free(&init);
+    waywallen_renderer_init_free(&init);
 
     /* --- Decode + Vulkan setup --- */
     if (opt.image_path.empty()) die("--path <image-file> is required");
