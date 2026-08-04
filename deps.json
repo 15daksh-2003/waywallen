@@ -24,7 +24,7 @@
     }
   },
   {
-    "commit": "1a39de4fe7587ff0013be71ebb2adc27f638deed",
+    "commit": "c697a4b08cbb9183f78c18915f59c8f72dac5d14",
     "dest": "build/_flatpak_deps/rstd-src",
     "disable-shallow-clone": true,
     "type": "git",
@@ -46,7 +46,7 @@
     }
   },
   {
-    "commit": "37d3c588fb1307dd6c40fbc8681790b45eb5402a",
+    "commit": "8d703215bc9154618bc84d2c8517ff7b264c93f3",
     "dest": "build/_flatpak_deps/ncrequest-src",
     "disable-shallow-clone": true,
     "type": "git",
