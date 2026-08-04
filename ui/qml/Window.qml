@@ -104,7 +104,6 @@ MD.ApplicationWindow {
     }
 
     Component.onCompleted: {
-        MD.Token.color.useSysAccentColor = true;
         currentPageChanged();
         // Level-check for the case where the daemon is already Ready
         // before this window finishes constructing (UI launched

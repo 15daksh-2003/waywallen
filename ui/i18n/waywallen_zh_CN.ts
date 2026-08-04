@@ -1116,6 +1116,14 @@ Related display: #%1</source>
         <translation>系统</translation>
     </message>
     <message>
+        <source>Accent color</source>
+        <translation>强调色</translation>
+    </message>
+    <message>
+        <source>Custom</source>
+        <translation>自定义</translation>
+    </message>
+    <message>
         <source>Language</source>
         <translation>语言</translation>
     </message>

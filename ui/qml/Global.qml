@@ -11,14 +11,23 @@ QtObject {
     property bool sidebarAutoExpand: true
     property int networkCacheMaximumMiB: 1024
     property string themeMode: "system"
+    readonly property color defaultAccentColor: "#6750A4"
+    property string accentMode: "system"
+    property color accentColor: defaultAccentColor
 
     onNetworkCacheMaximumMiBChanged:
         W.App.setNetworkCacheMaximumSize(networkCacheMaximumMiB * 1024 * 1024)
     onThemeModeChanged: _applyThemeMode()
+    onAccentModeChanged: _applyAccentColor()
+    onAccentColorChanged: {
+        if (accentMode === "custom")
+            _applyAccentColor();
+    }
 
     Component.onCompleted: {
         W.App.setNetworkCacheMaximumSize(networkCacheMaximumMiB * 1024 * 1024)
         setThemeMode(themeMode)
+        setAccentMode(accentMode)
     }
 
     function setThemeMode(mode) {
@@ -34,6 +43,21 @@ QtObject {
         MD.Token.color.useSysColorSM = system;
         if (!system)
             MD.Token.themeMode = themeMode === "dark" ? MD.Enum.Dark : MD.Enum.Light;
+    }
+
+    function setAccentMode(mode) {
+        const normalized = mode === "custom" ? "custom" : "system";
+        if (accentMode !== normalized)
+            accentMode = normalized;
+        else
+            _applyAccentColor();
+    }
+
+    function _applyAccentColor() {
+        const system = accentMode === "system";
+        MD.Token.color.useSysAccentColor = system;
+        if (!system)
+            MD.Token.color.accentColor = accentColor;
     }
 
     readonly property Component errorToastAction: Component {
@@ -58,6 +82,8 @@ QtObject {
         property alias sidebarAutoExpand: root.sidebarAutoExpand
         property alias networkCacheMaximumMiB: root.networkCacheMaximumMiB
         property alias themeMode: root.themeMode
+        property alias accentMode: root.accentMode
+        property alias accentColor: root.accentColor
     }
 
     // Per-vendor Material color schemes, seeded from each GPU vendor's brand

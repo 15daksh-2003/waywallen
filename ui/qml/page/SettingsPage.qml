@@ -247,6 +247,8 @@ MD.Page {
         W.Global.sidebarAutoExpand = true;
         W.Global.networkCacheMaximumMiB = 1024;
         W.Global.setThemeMode("system");
+        W.Global.accentColor = W.Global.defaultAccentColor;
+        W.Global.setAccentMode("system");
         if (!W.App.setUiLanguage("system"))
             W.Global.toastError(qsTr("Failed to change language"));
         root.autoReplayRevision += 1;
@@ -403,6 +405,54 @@ MD.Page {
                             onClicked: W.Global.setThemeMode("system")
                         }
                     }
+                }
+            }
+
+            SettingItem {
+                first: false
+                last: false
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Accent color")
+                    }
+
+                    MD.SegmentedButtonGroup {
+                        size: MD.Enum.XS
+
+                        MD.SegmentedButton {
+                            text: qsTr("Custom")
+                            checked: W.Global.accentMode === "custom"
+                            onClicked: W.Global.setAccentMode("custom")
+                        }
+
+                        MD.SegmentedButton {
+                            text: qsTr("System")
+                            checked: W.Global.accentMode === "system"
+                            onClicked: W.Global.setAccentMode("system")
+                        }
+                    }
+                }
+
+                MD.ColorPickerButton {
+                    id: m_accent_color
+                    visible: W.Global.accentMode === "custom"
+                    Layout.alignment: Qt.AlignRight
+                    Layout.topMargin: 4
+                    Layout.preferredWidth: 96
+                    Layout.preferredHeight: 32
+                    showAlpha: false
+                    onAccepted: color => W.Global.accentColor = color
+                }
+
+                Binding {
+                    target: m_accent_color
+                    property: "color"
+                    value: W.Global.accentColor
                 }
             }
 

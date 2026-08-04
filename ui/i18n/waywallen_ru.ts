@@ -1122,6 +1122,14 @@ Related display: #%1</source>
         <translation>Системная</translation>
     </message>
     <message>
+        <source>Accent color</source>
+        <translation>Акцентный цвет</translation>
+    </message>
+    <message>
+        <source>Custom</source>
+        <translation>Свой</translation>
+    </message>
+    <message>
         <source>Language</source>
         <translation>Язык</translation>
     </message>
