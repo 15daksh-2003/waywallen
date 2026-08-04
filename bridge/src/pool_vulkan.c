@@ -27,7 +27,10 @@
 #include <string.h>
 #include <unistd.h>
 
-#define DRM_FORMAT_MOD_LINEAR 0ULL
+/* RADV GFX12 rejects NVIDIA's 64-byte LINEAR pitch on explicit import.
+ * CompatLinear uses 256 bytes as the shared cross-vendor layout contract. */
+#define DRM_FORMAT_MOD_LINEAR                0ULL
+#define WW_COMPAT_LINEAR_ROW_PITCH_ALIGNMENT 256ULL
 
 typedef struct vk_state {
     /* Plugin-owned. */
@@ -114,23 +117,24 @@ static int load_dispatch(vk_state_t* st, PFN_vkGetInstanceProcAddr getipa) {
 struct vk_fourcc_entry {
     uint32_t fourcc;
     VkFormat vk_format;
+    uint32_t bytes_per_pixel;
 };
 static const struct vk_fourcc_entry s_vk_fourcc_table[] = {
-    { WW_DRM_FORMAT_ABGR8888, VK_FORMAT_R8G8B8A8_UNORM },
-    { WW_DRM_FORMAT_XBGR8888, VK_FORMAT_R8G8B8A8_UNORM },
-    { WW_DRM_FORMAT_ARGB8888, VK_FORMAT_B8G8R8A8_UNORM },
-    { WW_DRM_FORMAT_XRGB8888, VK_FORMAT_B8G8R8A8_UNORM },
-    { WW_DRM_FORMAT_RGBA8888, VK_FORMAT_R8G8B8A8_UNORM },
-    { WW_DRM_FORMAT_BGRA8888, VK_FORMAT_B8G8R8A8_UNORM },
-    { WW_DRM_FORMAT_RGBX8888, VK_FORMAT_R8G8B8A8_UNORM },
-    { WW_DRM_FORMAT_BGRX8888, VK_FORMAT_B8G8R8A8_UNORM },
+    { WW_DRM_FORMAT_ABGR8888, VK_FORMAT_R8G8B8A8_UNORM, 4 },
+    { WW_DRM_FORMAT_XBGR8888, VK_FORMAT_R8G8B8A8_UNORM, 4 },
+    { WW_DRM_FORMAT_ARGB8888, VK_FORMAT_B8G8R8A8_UNORM, 4 },
+    { WW_DRM_FORMAT_XRGB8888, VK_FORMAT_B8G8R8A8_UNORM, 4 },
+    { WW_DRM_FORMAT_RGBA8888, VK_FORMAT_R8G8B8A8_UNORM, 4 },
+    { WW_DRM_FORMAT_BGRA8888, VK_FORMAT_B8G8R8A8_UNORM, 4 },
+    { WW_DRM_FORMAT_RGBX8888, VK_FORMAT_R8G8B8A8_UNORM, 4 },
+    { WW_DRM_FORMAT_BGRX8888, VK_FORMAT_B8G8R8A8_UNORM, 4 },
 };
 
-static VkFormat fourcc_to_vk_format(uint32_t fourcc) {
+static const struct vk_fourcc_entry* find_fourcc(uint32_t fourcc) {
     for (size_t i = 0; i < sizeof(s_vk_fourcc_table) / sizeof(s_vk_fourcc_table[0]); ++i) {
-        if (s_vk_fourcc_table[i].fourcc == fourcc) return s_vk_fourcc_table[i].vk_format;
+        if (s_vk_fourcc_table[i].fourcc == fourcc) return &s_vk_fourcc_table[i];
     }
-    return VK_FORMAT_UNDEFINED;
+    return NULL;
 }
 
 static int probe_caps(ww_pool_t* pool, uint32_t width, uint32_t height) {
@@ -310,24 +314,46 @@ static int alloc_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_layout_
     mod_list.drmFormatModifierCount = 1;
     mod_list.pDrmFormatModifiers    = modifiers;
 
-    VkExternalMemoryImageCreateInfo ext_img = { 0 };
-    ext_img.sType                           = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
-    ext_img.pNext                           = &mod_list;
-    ext_img.handleTypes                     = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-
-    VkFormat vk_format = fourcc_to_vk_format(d->format.fourcc);
-    if (vk_format == VK_FORMAT_UNDEFINED) {
+    const struct vk_fourcc_entry* format = find_fourcc(d->format.fourcc);
+    if (! format) {
         ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
                        "ww_pool[vulkan]: directive fourcc 0x%08x has no VkFormat mapping",
                        d->format.fourcc);
         return -EINVAL;
     }
 
+    VkSubresourceLayout                           explicit_plane       = { 0 };
+    VkImageDrmFormatModifierExplicitCreateInfoEXT explicit_modifier    = { 0 };
+    const void*                                   modifier_create_info = &mod_list;
+    if (linear_path) {
+        if (d->format.plane_count != 1) {
+            ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
+                           "ww_pool[vulkan]: COMPAT_LINEAR requires one plane, got %u",
+                           d->format.plane_count);
+            return -ENOTSUP;
+        }
+        VkDeviceSize min_row_pitch = (VkDeviceSize)extent->width * format->bytes_per_pixel;
+        explicit_plane.rowPitch    = (min_row_pitch + WW_COMPAT_LINEAR_ROW_PITCH_ALIGNMENT - 1) &
+                                     ~(WW_COMPAT_LINEAR_ROW_PITCH_ALIGNMENT - 1);
+
+        explicit_modifier.sType =
+            VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT;
+        explicit_modifier.drmFormatModifier           = DRM_FORMAT_MOD_LINEAR;
+        explicit_modifier.drmFormatModifierPlaneCount = 1;
+        explicit_modifier.pPlaneLayouts               = &explicit_plane;
+        modifier_create_info                          = &explicit_modifier;
+    }
+
+    VkExternalMemoryImageCreateInfo ext_img = { 0 };
+    ext_img.sType                           = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+    ext_img.pNext                           = modifier_create_info;
+    ext_img.handleTypes                     = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+
     VkImageCreateInfo img_ci = { 0 };
     img_ci.sType             = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     img_ci.pNext             = &ext_img;
     img_ci.imageType         = VK_IMAGE_TYPE_2D;
-    img_ci.format            = vk_format;
+    img_ci.format            = format->vk_format;
     img_ci.extent.width      = extent->width;
     img_ci.extent.height     = extent->height;
     img_ci.extent.depth      = 1;
@@ -354,9 +380,11 @@ static int alloc_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_layout_
     VkResult r     = st->vkCreateImage(st->device, &img_ci, NULL, &image);
     if (r != VK_SUCCESS) {
         ww_bridge_logf(WW_BRIDGE_LOG_ERROR,
-                       "ww_pool[vulkan]: vkCreateImage failed (modifier=0x%016llx linear=%d): %d",
+                       "ww_pool[vulkan]: vkCreateImage failed (modifier=0x%016llx linear=%d "
+                       "row_pitch=%llu): %d",
                        (unsigned long long)modifiers[0],
                        linear_path ? 1 : 0,
+                       (unsigned long long)explicit_plane.rowPitch,
                        r);
         return -EIO;
     }
