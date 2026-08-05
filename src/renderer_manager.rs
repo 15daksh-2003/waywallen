@@ -21,7 +21,7 @@ use crate::ipc::uds::{recv_event, send_control};
 
 /// Renderer IPC compatibility version the daemon currently emits. Bump
 /// this when the daemon/renderer wire contract changes.
-pub const SPAWN_VERSION: u32 = 8;
+pub const SPAWN_VERSION: u32 = 9;
 use crate::plugin::renderer_registry::{RendererActivityMode, RendererDef, RendererRegistry};
 use crate::routing::Router;
 use crate::settings::SettingsStore;

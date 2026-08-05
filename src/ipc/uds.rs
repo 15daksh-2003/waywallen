@@ -294,7 +294,7 @@ mod tests {
         let sent = EventIn::Init {
             config: RendererInit {
                 protocol_version: PROTOCOL_VERSION,
-                spawn_version: 8,
+                spawn_version: 9,
                 settings: vec![("fps".into(), "60".into()), ("volume".into(), "1.0".into())],
                 user_properties: String::new(),
             },
