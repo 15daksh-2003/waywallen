@@ -15,8 +15,19 @@ permissions:
 
 jobs:
   appimage:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    name: Linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            miniconda_arch: x86_64
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            miniconda_arch: aarch64
     env:
       DEBIAN_FRONTEND: noninteractive
       WAYWALLEN_CONDA_ENV: waywallen
@@ -38,7 +49,7 @@ jobs:
       - name: Install Miniconda
         run: |
           curl -fsSL -o /tmp/miniconda.sh \
-            https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+            https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-${{ matrix.miniconda_arch }}.sh
           bash /tmp/miniconda.sh -b -p "$HOME/miniconda"
           echo "$HOME/miniconda/bin" >> "$GITHUB_PATH"
           echo "$HOME/miniconda/condabin" >> "$GITHUB_PATH"
@@ -52,7 +63,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/miniconda/envs/waywallen
-          key: conda-${{ runner.os }}-${{ hashFiles('environment.yml', 'scripts/build_ffmpeg.sh') }}
+          key: conda-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('environment.yml', 'scripts/build_appimage.sh', 'scripts/build_ffmpeg.sh') }}
 
       - uses: actions/cache@v4
         with:
@@ -60,7 +71,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             build/clang-release/cargo
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.toml', 'displays/*/Cargo.toml') }}
+          key: cargo-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('Cargo.toml', 'displays/*/Cargo.toml') }}
 
       - name: Build AppImage
         run: bash ./scripts/build_appimage.sh
@@ -68,33 +79,42 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: waywallen-appimage
-          path: waywallen-*-x86_64.AppImage
+          name: waywallen-appimage-${{ matrix.arch }}
+          path: waywallen-*-${{ matrix.arch }}.AppImage
 
-      # Only release for a tag: tag push, or a manual run whose input starts with "v".
+  release:
+    name: Release
+    runs-on: ubuntu-24.04
+    needs: appimage
+    if: github.event_name == 'push' || startsWith(inputs.tag || '', 'v')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: waywallen-appimage-*
+          path: release-artifacts
+          merge-multiple: true
+
       - name: Determine release
         id: rel
         run: |
-          REF="${{ inputs.tag || github.ref_name }}"
-          if [ "${{ github.event_name }}" = "push" ] || [[ "$REF" == v* ]]; then
-            echo "tag=$REF" >> "$GITHUB_OUTPUT"
-            echo "is_release=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "is_release=false" >> "$GITHUB_OUTPUT"
-          fi
+          ref="${{ inputs.tag || github.ref_name }}"
+          echo "tag=$ref" >> "$GITHUB_OUTPUT"
 
       - name: Extract changelog
-        if: steps.rel.outputs.is_release == 'true'
         run: |
           python3 scripts/changelog.py "${{ steps.rel.outputs.tag }}" > /tmp/changelog.md
           cat /tmp/changelog.md
 
       - name: Create release
-        if: steps.rel.outputs.is_release == 'true'
         uses: ncipollo/release-action@v1
         with:
           tag: ${{ steps.rel.outputs.tag }}
-          artifacts: waywallen-*-x86_64.AppImage
+          artifacts: release-artifacts/*.AppImage
           bodyFile: /tmp/changelog.md
           immutableCreate: true
           skipIfReleaseExists: true
