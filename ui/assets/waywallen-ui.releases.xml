@@ -1,3 +1,11 @@
+<release version="0.3.1" date="2026-08-05">
+  <description>
+    <p>Fixes:</p>
+    <ul>
+      <li>Notify incompatible or malformed display protocol handshakes.</li>
+    </ul>
+  </description>
+</release>
 <release version="0.3.0" date="2026-08-04">
   <description>
     <p>Added:</p>
