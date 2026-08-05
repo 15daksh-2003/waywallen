@@ -39,8 +39,8 @@ pub enum GlobalEvent {
     /// The persisted settings table just changed (either via
     /// `SettingsSet` RPC or startup reconciliation).
     SettingsChanged,
-    /// External display client failed handshake on the UDS endpoint
-    /// because of a bad protocol name or unsupported version.
+    /// External display client failed the UDS handshake because of
+    /// malformed or unsupported protocol data.
     DisplayConnectionFailed {
         client_name: String,
         client_protocol_version: u32,

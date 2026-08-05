@@ -170,9 +170,22 @@ async fn do_handshake(
     events_tx: &tokio::sync::broadcast::Sender<GlobalEvent>,
     shutdown_rx: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<DisplayRegistration> {
-    let (hello, _fds): (Request, _) = recv_request_cancellable(stream, shutdown_rx)
-        .await
-        .context("recv hello")?;
+    let (hello, _fds): (Request, _) = match recv_request_cancellable(stream, shutdown_rx).await {
+        Ok(request) => request,
+        Err(error) => {
+            if error.is_protocol_failure() {
+                let reason = format!("incompatible or malformed display hello: {error}");
+                report_connection_failure(
+                    events_tx,
+                    String::new(),
+                    0,
+                    wire::DisplayErrorCode::ProtocolViolation,
+                    reason,
+                );
+            }
+            return Err(Error::Internal(anyhow!("recv hello: {error}")));
+        }
+    };
     let Request::Hello {
         client_name,
         client_version,
@@ -199,12 +212,13 @@ async fn do_handshake(
             msg.clone(),
         )
         .await;
-        let _ = events_tx.send(GlobalEvent::DisplayConnectionFailed {
-            client_name: client_name.clone(),
-            client_protocol_version: protocol_version,
-            error_code: wire::DisplayErrorCode::VersionUnsupported as u32,
-            reason: msg.clone(),
-        });
+        report_connection_failure(
+            events_tx,
+            client_name.clone(),
+            protocol_version,
+            wire::DisplayErrorCode::VersionUnsupported,
+            msg.clone(),
+        );
         return Err(Error::Internal(anyhow!("version mismatch: {msg}")));
     }
     log::info!("display hello: {client_name} v{client_version} (proto v{protocol_version})");
@@ -223,9 +237,22 @@ async fn do_handshake(
     .context("welcome join")?
     .map_err(|e| Error::Internal(anyhow!("send welcome: {e}")))?;
 
-    let (reg, _fds): (Request, _) = recv_request_cancellable(stream, shutdown_rx)
-        .await
-        .context("recv register_display")?;
+    let (reg, _fds): (Request, _) = match recv_request_cancellable(stream, shutdown_rx).await {
+        Ok(request) => request,
+        Err(error) => {
+            if error.is_protocol_failure() {
+                let reason = format!("incompatible or malformed display registration: {error}");
+                report_connection_failure(
+                    events_tx,
+                    client_name.clone(),
+                    protocol_version,
+                    wire::DisplayErrorCode::ProtocolViolation,
+                    reason,
+                );
+            }
+            return Err(Error::Internal(anyhow!("recv register_display: {error}")));
+        }
+    };
     let Request::RegisterDisplay {
         name,
         instance_id,
@@ -311,12 +338,13 @@ async fn do_handshake(
                 message.clone(),
             )
             .await;
-            let _ = events_tx.send(GlobalEvent::DisplayConnectionFailed {
+            report_connection_failure(
+                events_tx,
                 client_name,
-                client_protocol_version: protocol_version,
-                error_code: wire::DisplayErrorCode::ProtocolViolation as u32,
-                reason: message.clone(),
-            });
+                protocol_version,
+                wire::DisplayErrorCode::ProtocolViolation,
+                message.clone(),
+            );
             return Err(Error::Internal(anyhow!(message)));
         }
     };
@@ -702,25 +730,81 @@ fn pointer_values_valid(values: &[f32], modifiers: u32) -> bool {
     values.iter().all(|value| value.is_finite()) && modifiers & !0x0f == 0
 }
 
+fn report_connection_failure(
+    events_tx: &tokio::sync::broadcast::Sender<GlobalEvent>,
+    client_name: String,
+    client_protocol_version: u32,
+    error_code: wire::DisplayErrorCode,
+    reason: String,
+) {
+    let _ = events_tx.send(GlobalEvent::DisplayConnectionFailed {
+        client_name,
+        client_protocol_version,
+        error_code: error_code as u32,
+        reason,
+    });
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ReceiveRequestError {
+    #[error("{context}: {source}")]
+    Clone {
+        context: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("recv: {0}")]
+    Codec(#[source] codec::CodecError),
+    #[error("recv join: {0}")]
+    Join(#[source] tokio::task::JoinError),
+    #[error("shutdown during recv")]
+    Shutdown,
+}
+
+impl ReceiveRequestError {
+    fn is_protocol_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::Codec(
+                codec::CodecError::FrameTooLarge(_)
+                    | codec::CodecError::BadFrameLen(_)
+                    | codec::CodecError::TooManyFds(_)
+                    | codec::CodecError::FdCountMismatch { .. }
+                    | codec::CodecError::Decode(_)
+            )
+        )
+    }
+}
+
 /// Run `codec::recv_request` on the blocking pool but tear down the
 /// wait if `shutdown_rx` flips to `true`.
 async fn recv_request_cancellable(
     stream: &StdUnixStream,
     shutdown_rx: &mut tokio::sync::watch::Receiver<bool>,
-) -> Result<(Request, Vec<OwnedFd>)> {
-    let blocking_stream = stream.try_clone().context("clone for recv")?;
-    let shutdown_stream = stream.try_clone().context("clone for shutdown-kick")?;
+) -> std::result::Result<(Request, Vec<OwnedFd>), ReceiveRequestError> {
+    let blocking_stream = stream
+        .try_clone()
+        .map_err(|source| ReceiveRequestError::Clone {
+            context: "clone for recv",
+            source,
+        })?;
+    let shutdown_stream = stream
+        .try_clone()
+        .map_err(|source| ReceiveRequestError::Clone {
+            context: "clone for shutdown-kick",
+            source,
+        })?;
     let mut handle = tokio::task::spawn_blocking(move || codec::recv_request(&blocking_stream));
     tokio::select! {
         biased;
         res = &mut handle => match res {
-            Ok(r) => r.map_err(|e| Error::Internal(anyhow!("recv: {e}"))),
-            Err(e) => Err(Error::Internal(anyhow!("recv join: {e}"))),
+            Ok(r) => r.map_err(ReceiveRequestError::Codec),
+            Err(e) => Err(ReceiveRequestError::Join(e)),
         },
         _ = wait_shutdown(shutdown_rx) => {
             let _ = shutdown_stream.shutdown(std::net::Shutdown::Both);
             let _ = handle.await;
-            Err(Error::Internal(anyhow!("shutdown during recv")))
+            Err(ReceiveRequestError::Shutdown)
         }
     }
 }
@@ -1038,6 +1122,53 @@ struct ForwardedFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn malformed_hello_publishes_connection_failure() {
+        use std::io::Write;
+
+        let (server, mut client) = StdUnixStream::pair().unwrap();
+        let (events_tx, mut events_rx) = tokio::sync::broadcast::channel(4);
+        let (_shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let hello = Request::Hello {
+            client_name: "legacy-display".to_string(),
+            client_version: "0.2.0".to_string(),
+            protocol_version: PROTOCOL_VERSION,
+        };
+        let mut body = Vec::new();
+        hello.encode(&mut body);
+        body.extend_from_slice(&0_u32.to_le_bytes());
+
+        let total = u16::try_from(body.len() + 4).unwrap();
+        let mut frame = Vec::with_capacity(total as usize);
+        frame.extend_from_slice(&hello.opcode().to_le_bytes());
+        frame.extend_from_slice(&total.to_le_bytes());
+        frame.extend_from_slice(&body);
+        client.write_all(&frame).unwrap();
+
+        let error = match do_handshake(&server, &events_tx, &mut shutdown_rx).await {
+            Ok(_) => panic!("malformed hello unexpectedly completed the handshake"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("trailing bytes after decode"));
+
+        match events_rx.try_recv().unwrap() {
+            GlobalEvent::DisplayConnectionFailed {
+                client_name,
+                client_protocol_version,
+                error_code,
+                reason,
+            } => {
+                assert!(client_name.is_empty());
+                assert_eq!(client_protocol_version, 0);
+                assert_eq!(error_code, wire::DisplayErrorCode::ProtocolViolation as u32);
+                assert!(reason.contains("incompatible or malformed display hello"));
+                assert!(reason.contains("trailing bytes after decode"));
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
+    }
 
     #[test]
     fn build_bind_event_uses_display_generation() {
