@@ -1303,6 +1303,10 @@ message GlobalSettings {
 
   // Allow the daemon to forward display pointer input to subscribed renderers.
   bool pointer_forwarding_enabled = 25;
+
+  // Hide the tray icon. The daemon applies this live; the window can
+  // be reopened by launching waywallen again. `--no-tray` overrides.
+  bool hide_tray_icon = 21;
 }
 
 enum AutoAction {

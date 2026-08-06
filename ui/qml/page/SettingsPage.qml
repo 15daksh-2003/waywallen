@@ -232,7 +232,8 @@ MD.Page {
             "renderer.enable_audio": true,
             "renderer.volume": 100,
             pluginUpdateNotifications: true,
-            duplicateRenderers: false
+            duplicateRenderers: false,
+            hideTrayIcon: false
         };
     }
 
@@ -273,7 +274,8 @@ MD.Page {
             rendererEnableAudio: root._rendererAudioEnabled(g),
             rendererVolume: root._rendererVolume(g),
             pluginUpdateNotifications: Boolean(g.pluginUpdateNotifications ?? true),
-            duplicateRenderers: Boolean(g.duplicateRenderers ?? false)
+            duplicateRenderers: Boolean(g.duplicateRenderers ?? false),
+            hideTrayIcon: Boolean(g.hideTrayIcon ?? false)
         });
     }
 
@@ -548,6 +550,43 @@ MD.Page {
                         value: autostartSetQ.querying || autostartSetQ.status === 2
                             ? autostartSetQ.enabled
                             : autostartGetQ.enabled
+                    }
+                }
+            }
+
+            SettingItem {
+                first: false
+                last: false
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+
+                        FieldLabel { text: qsTr("Hide tray icon") }
+
+                        MD.Text {
+                            text: qsTr("Remove the status-bar icon. Reopen this window by launching Waywallen again.")
+                            typescale: MD.Token.typescale.body_small
+                            color: MD.Token.color.on_surface_variant
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                    }
+
+                    MD.Switch {
+                        id: m_hide_tray_icon
+                        onToggled: root._mut(g => {
+                            g.hideTrayIcon = checked;
+                        })
+                    }
+                    Binding {
+                        target: m_hide_tray_icon
+                        property: "checked"
+                        value: Boolean(root._currentGlobal()?.hideTrayIcon ?? false)
                     }
                 }
             }

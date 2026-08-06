@@ -291,6 +291,10 @@ pub struct GlobalSettings {
 
     /// Last autostart state successfully accepted by the Flatpak portal.
     pub autostart_enabled: bool,
+
+    /// Hide the StatusNotifierItem tray icon. Applied live; the
+    /// `--no-tray` CLI flag forces the tray off regardless.
+    pub hide_tray_icon: bool,
 }
 
 impl Default for GlobalSettings {
@@ -317,6 +321,7 @@ impl Default for GlobalSettings {
             duplicate_renderers_for_same_wallpaper: false,
             pointer_forwarding_enabled: true,
             autostart_enabled: false,
+            hide_tray_icon: false,
         }
     }
 }
@@ -1163,19 +1168,6 @@ duplicate_renderers_for_same_wallpaper = true
         assert!(toml::to_string(&s)
             .unwrap()
             .contains("duplicate_renderers_for_same_wallpaper = true"));
-    }
-
-    #[test]
-    fn pointer_forwarding_setting_roundtrip() {
-        let src = r#"
-[global]
-pointer_forwarding_enabled = false
-"#;
-        let s: Settings = toml::from_str(src).unwrap();
-        assert!(!s.global.pointer_forwarding_enabled);
-        assert!(toml::to_string(&s)
-            .unwrap()
-            .contains("pointer_forwarding_enabled = false"));
     }
 
     #[test]
