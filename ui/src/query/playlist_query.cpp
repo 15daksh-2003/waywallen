@@ -1,6 +1,5 @@
 module;
 #include "waywallen/query/playlist_query.moc.h"
-#include <qtprotobuftypes.h>
 #undef assert
 #include <rstd/macro.hpp>
 

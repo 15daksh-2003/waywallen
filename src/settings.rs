@@ -18,6 +18,9 @@ pub const MAX_AUDIO_FADE_MS: u32 = 2000;
 pub const RENDERER_ENABLE_AUDIO_KEY: &str = "enable_audio";
 pub const RENDERER_VOLUME_KEY: &str = "volume";
 pub const MAX_RENDERER_VOLUME: u32 = 100;
+pub const MIN_BLUR_EFFECT_RADIUS: u32 = 1;
+pub const MAX_BLUR_EFFECT_RADIUS: u32 = 64;
+pub const DEFAULT_BLUR_EFFECT_RADIUS: u32 = 30;
 
 /// Daemon-wide layout defaults applied to displays that have no
 /// `[displays.<name>]` override.
@@ -150,6 +153,53 @@ impl AutoReplayPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PauseEffectKind {
+    #[default]
+    None,
+    Blur,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BlurEffectConfig {
+    pub radius: u32,
+}
+
+impl Default for BlurEffectConfig {
+    fn default() -> Self {
+        Self {
+            radius: DEFAULT_BLUR_EFFECT_RADIUS,
+        }
+    }
+}
+
+impl BlurEffectConfig {
+    pub fn effective_radius(self) -> u32 {
+        self.radius
+            .clamp(MIN_BLUR_EFFECT_RADIUS, MAX_BLUR_EFFECT_RADIUS)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PauseEffectConfig {
+    pub kind: PauseEffectKind,
+    pub blur: BlurEffectConfig,
+}
+
+impl PauseEffectConfig {
+    pub fn effective(self) -> Self {
+        Self {
+            kind: self.kind,
+            blur: BlurEffectConfig {
+                radius: self.blur.effective_radius(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GlobalRendererSettings {
@@ -185,6 +235,10 @@ pub struct GlobalSettings {
     pub rotation_secs: u32,
     /// Fade duration shared by mute and unmute control messages.
     pub audio_fade_ms: u32,
+    /// Mute renderer audio while another PulseAudio playback stream is active.
+    pub mute_when_other_audio: bool,
+    /// Allow audio-response wallpapers to capture the system output spectrum.
+    pub audio_capture_enabled: bool,
     pub renderer: GlobalRendererSettings,
     /// Manual global mute requested through daemon controls.
     pub manual_muted: bool,
@@ -197,6 +251,7 @@ pub struct GlobalSettings {
         skip_serializing_if = "Option::is_none"
     )]
     pub auto_replay: Option<AutoReplayPolicy>,
+    pub pause_effect: PauseEffectConfig,
     /// Structured wallpaper-browser filter state.
     /// Kept typed in memory but serialized as a JSON string.
     #[serde(
@@ -231,6 +286,9 @@ pub struct GlobalSettings {
 
     pub duplicate_renderers_for_same_wallpaper: bool,
 
+    /// Forward pointer input received by the daemon to subscribed renderers.
+    pub pointer_forwarding_enabled: bool,
+
     /// Last autostart state successfully accepted by the Flatpak portal.
     pub autostart_enabled: bool,
 
@@ -246,10 +304,13 @@ impl Default for GlobalSettings {
             queue_mode: "sequential".to_string(),
             rotation_secs: 0,
             audio_fade_ms: DEFAULT_AUDIO_FADE_MS,
+            mute_when_other_audio: false,
+            audio_capture_enabled: true,
             renderer: GlobalRendererSettings::default(),
             manual_muted: false,
             layout: LayoutDefaults::default(),
             auto_replay: None,
+            pause_effect: PauseEffectConfig::default(),
             wallpaper_filter: WallpaperFilterState::default(),
             wallpaper_sorts: Vec::new(),
             wallpaper_skip_types: Vec::new(),
@@ -258,6 +319,7 @@ impl Default for GlobalSettings {
             auto_attach_playlist_id: None,
             plugin_update_notifications: true,
             duplicate_renderers_for_same_wallpaper: false,
+            pointer_forwarding_enabled: true,
             autostart_enabled: false,
             hide_tray_icon: false,
         }
@@ -546,32 +608,11 @@ where
     })
 }
 
-/// DepotDownloader-backed Steam Workshop download settings (`[workshop]`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct WorkshopSettings {
-    /// DepotDownloader binary, resolved via PATH by default.
-    pub depotdownloader_bin: String,
-    /// Steam login that owns Wallpaper Engine (used with `-remember-password`).
-    pub steam_username: String,
-}
-
-impl Default for WorkshopSettings {
-    fn default() -> Self {
-        Self {
-            depotdownloader_bin: "DepotDownloader".to_string(),
-            steam_username: String::new(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
     pub global: GlobalSettings,
-    #[serde(default)]
-    pub workshop: WorkshopSettings,
-    /// Per-plugin string-to-string bag keyed by `RendererDef.name`.
+    /// Per-component string-to-string bag keyed by renderer or Lua source name.
     /// String values map cleanly to TOML and protobuf.
     #[serde(default, rename = "plugin")]
     pub plugins: HashMap<String, HashMap<String, String>>,
@@ -659,6 +700,17 @@ pub fn default_db_path() -> PathBuf {
     PathBuf::from("waywallen-v2.db")
 }
 
+pub fn data_dir() -> PathBuf {
+    default_db_path()
+        .parent()
+        .map(|path| path.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+pub fn plugin_state_dir() -> PathBuf {
+    data_dir().join("plugin-state")
+}
+
 /// Map a path segment to a safe `[A-Za-z0-9._-]` string (others become `_`).
 pub fn sanitize_path_segment(input: &str) -> String {
     let s: String = input
@@ -685,50 +737,6 @@ pub fn remote_content_dir(source_id: &str) -> PathBuf {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("remote").join(sanitize_path_segment(source_id))
-}
-
-/// Pinned .NET single-file extraction dir for DepotDownloader. Fixing it keeps
-/// its IsolatedStorage path (where its login token lives) stable across runs.
-pub fn dd_extract_dir() -> PathBuf {
-    let base = default_db_path()
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("depotdownloader").join("extract")
-}
-
-/// Root of .NET IsolatedStorage (`$XDG_DATA_HOME/IsolatedStorage`), where
-/// DepotDownloader keeps its `account.config`.
-pub fn isolated_storage_root() -> PathBuf {
-    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(xdg).join("IsolatedStorage");
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".local/share/IsolatedStorage");
-    }
-    PathBuf::from("IsolatedStorage")
-}
-
-/// Where the daemon persists the Steam sign-in (refresh/access token + account
-/// name): `<data dir>/steam-session.json`. Its presence means "signed in".
-pub fn steam_session_path() -> PathBuf {
-    let base = default_db_path()
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("steam-session.json")
-}
-
-/// Directory the daemon caches the Wallpaper Engine shared assets tree in
-/// (shaders, materials, models), fetched once via DepotDownloader:
-/// `<data dir>/wallpaper_engine/assets/`. Scene and web wallpapers render
-/// against it; video and image items do not need it.
-pub fn we_assets_dir() -> PathBuf {
-    let base = default_db_path()
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("wallpaper_engine").join("assets")
 }
 
 pub struct SettingsStore {
@@ -813,6 +821,14 @@ impl SettingsStore {
     /// Copy the `GlobalSettings` subset.
     pub fn global(&self) -> GlobalSettings {
         self.inner.read().expect("settings poisoned").global.clone()
+    }
+
+    pub fn pointer_forwarding_enabled(&self) -> bool {
+        self.inner
+            .read()
+            .expect("settings poisoned")
+            .global
+            .pointer_forwarding_enabled
     }
 
     /// Clone the value map for a single plugin, or `None` if the
@@ -1090,14 +1106,13 @@ impl SettingsStore {
             }
         }
 
-        // Warn about persisted plugin settings whose manifest is absent.
-        // Keep them in memory so missing plugins do not lose settings.
+        // Keep tables without a renderer manifest. They may belong to a Lua
+        // source, or to a temporarily unavailable renderer.
         for plugin_name in g.plugins.keys() {
             if !manifests.contains_key(plugin_name) {
                 log::warn!(
-                    "settings: plugin '{plugin_name}' has persisted values \
-                     but no matching renderer manifest is loaded; \
-                     leaving as-is"
+                    "settings: component '{plugin_name}' has persisted values \
+                     but no matching renderer manifest is loaded; leaving as-is"
                 );
             }
         }
@@ -1119,9 +1134,12 @@ mod tests {
         let s: Settings = toml::from_str("").unwrap();
         assert!(s.global.last_wallpaper.is_none());
         assert_eq!(s.global.audio_fade_ms, DEFAULT_AUDIO_FADE_MS);
+        assert!(!s.global.mute_when_other_audio);
+        assert!(s.global.audio_capture_enabled);
         assert!(!s.global.manual_muted);
         assert!(s.global.plugin_update_notifications);
         assert!(!s.global.duplicate_renderers_for_same_wallpaper);
+        assert!(s.global.pointer_forwarding_enabled);
         assert!(!s.global.autostart_enabled);
         assert!(s.plugins.is_empty());
     }
@@ -1153,19 +1171,6 @@ duplicate_renderers_for_same_wallpaper = true
     }
 
     #[test]
-    fn hide_tray_icon_roundtrip() {
-        let src = r#"
-[global]
-hide_tray_icon = true
-"#;
-        let s: Settings = toml::from_str(src).unwrap();
-        assert!(s.global.hide_tray_icon);
-        assert!(toml::to_string(&s)
-            .unwrap()
-            .contains("hide_tray_icon = true"));
-    }
-
-    #[test]
     fn manual_muted_roundtrip() {
         let src = r#"
 [global]
@@ -1174,6 +1179,19 @@ manual_muted = true
         let s: Settings = toml::from_str(src).unwrap();
         assert!(s.global.manual_muted);
         assert!(toml::to_string(&s).unwrap().contains("manual_muted = true"));
+    }
+
+    #[test]
+    fn audio_capture_setting_roundtrip() {
+        let src = r#"
+[global]
+audio_capture_enabled = false
+"#;
+        let s: Settings = toml::from_str(src).unwrap();
+        assert!(!s.global.audio_capture_enabled);
+        assert!(toml::to_string(&s)
+            .unwrap()
+            .contains("audio_capture_enabled = false"));
     }
 
     #[test]
@@ -1258,6 +1276,22 @@ fillmode = "preserve_aspect_fit"
         assert_eq!(policy.fullscreen, AutoAction::Pause);
         assert_eq!(policy.session_locked, AutoAction::Stop);
         assert_eq!(policy.session_inactive, AutoAction::Stop);
+    }
+
+    #[test]
+    fn pause_effect_defaults_to_none_and_clamps_blur_radius() {
+        let config = PauseEffectConfig::default();
+        assert_eq!(config.kind, PauseEffectKind::None);
+        assert_eq!(config.blur.effective_radius(), DEFAULT_BLUR_EFFECT_RADIUS);
+
+        assert_eq!(
+            BlurEffectConfig { radius: 0 }.effective_radius(),
+            MIN_BLUR_EFFECT_RADIUS
+        );
+        assert_eq!(
+            BlurEffectConfig { radius: 100 }.effective_radius(),
+            MAX_BLUR_EFFECT_RADIUS
+        );
     }
 
     #[tokio::test]
@@ -1379,10 +1413,11 @@ baz = "7"
             bin: PathBuf::from("/dev/null"),
             types: vec!["video".into()],
             priority: 100,
+            activity: crate::plugin::renderer_registry::RendererActivityMode::Continuous,
             spawn_version: Some(1),
             extras: Vec::new(),
             settings: s,
-            events: Vec::new(),
+            legacy_events: None,
         });
         r
     }
@@ -1391,7 +1426,6 @@ baz = "7"
         Arc::new(SettingsStore {
             inner: Arc::new(StdRwLock::new(Settings {
                 global: GlobalSettings::default(),
-                workshop: WorkshopSettings::default(),
                 plugins,
                 displays: HashMap::new(),
             })),

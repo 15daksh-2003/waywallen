@@ -1,9 +1,6 @@
 #pragma once
 
 #include <QtQml/QQmlEngine>
-#include <QtCore/QAbstractListModel>
-#include <QtCore/QIdentityProxyModel>
-#include <QtCore/QSortFilterProxyModel>
 
 import waywallen;
 

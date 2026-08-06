@@ -33,13 +33,11 @@ Tag {
         id: hover
     }
 
-    MD.ToolTip {
-        visible: hover.hovered && root.gpu !== null
-        delay: 300
-        text: root.gpu
-            ? (root.gpu.description
-                + (root.gpu.pciBdf ? "\nPCI " + root.gpu.pciBdf : "")
-                + (root.gpu.renderNode ? "\n" + root.gpu.renderNode : ""))
-            : ""
-    }
+    MD.ToolTip.visible: hover.hovered && root.gpu !== null
+    MD.ToolTip.delay: 300
+    MD.ToolTip.text: root.gpu
+        ? (root.gpu.description
+            + (root.gpu.pciBdf ? "\nPCI " + root.gpu.pciBdf : "")
+            + (root.gpu.renderNode ? "\n" + root.gpu.renderNode : ""))
+        : ""
 }

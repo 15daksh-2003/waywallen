@@ -39,8 +39,8 @@ pub enum GlobalEvent {
     /// The persisted settings table just changed (either via
     /// `SettingsSet` RPC or startup reconciliation).
     SettingsChanged,
-    /// External display client failed handshake on the UDS endpoint
-    /// because of a bad protocol name or unsupported version.
+    /// External display client failed the UDS handshake because of
+    /// malformed or unsupported protocol data.
     DisplayConnectionFailed {
         client_name: String,
         client_protocol_version: u32,
@@ -53,15 +53,20 @@ pub enum GlobalEvent {
         state: i32,
         error: String,
     },
-    /// Progress of the in-UI Steam QR login.
-    SteamLoginProgress {
+    QrLoginProgress {
+        session_id: String,
+        plugin_id: String,
+        action_id: String,
         state: i32,
         qr_image: String,
-        account_name: String,
+        display_value: String,
         error: String,
+        title: String,
+        instruction: String,
     },
     PlaylistChanged,
     PluginChanged,
+    PluginStateChanged,
     PluginUpdateChanged,
     PluginRestartFailed {
         plugin_id: String,

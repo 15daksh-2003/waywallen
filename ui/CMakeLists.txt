@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.28)
 
 set(APP_ID org.waywallen.waywallen)
 set(APP_NAME "waywallen")
-set(APP_VERSION "0.2.5")
+set(APP_VERSION "0.3.1")
 set(APP_SUMMARY "Wallpaper Manager for Linux")
 set(APP_AUTHOR "hypengw")
 
@@ -65,10 +65,12 @@ qt_add_protobuf(waywallen-control
 
 set(SOURCES_NO_MOC
   src/entry.cpp
+  src/proto.cpp
   src/action.cpp
   src/util.cpp
   src/backend.cpp
   src/app.cpp
+  src/ui_language.cpp
   src/daemon_dbus.cpp
   src/objmodel/display.cpp
   src/objmodel/gpu.cpp
@@ -96,8 +98,9 @@ set(SOURCES_NO_MOC
   src/query/autostart_query.cpp
   src/query/remote_query.cpp
   src/query/playlist_query.cpp
-  src/query/steam_login_query.cpp
+  src/query/qr_login_query.cpp
   src/query/plugin_action_query.cpp
+  src/query/global_pause_query.cpp
   src/thumb/service.cpp
 )
 
@@ -137,12 +140,14 @@ set(MOC_SOURCE_FILES
   src/query/autostart_query.cppm
   src/query/remote_query.cppm
   src/query/playlist_query.cppm
-  src/query/steam_login_query.cppm
+  src/query/qr_login_query.cppm
   src/query/plugin_action_query.cppm
+  src/query/global_pause_query.cppm
   src/thumb/service.cppm
 )
 set(MODULES
     src/entry.cppm
+    src/ui_language.cppm
     src/mod.cppm
     src/proto.cppm
     src/model/share_store.cppm
@@ -158,12 +163,14 @@ set(QML_FILES
   qml/component/PagePopup.qml
   qml/component/Tag.qml
   qml/component/GpuTag.qml
+  qml/component/RuntimeConditionTag.qml
   qml/component/KdeDisplaysHelp.qml
   qml/component/GnomeDisplaysHelp.qml
   qml/component/LayerShellDisplaysHelp.qml
   qml/component/ThumbnailImage.qml
   qml/component/SearchChip.qml
   qml/component/ValueSlider.qml
+  qml/component/DetailActionBar.qml
   qml/component/filter/StringFilter.qml
   qml/component/filter/IntFilter.qml
   qml/component/filter/WpTypeFilter.qml
@@ -176,10 +183,14 @@ set(QML_FILES
   qml/dialog/DaemonNotRunDialog.qml
   qml/dialog/WallpaperFilterDialog.qml
   qml/dialog/RemoteFilterDialog.qml
-  qml/dialog/SteamLoginDialog.qml
+  qml/dialog/QrLoginDialog.qml
+  qml/dialog/PluginActionFormDialog.qml
+  qml/dialog/DisplayEditDialog.qml
   qml/page/WallpaperPage.qml
   qml/page/PlaylistDetailPanel.qml
   qml/page/WallpaperDetailPanel.qml
+  qml/page/DiscoverState.qml
+  qml/page/RemoteDetailPanel.qml
   qml/page/WallpaperInfoPage.qml
   qml/page/WallpaperCard.qml
   qml/page/wallpaper/SelectSheet.qml
@@ -192,6 +203,7 @@ set(QML_FILES
   qml/page/wallpaper/PlaylistListSheetState.qml
   qml/page/DiscoverPage.qml
   qml/page/RemoteInfoPage.qml
+  qml/page/RemoteManagePage.qml
   qml/page/RemoteCard.qml
   qml/page/StatusPage.qml
   qml/page/PluginManagePage.qml
@@ -298,6 +310,36 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
   INSTALL_RPATH "${WAYWALLEN_BIN_RPATH}"
 )
 target_link_libraries(${PROJECT_NAME} PRIVATE waywallen-qml)
+
+# ---------------------------------------------------------------------------
+# Translations
+#
+# .ts catalogs live in ui/i18n. lrelease compiles them to .qm, which
+# qt_add_translations embeds in the executable under the ":/i18n" resource
+# prefix — so a translated build needs no extra install step and behaves the
+# same from a distro package, an AppImage or a Flatpak. The UI language
+# controller discovers and loads the embedded catalogs.
+#
+# Adding a language is one line here plus the new .ts file. Refresh the
+# catalogs from the sources with:
+#     cmake --build <builddir> --target update_translations
+#
+# LinguistTools is optional: without it the UI still builds, English only.
+# ---------------------------------------------------------------------------
+set(WAYWALLEN_TS_FILES
+  i18n/waywallen_zh_CN.ts
+  i18n/waywallen_ru.ts
+)
+find_package(Qt6 QUIET COMPONENTS LinguistTools)
+if(Qt6LinguistTools_FOUND AND WAYWALLEN_TS_FILES)
+  qt_add_translations(${PROJECT_NAME}
+    TS_FILES ${WAYWALLEN_TS_FILES}
+    SOURCE_TARGETS waywallen-qml
+    LUPDATE_OPTIONS -locations none -no-obsolete)
+elseif(NOT Qt6LinguistTools_FOUND)
+  message(STATUS
+    "Qt6 LinguistTools not found - waywallen-ui will be built without translations")
+endif()
 
 set(APP_DESKTOP assets/waywallen-ui.desktop)
 set(APP_METAINFO assets/waywallen-ui.metainfo.xml)

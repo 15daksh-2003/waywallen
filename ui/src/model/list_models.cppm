@@ -1,6 +1,5 @@
 module;
 #include "QExtra/macro_qt.hpp"
-#include <QtCore/qtypes.h>
 
 #ifdef Q_MOC_RUN
 #    include "waywallen/model/list_models.moc"

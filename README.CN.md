@@ -4,14 +4,14 @@
 
 <h1 align="center">Waywallen</h1>
 
-<p align="center"><strong> Wallpaper Manager for Linux </strong></p>
+<p align="center"><strong> Linux 壁纸管理器 </strong></p>
 
-<a href="README.md">English README</a> · <a href="https://discord.gg/2xEdmMrhRF">Discord</a>
+<a href="README.md">English README</a> · <a href="README.RU.md">Русский README</a> · <a href="https://discord.gg/2xEdmMrhRF">Discord</a>
 
 ---
 
-Waywallen 是一个为 Linux 桌面打造的动态壁纸方案  
-最初是 wallpaper engine plugin for kde  
+Waywallen 是一个为 Linux 桌面打造的动态壁纸解决方案。<br>
+它最初是 KDE 的 Wallpaper Engine 插件。
 
 ---
 
@@ -27,7 +27,7 @@ Waywallen 是一个为 Linux 桌面打造的动态壁纸方案
 
 **预编译包** —— 到 [Releases 页面](https://github.com/waywallen/waywallen/releases) 下载最新版本。
 
-**Flatpak**  
+**Flatpak**
 
 <a href='https://flathub.org/en/apps/org.waywallen.waywallen'>
   <img width='240' alt='Get it on Flathub' src='https://flathub.org/api/badge?locale=zh-Hans'/>
@@ -42,45 +42,55 @@ Waywallen 是一个为 Linux 桌面打造的动态壁纸方案
 | **KDE Plasma** | [waywallen-display](https://github.com/waywallen/waywallen-display/) | ✅ | ✅ |
 | **GNOME** | [waywallen-display](https://github.com/waywallen/waywallen-display/) | ✅ | ✅ |
 | **Hyprland** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ✅ |
-| **Niri** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ❌ |
+| **Niri** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ✅ |
+| **Wayfire** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ✅ |
 | **Sway** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ❌ |
 | **COSMIC** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ❌ |
 
 ## 已知问题
-- Nvidia gpu 运行网页壁纸需要在 web renderer 的设置中关闭 `shared_texture_enabled`.
+
+- NVIDIA GPU 运行网页壁纸时，需要在网页渲染器设置中关闭 `shared_texture_enabled`。
 
 ## 壁纸插件
+
 - 图片插件
 - 视频插件
-  - 硬解：vulkan、vaapi
-- wallhaven 插件
+  - 通过 Vulkan 和 VA-API 进行硬件解码
+- Wallhaven 插件
 
 ### 第三方插件
+
 - [open-wallpaper-engine](https://github.com/waywallen/open-wallpaper-engine)
   - 场景壁纸支持
   - 网页壁纸支持
 
-> [!NOTE]  
-> 对于第三方插件：  
-> 需要手动下载插件 zip，并在 UI 的插件页面中安装。  
-> 安装完成后，后续该插件的更新 waywallen 会自己提示和处理。
+> [!NOTE]
+> 要安装第三方插件，请手动下载其 ZIP 压缩包，并在界面的插件页面中安装。<br>
+> 安装完成后，Waywallen 会提示并安装插件更新。
 
 ## FAQ
+
+- 如何获取日志<br>
+  首先需要退出正在运行的 Waywallen 守护进程。
+  ```bash
+  export RSTD_LOG=debug RUST_LOG=debug,zbus=warn
+  ./waywallen
+  ```
 - 如何在 flatpak 中调试
   ```bash
   flatpak install org.waywallen.waywallen.Debug
   flatpak run --devel --command=bash org.waywallen.waywallen
   # 1. 直接运行
-  [📦 org.waywallen.waywallen ~]$ gdb Qcm
+  [📦 org.waywallen.waywallen ~]$ gdb waywallen
   (gdb) run
   Enable debuginfod for this session? (y or [n]) n
   ...
   # 获取堆栈
   (gdb) bt
-  
+
   # 2. 或使用 coredump 文件
   coredumpctl dump <id> -o core.save
   flatpak run --devel --filesystem=host --command=bash org.waywallen.waywallen
-  [📦 org.waywallen.waywallen ~]$ gdb Qcm core.save
+  [📦 org.waywallen.waywallen ~]$ gdb waywallen core.save
   ...
   ```

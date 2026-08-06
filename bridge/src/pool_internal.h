@@ -4,7 +4,7 @@
 #define WAYWALLEN_BRIDGE_POOL_INTERNAL_H
 
 #include <waywallen-bridge/bridge.h>
-#include <waywallen-bridge/ipc_v2.h>
+#include <waywallen-bridge/ipc_v3.h>
 #include <waywallen-bridge/pool.h>
 
 #include <stdbool.h>
@@ -41,7 +41,7 @@ typedef struct ww_pool_caps {
      * producer can switch to via re-allocation. */
     ww_format_entry_t* entries;
     size_t             count;
-    /* Producer's mem-hint set, possibly OR'd with WW_MEM_HINT_LINEAR_ONLY. */
+    /* Producer's memory capability set. */
     uint32_t mem_hints;
     uint32_t sync_caps;
     uint32_t color_caps;
@@ -66,6 +66,11 @@ typedef struct ww_pool_pending_submit {
     uint64_t                release_point;
     bool                    active;
 } ww_pool_pending_submit_t;
+
+typedef struct ww_pool_allocation {
+    waywallen_buffer_directive_t directive;
+    waywallen_extent_t           extent;
+} ww_pool_allocation_t;
 
 /* The backend may store its own state in `backend_data`. */
 struct ww_pool {
@@ -96,7 +101,7 @@ struct ww_pool {
     bool           caps_advertised;
 
     /* Current directive + slot layout (filled by backend->apply_directive). */
-    ww_pool_directive_t   cur;
+    ww_pool_allocation_t  cur;
     bool                  has_directive;
     uint64_t              bind_generation;
     ww_pool_slot_layout_t slots[WW_POOL_MAX_SLOTS];
@@ -132,9 +137,7 @@ struct ww_pool_backend_ops {
      *
      * If the modifier-aware probe yields zero entries, the backend
      * MUST still populate at least one synthesized
-     * `(default_fourcc, LINEAR, 1)` entry, AND set
-     * `pool->caps.mem_hints |= WW_MEM_HINT_LINEAR_ONLY` so the
-     * daemon knows to pick COMPAT_LINEAR straight away. */
+     * `(default_fourcc, LINEAR, 1)` entry. */
     int (*probe_caps)(ww_pool_t* pool, uint32_t width, uint32_t height);
 
     /* Allocate one slot for the current directive. The slot's dmabuf
@@ -143,8 +146,8 @@ struct ww_pool_backend_ops {
      * to expose to the plugin (GL FBO/texture or VkImage/memory)
      * keyed by `slot_index` in its own state.
      *
-     * Iter 1 contract: the first slot is the dry-run. If this call
-     * fails on slot 0, pool.c will emit `bind_failed` and unwind. */
+     * The first slot validates the directive. If this call fails on
+     * slot 0, pool.c emits `bind_failed` and unwinds. */
     int (*alloc_slot)(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_layout_t* out_layout);
 
     /* Free one slot (released dmabuf fd is not closed here — pool.c

@@ -75,45 +75,100 @@ fn registry_from_scan(scan: &PluginScan) -> RendererRegistry {
     registry
 }
 
+struct SourcePluginSuspendGuard {
+    manager: Arc<crate::plugin::source_manager::SourceManager>,
+    committed: bool,
+}
+
+impl SourcePluginSuspendGuard {
+    fn new(manager: Arc<crate::plugin::source_manager::SourceManager>) -> Self {
+        Self {
+            manager,
+            committed: false,
+        }
+    }
+
+    async fn suspend(&self) {
+        self.manager.suspend_plugins().await;
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for SourcePluginSuspendGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.manager.resume_plugins();
+        }
+    }
+}
+
 async fn reload_source_entries(
     app: &Arc<AppState>,
     entries: Vec<crate::plugin::renderer_registry::EntryRef>,
     installed_plugin_id: &str,
 ) -> Result<()> {
+    app.qr_login.cancel_all_and_wait().await?;
+    let mut suspended = SourcePluginSuspendGuard::new(app.source_manager.clone());
+    suspended.suspend().await;
     let installed_plugin_id = installed_plugin_id.to_string();
-    let source_manager = app.source_manager.clone();
+    let probe = app.probe.clone();
+    let db = app.db.clone();
+    let settings = app.settings.clone();
     let load_result = tokio::task::spawn_blocking(move || {
-        let mut sm = source_manager.blocking_lock();
-        sm.clear_plugins();
+        let source_manager = crate::plugin::source_manager::SourceManager::with_probe(probe)?;
+        source_manager.attach_db(db);
+        source_manager.attach_settings(settings);
 
-        let mut installed_failures = Vec::new();
+        let mut failures = Vec::new();
         for r in &entries {
-            if let Err(e) =
-                sm.load_plugin(&r.entry, &r.plugin_id, &r.plugin_version, r.entry_version)
-            {
+            if let Err(e) = source_manager.load_plugin(
+                &r.entry,
+                &r.plugin_id,
+                &r.plugin_version,
+                r.entry_version,
+            ) {
                 let msg = format!("load entry {}: {e:#}", r.entry.display());
                 log::warn!("{msg}");
-                if r.plugin_id == installed_plugin_id {
-                    installed_failures.push(msg);
-                }
+                failures.push((r.plugin_id.clone(), msg));
             }
         }
 
-        if installed_failures.is_empty() {
-            Ok(())
-        } else {
-            Err(installed_failures.join("; "))
-        }
+        Ok((source_manager, failures))
     })
-    .await
-    .map_err(|e| Error::Internal(anyhow!("source reload join: {e}")))?;
+    .await;
 
-    load_result.map_err(Error::PluginInstallFailed)?;
-
-    let infos = {
-        let sm = app.source_manager.lock().await;
-        sm.plugins()?
+    let (replacement, failures) = match load_result {
+        Ok(Ok(replacement)) => replacement,
+        Ok(Err(error)) => return Err(error),
+        Err(error) => {
+            return Err(Error::Internal(anyhow!("source reload join: {error}")));
+        }
     };
+    if failures
+        .iter()
+        .any(|(plugin_id, _)| plugin_id == &installed_plugin_id)
+    {
+        let messages = failures
+            .into_iter()
+            .map(|(_, message)| message)
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(Error::PluginInstallFailed(format!(
+            "installed source plugin reload failed: {messages}"
+        )));
+    }
+    let failed_plugin_ids = failures
+        .into_iter()
+        .map(|(plugin_id, _)| plugin_id)
+        .collect::<std::collections::HashSet<_>>();
+    replacement.retain_plugins_from(&app.source_manager, &failed_plugin_ids)?;
+    app.source_manager.replace_plugins(replacement)?;
+    suspended.commit();
+
+    let infos = app.source_manager.plugins()?;
     for info in &infos {
         repo::upsert_plugin(&app.db, &info.name, &info.version)
             .await
@@ -892,11 +947,7 @@ async fn spawn_renderer_for_target(
             .await;
     }
 
-    let new_id = app
-        .renderer_manager
-        .spawn(spawn_req)
-        .await
-        .map_err(|e| Error::RendererSpawnFailed(e.to_string()))?;
+    let new_id = app.renderer_manager.spawn(spawn_req).await?;
     if let Some(handle) = app.renderer_manager.get(&new_id).await {
         app.router.register_renderer(handle).await;
     }
@@ -992,8 +1043,6 @@ pub async fn apply_wallpaper_with_options(
     let renderer_plugin_name = renderer.name.clone();
     let extras = app
         .source_manager
-        .lock()
-        .await
         .call_extras(&entry.plugin_name, &entry)
         .await?;
     let spawn_settings = app.settings.resolved_renderer_settings(&renderer);
@@ -1366,39 +1415,44 @@ async fn restore_auto_stopped_display(app: &Arc<AppState>, display_id: DisplayId
 }
 
 pub async fn pause_all(app: &Arc<AppState>) -> Result<()> {
-    app.router.set_manual_pause(true).await;
-    crate::tray::dbusmenu::notify_menu_changed(app).await;
+    set_pause_all(app, true).await?;
     Ok(())
 }
 
 pub async fn resume_all(app: &Arc<AppState>) -> Result<()> {
-    app.router.set_manual_pause(false).await;
-    crate::tray::dbusmenu::notify_menu_changed(app).await;
+    set_pause_all(app, false).await?;
     Ok(())
+}
+
+pub async fn set_pause_all(app: &Arc<AppState>, paused: bool) -> Result<bool> {
+    app.router.set_manual_pause(paused).await;
+    notify_lifecycle_changed(app).await;
+    Ok(paused)
 }
 
 pub async fn toggle_pause_all(app: &Arc<AppState>) -> Result<bool> {
     let paused = app.router.toggle_manual_pause().await;
-    crate::tray::dbusmenu::notify_menu_changed(app).await;
+    notify_lifecycle_changed(app).await;
     Ok(paused)
 }
 
 pub async fn mute_all(app: &Arc<AppState>) -> Result<()> {
-    app.router.set_manual_mute(true).await;
-    app.settings.update(|s| {
-        s.global.manual_muted = true;
-    });
-    crate::tray::dbusmenu::notify_menu_changed(app).await;
+    set_mute_all(app, true).await?;
     Ok(())
 }
 
 pub async fn unmute_all(app: &Arc<AppState>) -> Result<()> {
-    app.router.set_manual_mute(false).await;
-    app.settings.update(|s| {
-        s.global.manual_muted = false;
-    });
-    crate::tray::dbusmenu::notify_menu_changed(app).await;
+    set_mute_all(app, false).await?;
     Ok(())
+}
+
+pub async fn set_mute_all(app: &Arc<AppState>, muted: bool) -> Result<bool> {
+    app.router.set_manual_mute(muted).await;
+    app.settings.update(|s| {
+        s.global.manual_muted = muted;
+    });
+    notify_lifecycle_changed(app).await;
+    Ok(muted)
 }
 
 pub async fn toggle_mute_all(app: &Arc<AppState>) -> Result<bool> {
@@ -1406,8 +1460,14 @@ pub async fn toggle_mute_all(app: &Arc<AppState>) -> Result<bool> {
     app.settings.update(|s| {
         s.global.manual_muted = muted;
     });
-    crate::tray::dbusmenu::notify_menu_changed(app).await;
+    notify_lifecycle_changed(app).await;
     Ok(muted)
+}
+
+async fn notify_lifecycle_changed(app: &Arc<AppState>) {
+    crate::tray::dbusmenu::notify_menu_changed(app).await;
+    app.events
+        .publish(crate::events::GlobalEvent::StatusChanged);
 }
 
 pub async fn rescan(app: &Arc<AppState>) -> Result<usize> {
@@ -1421,10 +1481,7 @@ pub async fn auto_detect_libraries(
 ) -> Result<Vec<crate::routing::LibrarySnapshot>> {
     use crate::routing::LibrarySnapshot;
 
-    let detected = {
-        let sm = app.source_manager.lock().await;
-        sm.auto_detect_all().await?
-    };
+    let detected = app.source_manager.auto_detect_all().await?;
     if detected.is_empty() {
         return Ok(Vec::new());
     }
@@ -1557,14 +1614,11 @@ pub async fn libraries_by_plugin_name(
 /// Re-scan every loaded source plugin against the current DB library
 /// set and persist the resulting entries. Returns the playlist size.
 pub async fn refresh_source_plugins(app: &Arc<AppState>) {
-    let plugins = {
-        let sm = app.source_manager.lock().await;
-        match sm.plugins() {
-            Ok(p) => p,
-            Err(e) => {
-                log::warn!("refresh_source_plugins: source_manager.plugins() failed: {e:#}");
-                Vec::new()
-            }
+    let plugins = match app.source_manager.plugins() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("refresh_source_plugins: source_manager.plugins() failed: {e:#}");
+            Vec::new()
         }
     };
     *app.source_plugins.write().await = plugins;
@@ -1618,8 +1672,8 @@ async fn refresh_sources_inner(app: &Arc<AppState>) -> Result<usize> {
     let libs_by_plugin = libraries_by_plugin_name(&app.db).await?;
 
     let source_mgr = app.source_manager.clone();
-    // Scan each physical directory once; symlinked Steam aliases otherwise
-    // emit duplicate workshop entries and duplicate UI rows.
+    // Scan each physical directory once so symlinked aliases do not emit
+    // duplicate entries and duplicate UI rows.
     let libs_for_scan: HashMap<String, Vec<String>> = libs_by_plugin
         .iter()
         .map(|(name, paths)| (name.clone(), dedup_paths_by_canonical(paths)))
@@ -1627,22 +1681,22 @@ async fn refresh_sources_inner(app: &Arc<AppState>) -> Result<usize> {
     // Hold the Lua VM lock only during the scan; wallpaper reads hit the DB
     // and do not wait behind this section.
     let handle = tokio::runtime::Handle::current();
-    let snapshot: Vec<WallpaperEntry> = tokio::task::spawn_blocking(move || {
-        let mut sm = source_mgr.blocking_lock();
-        handle.block_on(sm.scan_all(&libs_for_scan))?;
-        Ok::<_, anyhow::Error>(sm.list().to_vec())
-    })
-    .await
-    .map_err(|e| Error::Internal(anyhow!("source scan join: {e}")))??;
+    // A failing source plugin must not discard what the others found, so the
+    // scan error is carried alongside the snapshot and only surfaced once the
+    // successful entries have been synced.
+    let (snapshot, scan_error): (Vec<WallpaperEntry>, Option<Error>) =
+        tokio::task::spawn_blocking(move || {
+            let scan_error = handle.block_on(source_mgr.scan_all(&libs_for_scan)).err();
+            (source_mgr.list(), scan_error)
+        })
+        .await
+        .map_err(|e| Error::Internal(anyhow!("source scan join: {e}")))?;
 
-    let plugins = {
-        let sm = app.source_manager.lock().await;
-        match sm.plugins() {
-            Ok(p) => p,
-            Err(e) => {
-                log::warn!("refresh_sources: source_manager.plugins() failed: {e:#}");
-                Vec::new()
-            }
+    let plugins = match app.source_manager.plugins() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("refresh_sources: source_manager.plugins() failed: {e:#}");
+            Vec::new()
         }
     };
 
@@ -1713,5 +1767,8 @@ async fn refresh_sources_inner(app: &Arc<AppState>) -> Result<usize> {
         },
     );
 
+    if let Some(e) = scan_error {
+        return Err(e);
+    }
     Ok(count)
 }

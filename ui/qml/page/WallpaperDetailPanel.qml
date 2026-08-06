@@ -11,25 +11,33 @@ Item {
     property string wallpaperId: ""
     property var fallbackWallpaper: null
     property bool showApply: true
+    property bool unsubscribeAccepted: false
+    property var infoPresentation: null
+
+    onWallpaperIdChanged: unsubscribeAccepted = false
 
     signal back
 
-    readonly property var wp: (wallpaperGetQuery.wallpaper?.id_proto ?? "") !== ""
-                              ? wallpaperGetQuery.wallpaper
-                              : root.fallbackWallpaper
+    readonly property var wp: (wallpaperGetQuery.wallpaper?.id_proto ?? "") !== "" ? wallpaperGetQuery.wallpaper : root.fallbackWallpaper
 
     property var applyTargetIds: []
     property int rendererIndex: 0
     readonly property var kFillModeValues: [1, 2, 3, 7]
-    readonly property var kFillModeLabels: ["Stretch", "Fit", "Crop", "Center"]
+    readonly property var kFillModeLabels: [qsTr("Stretch"), qsTr("Fit"), qsTr("Crop"), qsTr("Center")]
     readonly property var kRotationValues: [1, 2, 3, 4]
     readonly property var kRotationLabels: ["0°", "90°", "180°", "270°"]
     readonly property bool wallpaperLayoutOverrideSet: root.wp?.wallpaperLayoutOverrideSet ?? false
-    readonly property var wallpaperLayout: wallpaperLayoutOverrideSet
-        ? (root.wp?.wallpaperLayoutOverride ?? ({}))
-        : ({ fillmode: 3, locationX: 50, locationY: 50, rotation: 1, locationSet: true })
+    readonly property var wallpaperLayout: wallpaperLayoutOverrideSet ? (root.wp?.wallpaperLayoutOverride ?? ({})) : ({
+            fillmode: 3,
+            locationX: 50,
+            locationY: 50,
+            rotation: 1,
+            locationSet: true
+        })
 
-    function isTargetAll() { return root.applyTargetIds.length === 0; }
+    function isTargetAll() {
+        return root.applyTargetIds.length === 0;
+    }
     function fillmodeIndex(value) {
         const i = root.kFillModeValues.indexOf(value);
         return i < 0 ? 2 : i;
@@ -58,8 +66,10 @@ Item {
     function toggleTarget(id) {
         const next = root.applyTargetIds.slice();
         const i = next.indexOf(id);
-        if (i >= 0) next.splice(i, 1);
-        else next.push(id);
+        if (i >= 0)
+            next.splice(i, 1);
+        else
+            next.push(id);
         root.applyTargetIds = next;
     }
     function infoSizeOf(w) {
@@ -68,13 +78,15 @@ Item {
     function openInfo() {
         if (!root.wp)
             return;
-        MD.Util.showPopup('waywallen.ui/PagePopup', {
+        if (root.infoPresentation?.active)
+            return;
+        root.infoPresentation = root.Window.window.presentPopup('waywallen.ui/PagePopup', {
             source: 'waywallen.ui/WallpaperInfoPage',
             props: {
                 wallpaper: root.wp,
                 sizeBytes: root.infoSizeOf(root.wp)
             }
-        }, root.Window.window);
+        });
     }
     function containerFolderUrl(resource) {
         let path = String(resource || "");
@@ -95,9 +107,11 @@ Item {
 
     readonly property var rendererCandidates: {
         const w = root.wp;
-        if (!w) return [];
+        if (!w)
+            return [];
         const t = w.wpType || "";
-        if (!t) return [];
+        if (!t)
+            return [];
         const list = (pluginQuery.renderers || []).filter(r => (r.types || []).indexOf(t) >= 0);
         list.sort((a, b) => (b.priority || 0) - (a.priority || 0));
         return list;
@@ -109,12 +123,28 @@ Item {
         wallpaperId: root.wallpaperId
     }
 
-    W.WallpaperListQuery { id: m_list }
-    W.RendererPluginListQuery { id: pluginQuery }
-    W.WallpaperApplyQuery { id: applyQuery }
-    W.WallpaperApplyViaPortalQuery { id: portalApplyQuery }
+    W.WallpaperListQuery {
+        id: m_list
+    }
+    W.RendererPluginListQuery {
+        id: pluginQuery
+    }
+    W.WallpaperApplyQuery {
+        id: applyQuery
+        forwardError: false
+    }
+    W.WallpaperApplyViaPortalQuery {
+        id: portalApplyQuery
+        forwardError: false
+    }
     W.WallpaperRemoveQuery {
         id: removeQuery
+        forwardError: false
+        wallpaperId: root.wallpaperId
+    }
+    W.WallpaperUnsubscribeQuery {
+        id: unsubscribeQuery
+        forwardError: false
         wallpaperId: root.wallpaperId
     }
 
@@ -124,10 +154,8 @@ Item {
             if (applyQuery.status === 2) {
                 wallpaperGetQuery.reload();
             } else if (applyQuery.status === 3) {
-                const message = applyQuery.error && applyQuery.error.length > 0
-                    ? applyQuery.error
-                    : qsTr("Apply failed");
-                W.Action.toast(message, 6000, 1, null);
+                const message = applyQuery.error && applyQuery.error.length > 0 ? applyQuery.error : qsTr("Apply failed");
+                W.Global.toastError(message);
             }
         }
     }
@@ -136,23 +164,35 @@ Item {
         target: portalApplyQuery
         function onStatusChanged() {
             if (portalApplyQuery.status === 3)
-                W.Action.toast("Portal apply failed");
+                W.Action.toast(qsTr("Portal apply failed"));
             else if (portalApplyQuery.status === 2)
-                W.Action.toast("Wallpaper sent to desktop portal");
+                W.Action.toast(qsTr("Wallpaper sent to desktop portal"));
         }
     }
 
     Connections {
         target: removeQuery
         function onRemoved() {
-            W.Action.toast("Wallpaper removed");
+            W.Action.toast(qsTr("Wallpaper removed"));
             root.back();
         }
         function onStatusChanged() {
             if (removeQuery.status === 3) {
-                const message = removeQuery.error && removeQuery.error.length > 0
-                    ? removeQuery.error
-                    : qsTr("Remove failed");
+                const message = removeQuery.error && removeQuery.error.length > 0 ? removeQuery.error : qsTr("Remove failed");
+                W.Action.toast(message, 6000, 1, null);
+            }
+        }
+    }
+
+    Connections {
+        target: unsubscribeQuery
+        function onUnsubscribed() {
+            root.unsubscribeAccepted = true;
+            W.Action.toast(qsTr("Unsubscribed"));
+        }
+        function onStatusChanged() {
+            if (unsubscribeQuery.status === 3) {
+                const message = unsubscribeQuery.error && unsubscribeQuery.error.length > 0 ? unsubscribeQuery.error : qsTr("Unsubscribe failed");
                 W.Action.toast(message, 6000, 1, null);
             }
         }
@@ -164,6 +204,7 @@ Item {
 
     W.WallpaperLayoutSetQuery {
         id: layoutSetQuery
+        forwardError: false
         wallpaperId: root.wallpaperId
     }
 
@@ -173,7 +214,7 @@ Item {
             if (layoutSetQuery.status === 2)
                 wallpaperGetQuery.reload();
             else if (layoutSetQuery.status === 3)
-                W.Action.toast("Layout update failed");
+                W.Action.toast(qsTr("Layout update failed"));
         }
     }
 
@@ -199,7 +240,10 @@ Item {
 
         function queue(key, value, reset) {
             const e = entries;
-            e[key] = { value: value, reset: reset };
+            e[key] = {
+                value: value,
+                reset: reset
+            };
             entries = e;
             if (!restartFlush())
                 entries = {};
@@ -245,12 +289,14 @@ Item {
 
     MD.Action {
         id: applyAction
-        text: "Apply"
+        text: qsTr("Apply")
         busy: applyQuery.querying
         enabled: (W.App.displayManager.displays || []).length > 0
         onTriggered: {
-            if (busy) return;
-            if (!root.wp) return;
+            if (busy)
+                return;
+            if (!root.wp)
+                return;
             applyQuery.wallpaper = root.wp;
             applyQuery.displayIds = root.applyTargetIds;
             if (root.rendererCandidates.length >= 2) {
@@ -265,11 +311,13 @@ Item {
 
     MD.Action {
         id: applyViaPortalAction
-        text: "Apply via desktop portal"
+        text: qsTr("Apply via desktop portal")
         busy: portalApplyQuery.querying
         onTriggered: {
-            if (busy) return;
-            if (!root.wp) return;
+            if (busy)
+                return;
+            if (!root.wp)
+                return;
             portalApplyQuery.wallpaperId = root.wallpaperId;
             portalApplyQuery.reload();
         }
@@ -277,14 +325,14 @@ Item {
 
     MD.Action {
         id: closeAction
-        text: "Close"
+        text: qsTr("Close")
         icon.name: MD.Token.icon.close
         onTriggered: root.back()
     }
 
     MD.Action {
         id: infoAction
-        text: "Info"
+        text: qsTr("Info")
         icon.name: MD.Token.icon.info
         enabled: (root.wp?.id_proto ?? "") !== ""
         onTriggered: root.openInfo()
@@ -292,7 +340,7 @@ Item {
 
     MD.Action {
         id: openContainerFolderAction
-        text: "Open containing folder"
+        text: qsTr("Open containing folder")
         icon.name: MD.Token.icon.folder_open
         enabled: root.containerFolderUrl(root.wp?.resource).length > 0
         onTriggered: root.openContainerFolder()
@@ -300,7 +348,7 @@ Item {
 
     MD.Action {
         id: removeAction
-        text: "Remove"
+        text: qsTr("Remove")
         icon.name: MD.Token.icon.delete
         busy: removeQuery.querying
         enabled: (root.wp?.supportsItemRemove ?? false) && (root.wp?.id_proto ?? "") !== ""
@@ -311,15 +359,22 @@ Item {
         }
     }
 
-    readonly property MD.Action activeApplyAction:
-        ((root.wp?.wpType ?? "") === "image"
-            && (W.App.displayManager.displays || []).length === 0)
-        ? applyViaPortalAction : applyAction
+    MD.Action {
+        id: unsubscribeAction
+        text: root.unsubscribeAccepted ? qsTr("Unsubscribed") : qsTr("Unsubscribe")
+        icon.name: "unsubscribe"
+        busy: unsubscribeQuery.querying
+        enabled: (root.wp?.supportsItemUnsubscribe ?? false) && !root.unsubscribeAccepted && (root.wp?.id_proto ?? "") !== ""
+        onTriggered: {
+            if (busy)
+                return;
+            unsubscribeQuery.reload();
+        }
+    }
 
-    readonly property list<MD.Action> detailActions:
-        (root.wp?.supportsItemRemove ?? false)
-        ? [removeAction, openContainerFolderAction, infoAction, closeAction]
-        : [openContainerFolderAction, infoAction, closeAction]
+    readonly property MD.Action activeApplyAction: ((root.wp?.wpType ?? "") === "image" && (W.App.displayManager.displays || []).length === 0) ? applyViaPortalAction : applyAction
+
+    readonly property list<MD.Action> detailActions: (root.wp?.supportsItemUnsubscribe ?? false) ? [unsubscribeAction, openContainerFolderAction, infoAction, closeAction] : (root.wp?.supportsItemRemove ?? false) ? [removeAction, openContainerFolderAction, infoAction, closeAction] : [openContainerFolderAction, infoAction, closeAction]
 
     ColumnLayout {
         anchors.fill: parent
@@ -327,13 +382,13 @@ Item {
 
         MD.VerticalListView {
             id: m_detail_view
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    clip: true
-                    model: propertyModel
-                    spacing: 8
-                    leftMargin: 16
-                    rightMargin: 16
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            clip: true
+            model: propertyModel
+            spacing: 8
+            leftMargin: 16
+            rightMargin: 16
             topMargin: 0
             bottomMargin: 8
 
@@ -345,9 +400,7 @@ Item {
                     Layout.fillWidth: true
                     Layout.preferredHeight: visible ? 200 : 0
                     Layout.topMargin: 4
-                    visible: (root.wp?.preview ?? "") !== ""
-                             || (["video", "image"].indexOf(root.wp?.wpType ?? "") >= 0
-                                 && (root.wp?.resource ?? "") !== "")
+                    visible: (root.wp?.preview ?? "") !== "" || (["video", "image"].indexOf(root.wp?.wpType ?? "") >= 0 && (root.wp?.resource ?? "") !== "")
                     source: root.wp?.preview ?? ""
                     resource: root.wp?.resource ?? ""
                     wpType: root.wp?.wpType ?? ""
@@ -356,7 +409,7 @@ Item {
 
                 MD.Text {
                     Layout.fillWidth: true
-                    text: root.wp?.name || "Untitled"
+                    text: root.wp?.name || qsTr("Untitled")
                     typescale: MD.Token.typescale.title_large
                     color: MD.Token.color.on_surface
                     wrapMode: Text.Wrap
@@ -377,23 +430,8 @@ Item {
                         maximumLineCount: 1
                     }
 
-                    Item {
-                        id: detailActionBarHost
-                        readonly property real targetWidth: Math.ceil(detailActionToolBar.maximumContentWidth) + 2
-                        Layout.minimumWidth: targetWidth
-                        Layout.preferredWidth: targetWidth
-                        Layout.maximumWidth: targetWidth
-                        Layout.preferredHeight: detailActionToolBar.implicitHeight
-                        Layout.alignment: Qt.AlignVCenter
-
-                        MD.ActionToolBar {
-                            id: detailActionToolBar
-                            anchors.fill: parent
-                            actions: root.detailActions
-                            iconDelegate: MD.SmallIconButton {
-                                action: MD.ToolBarLayout.action
-                            }
-                        }
+                    W.DetailActionBar {
+                        actions: root.detailActions
                     }
                 }
 
@@ -404,9 +442,7 @@ Item {
                     columnSpacing: 12
                     rowSpacing: 4
 
-                    readonly property real sizeBytes: m_list.data && root.wp
-                                                      ? m_list.data.sizeOf(root.wp)
-                                                      : 0
+                    readonly property real sizeBytes: m_list.data && root.wp ? m_list.data.sizeOf(root.wp) : 0
                     readonly property bool hasPath: (root.wp?.resource ?? "") !== ""
                     readonly property bool hasResolution: Number(root.wp?.width ?? 0) > 0 && Number(root.wp?.height ?? 0) > 0
                     readonly property bool hasSize: sizeBytes > 0
@@ -418,16 +454,20 @@ Item {
                     }
                     function formatSize(b) {
                         let v = Number(b ?? 0);
-                        if (!(v > 0)) return "";
+                        if (!(v > 0))
+                            return "";
                         const u = ["B", "KB", "MB", "GB", "TB"];
                         let i = 0;
-                        while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+                        while (v >= 1024 && i < u.length - 1) {
+                            v /= 1024;
+                            i++;
+                        }
                         return v.toFixed(i === 0 ? 0 : 1) + " " + u[i];
                     }
 
                     MD.Text {
                         visible: m_meta.hasPath
-                        text: "Path"
+                        text: qsTr("Path")
                         typescale: MD.Token.typescale.label_medium
                         color: MD.Token.color.on_surface_variant
                     }
@@ -444,7 +484,7 @@ Item {
 
                     MD.Text {
                         visible: m_meta.hasResolution
-                        text: "Resolution"
+                        text: qsTr("Resolution")
                         typescale: MD.Token.typescale.label_medium
                         color: MD.Token.color.on_surface_variant
                     }
@@ -457,7 +497,7 @@ Item {
 
                     MD.Text {
                         visible: m_meta.hasSize
-                        text: "Size"
+                        text: qsTr("Size")
                         typescale: MD.Token.typescale.label_medium
                         color: MD.Token.color.on_surface_variant
                     }
@@ -470,7 +510,7 @@ Item {
 
                     MD.Text {
                         visible: m_meta.hasFormat
-                        text: "Format"
+                        text: qsTr("Format")
                         typescale: MD.Token.typescale.label_medium
                         color: MD.Token.color.on_surface_variant
                     }
@@ -504,14 +544,16 @@ Item {
                     property bool expanded: false
                     readonly property int collapsedLines: 3
 
-                    MD.Divider { Layout.fillWidth: true }
+                    MD.Divider {
+                        Layout.fillWidth: true
+                    }
 
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 4
                         MD.Text {
                             Layout.fillWidth: true
-                            text: "Description"
+                            text: qsTr("Description")
                             typescale: MD.Token.typescale.label_large
                             color: MD.Token.color.on_surface_variant
                         }
@@ -541,7 +583,9 @@ Item {
                     spacing: 8
                     visible: (root.wp?.id_proto ?? "") !== ""
 
-                    MD.Divider { Layout.fillWidth: true }
+                    MD.Divider {
+                        Layout.fillWidth: true
+                    }
 
                     RowLayout {
                         Layout.fillWidth: true
@@ -549,7 +593,7 @@ Item {
 
                         MD.Text {
                             Layout.fillWidth: true
-                            text: "Layout override"
+                            text: qsTr("Layout override")
                             typescale: MD.Token.typescale.label_large
                             color: MD.Token.color.on_surface_variant
                         }
@@ -559,11 +603,8 @@ Item {
                             mdState.size: MD.Enum.XS
                             enabled: root.wallpaperLayoutOverrideSet
                             onClicked: root.resetWallpaperLayout()
-
-                            MD.ToolTip {
-                                visible: parent.hovered
-                                text: "Reset to display layout"
-                            }
+                            MD.ToolTip.visible: hovered
+                            MD.ToolTip.text: qsTr("Reset to display layout")
                         }
                     }
 
@@ -584,7 +625,7 @@ Item {
                             spacing: 4
 
                             MD.Text {
-                                text: "Fill mode"
+                                text: qsTr("Fill mode")
                                 typescale: MD.Token.typescale.label_medium
                                 color: MD.Token.color.on_surface_variant
                             }
@@ -594,11 +635,7 @@ Item {
                                 model: root.kFillModeLabels
                                 currentIndex: root.fillmodeIndex(m_wallpaper_layout_flow.currentFillmode)
                                 onActivated: idx => {
-                                    root.applyWallpaperLayout(
-                                        root.kFillModeValues[idx],
-                                        m_wallpaper_layout_flow.currentX,
-                                        m_wallpaper_layout_flow.currentY,
-                                        m_wallpaper_layout_flow.currentRotation);
+                                    root.applyWallpaperLayout(root.kFillModeValues[idx], m_wallpaper_layout_flow.currentX, m_wallpaper_layout_flow.currentY, m_wallpaper_layout_flow.currentRotation);
                                 }
                             }
                         }
@@ -610,7 +647,7 @@ Item {
                             opacity: enabled ? 1.0 : 0.4
 
                             MD.Text {
-                                text: "Horizontal"
+                                text: qsTr("Horizontal")
                                 typescale: MD.Token.typescale.label_medium
                                 color: MD.Token.color.on_surface_variant
                             }
@@ -625,11 +662,7 @@ Item {
                                 valueText: root.clampPercent(value)
                                 valueMaxText: root.clampPercent(to).toString()
                                 valueHorizontalAlignment: Text.AlignLeft
-                                onMoved: root.applyWallpaperLayout(
-                                    m_wallpaper_layout_flow.currentFillmode,
-                                    value,
-                                    wallpaperVerticalLocation.value,
-                                    m_wallpaper_layout_flow.currentRotation)
+                                onMoved: root.applyWallpaperLayout(m_wallpaper_layout_flow.currentFillmode, value, wallpaperVerticalLocation.value, m_wallpaper_layout_flow.currentRotation)
                             }
                         }
 
@@ -640,7 +673,7 @@ Item {
                             opacity: enabled ? 1.0 : 0.4
 
                             MD.Text {
-                                text: "Vertical"
+                                text: qsTr("Vertical")
                                 typescale: MD.Token.typescale.label_medium
                                 color: MD.Token.color.on_surface_variant
                             }
@@ -655,11 +688,7 @@ Item {
                                 valueText: root.clampPercent(value)
                                 valueMaxText: root.clampPercent(to).toString()
                                 valueHorizontalAlignment: Text.AlignLeft
-                                onMoved: root.applyWallpaperLayout(
-                                    m_wallpaper_layout_flow.currentFillmode,
-                                    wallpaperHorizontalLocation.value,
-                                    value,
-                                    m_wallpaper_layout_flow.currentRotation)
+                                onMoved: root.applyWallpaperLayout(m_wallpaper_layout_flow.currentFillmode, wallpaperHorizontalLocation.value, value, m_wallpaper_layout_flow.currentRotation)
                             }
                         }
 
@@ -668,7 +697,7 @@ Item {
                             spacing: 4
 
                             MD.Text {
-                                text: "Rotation"
+                                text: qsTr("Rotation")
                                 typescale: MD.Token.typescale.label_medium
                                 color: MD.Token.color.on_surface_variant
                             }
@@ -678,11 +707,7 @@ Item {
                                 size: MD.Enum.XS
 
                                 function applyRotation(rotationValue) {
-                                    root.applyWallpaperLayout(
-                                        m_wallpaper_layout_flow.currentFillmode,
-                                        m_wallpaper_layout_flow.currentX,
-                                        m_wallpaper_layout_flow.currentY,
-                                        rotationValue);
+                                    root.applyWallpaperLayout(m_wallpaper_layout_flow.currentFillmode, m_wallpaper_layout_flow.currentX, m_wallpaper_layout_flow.currentY, rotationValue);
                                 }
                                 function isChecked(rotationValue) {
                                     return m_wallpaper_layout_flow.currentRotation === rotationValue;
@@ -742,20 +767,15 @@ Item {
                     MD.IconButton {
                         icon.name: MD.Token.icon.restart_alt
                         mdState.size: MD.Enum.XS
-                        enabled: m_prop_section.section === "Properties"
-                            ? propertyModel.hasPredefinedPropertyOverrides
-                            : propertyModel.hasUserPropertyOverrides
+                        enabled: m_prop_section.section === "Properties" ? propertyModel.hasPredefinedPropertyOverrides : propertyModel.hasUserPropertyOverrides
                         onClicked: {
                             if (m_prop_section.section === "Properties")
                                 propertyModel.resetPredefinedProperties();
                             else
                                 propertyModel.resetUserProperties();
                         }
-
-                        MD.ToolTip {
-                            visible: parent.hovered
-                            text: "Reset to defaults"
-                        }
+                        MD.ToolTip.visible: hovered
+                        MD.ToolTip.text: qsTr("Reset to defaults")
                     }
                 }
             }
@@ -767,13 +787,13 @@ Item {
                 required property string type
                 required property string section
                 required property string kind
-                required property bool   supported
-                required property real   minVal
-                required property real   maxVal
+                required property bool supported
+                required property real minVal
+                required property real maxVal
                 required property string currentValue
-                required property bool   hasAlpha
-                required property var    optionLabels
-                required property var    optionValues
+                required property bool hasAlpha
+                required property var optionLabels
+                required property var optionValues
 
                 width: ListView.view ? (ListView.view.width - ListView.view.leftMargin - ListView.view.rightMargin) : 0
                 spacing: 2
@@ -889,17 +909,14 @@ Item {
                         icon.name: MD.Token.icon.check
                         enabled: m_text_input.text !== m_prop_delegate.currentValue
                         onClicked: m_text_input.submit()
-
-                        MD.ToolTip {
-                            visible: parent.hovered
-                            text: "Apply"
-                        }
+                        MD.ToolTip.visible: hovered
+                        MD.ToolTip.text: qsTr("Apply")
                     }
                 }
 
                 MD.Text {
                     visible: !m_prop_delegate.supported
-                    text: "(" + m_prop_delegate.type + " — not yet supported)"
+                    text: qsTr("(%1 — not yet supported)").arg(m_prop_delegate.type)
                     typescale: MD.Token.typescale.body_small
                     color: MD.Token.color.on_surface_variant
                 }
@@ -921,7 +938,7 @@ Item {
                 visible: (W.App.displayManager.displays || []).length > 0
 
                 MD.Text {
-                    text: "Apply to"
+                    text: qsTr("Apply to")
                     typescale: MD.Token.typescale.label_medium
                     color: MD.Token.color.on_surface_variant
                 }
@@ -931,7 +948,7 @@ Item {
                     spacing: 6
 
                     MD.FilterChip {
-                        text: "All"
+                        text: qsTr("All")
                         checked: root.isTargetAll()
                         onClicked: root.applyTargetIds = []
                     }
@@ -940,7 +957,8 @@ Item {
                         model: W.App.displayManager.displays
                         MD.FilterChip {
                             required property var modelData
-                            text: (modelData?.displayLabel ?? "") || (modelData?.name ?? "").replace(/^waywallen-[a-z]+-[a-z]+-/, "") || ("Display " + modelData?.id)
+                            width: Math.min(implicitWidth, 220)
+                            text: (modelData?.displayLabel ?? "") || (modelData?.name ?? "").replace(/^waywallen-[a-z]+-[a-z]+-/, "") || qsTr("Display %1").arg(modelData?.id)
                             checked: root.applyTargetIds.indexOf(modelData?.id) >= 0
                             onClicked: root.toggleTarget(modelData?.id)
                         }
@@ -954,7 +972,7 @@ Item {
                 visible: root.rendererCandidates.length >= 2
 
                 MD.Text {
-                    text: "Renderer"
+                    text: qsTr("Renderer")
                     typescale: MD.Token.typescale.label_medium
                     color: MD.Token.color.on_surface_variant
                 }
@@ -980,11 +998,8 @@ Item {
                 Layout.fillWidth: true
                 action: root.activeApplyAction
                 mdState.type: MD.Enum.BtFilled
-
-                MD.ToolTip {
-                    visible: applyBtn.hovered && !applyBtn.enabled
-                    text: "No display connected"
-                }
+                MD.ToolTip.visible: applyBtn.hovered && !applyBtn.enabled
+                MD.ToolTip.text: qsTr("No display connected")
             }
         }
     }

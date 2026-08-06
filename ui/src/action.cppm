@@ -1,6 +1,5 @@
 module;
 #include "QExtra/macro_qt.hpp"
-#include <QtCore/QPointer>
 
 #ifdef Q_MOC_RUN
 #    include "waywallen/action.moc"
@@ -29,6 +28,7 @@ public:
     auto wallpaperSelectStorage() const -> QObject*;
 
     Q_INVOKABLE void enterWallpaperSelect(QObject* storage);
+    Q_INVOKABLE void copyToClipboard(const QString& text);
 
 Q_SIGNALS:
     void toast(QString text, qint32 duration = 3000, qint32 flags = 0, QObject* action = nullptr);

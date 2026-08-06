@@ -8,7 +8,7 @@ import waywallen.ui as W
 
 MD.Page {
     id: root
-    title: 'Plugins'
+    title: qsTr('Plugins')
     scrolling: !m_flick.atYBeginning
     readonly property int inactivePluginCount: (pluginListQuery.inactiveSystem ? pluginListQuery.inactiveSystem.length : 0) + (pluginListQuery.inactiveUser ? pluginListQuery.inactiveUser.length : 0)
     readonly property int pluginUpdateStateUnknown: 1
@@ -18,12 +18,12 @@ MD.Page {
     readonly property int pluginUpdateStateAvailable: 5
     readonly property int pluginUpdateStateFailed: 6
     readonly property int pluginUpdateStateUnsupported: 7
-    property var inactiveDialog: null
+    property var inactivePresentation: null
 
     function openInactiveDialog() {
-        if (inactiveDialog && (inactiveDialog.opened || inactiveDialog.entering || inactiveDialog.closing))
+        if (root.inactivePresentation?.active)
             return;
-        inactiveDialog = MD.Util.showPopup(inactiveDialogComponent, {}, root.Window.window);
+        root.inactivePresentation = root.Window.window.presentPopup(inactiveDialogComponent);
     }
 
     function updateState(info) {
@@ -55,9 +55,7 @@ MD.Page {
             const latest = info.latestVersion || "";
             if (latest.length === 0)
                 return qsTr("Update available");
-            return latest.startsWith("v") || latest.startsWith("V")
-                ? qsTr("New %1").arg(latest)
-                : qsTr("New v%1").arg(latest);
+            return latest.startsWith("v") || latest.startsWith("V") ? qsTr("New %1").arg(latest) : qsTr("New v%1").arg(latest);
         }
         if (state === pluginUpdateStateFailed)
             return qsTr("Check failed");
@@ -111,10 +109,12 @@ MD.Page {
 
     W.PluginInstallQuery {
         id: installQuery
+        forwardError: false
     }
 
     W.PluginInspectQuery {
         id: inspectQuery
+        forwardError: false
     }
 
     W.PluginDeleteQuery {
@@ -127,6 +127,7 @@ MD.Page {
 
     W.PluginUpdateInstallQuery {
         id: updateInstallQuery
+        forwardError: false
     }
 
     Connections {
@@ -145,9 +146,7 @@ MD.Page {
     Connections {
         target: deleteQuery
         function onDeleted(pluginId, needsRestart) {
-            W.Action.toast(needsRestart
-                ? qsTr("Deleted \"%1\" — restart waywallen to unload it").arg(pluginId)
-                : qsTr("Deleted \"%1\"").arg(pluginId));
+            W.Action.toast(needsRestart ? qsTr("Deleted \"%1\" — restart waywallen to unload it").arg(pluginId) : qsTr("Deleted \"%1\"").arg(pluginId));
             pluginListQuery.reload();
         }
     }
@@ -155,17 +154,13 @@ MD.Page {
     Connections {
         target: installQuery
         function onInstalled(pluginId, needsRestart) {
-            W.Action.toast(needsRestart
-                ? qsTr("Installed \"%1\" — restart waywallen to load it").arg(pluginId)
-                : qsTr("Installed \"%1\"").arg(pluginId));
+            W.Action.toast(needsRestart ? qsTr("Installed \"%1\" — restart waywallen to load it").arg(pluginId) : qsTr("Installed \"%1\"").arg(pluginId));
             pluginListQuery.reload();
         }
         function onStatusChanged(status) {
             if (status !== 3)
                 return;
-            const message = installQuery.error && installQuery.error.length > 0
-                ? installQuery.error
-                : qsTr("Plugin install failed");
+            const message = installQuery.error && installQuery.error.length > 0 ? installQuery.error : qsTr("Plugin install failed");
             W.Action.toast(message, 6000, 1, null);
         }
     }
@@ -179,9 +174,7 @@ MD.Page {
         function onStatusChanged(status) {
             if (status !== 3)
                 return;
-            const message = updateInstallQuery.error && updateInstallQuery.error.length > 0
-                ? updateInstallQuery.error
-                : qsTr("Plugin update failed");
+            const message = updateInstallQuery.error && updateInstallQuery.error.length > 0 ? updateInstallQuery.error : qsTr("Plugin update failed");
             W.Action.toast(message, 6000, 1, null);
         }
     }
@@ -194,9 +187,7 @@ MD.Page {
         function onStatusChanged(status) {
             if (status !== 3)
                 return;
-            const message = inspectQuery.error && inspectQuery.error.length > 0
-                ? inspectQuery.error
-                : qsTr("Plugin package inspect failed");
+            const message = inspectQuery.error && inspectQuery.error.length > 0 ? inspectQuery.error : qsTr("Plugin package inspect failed");
             W.Action.toast(message, 6000, 1, null);
         }
     }
@@ -205,21 +196,16 @@ MD.Page {
         if (W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready)
             pluginListQuery.reload();
     }
+    Component.onDestruction: root.inactivePresentation?.cancel()
 
     Component {
         id: inactiveDialogComponent
 
         MD.Dialog {
-            id: dynamicInactiveDialog
             title: qsTr("Inactive plugins")
-            parent: T.Overlay.overlay
             horizontalPadding: 16
             implicitWidth: Math.min(440, parent ? parent.width - 48 : 440)
             standardButtons: T.Dialog.Close
-            onClosed: {
-                if (root.inactiveDialog === dynamicInactiveDialog)
-                    root.inactiveDialog = null;
-            }
 
             contentItem: ColumnLayout {
                 spacing: 12
@@ -289,7 +275,7 @@ MD.Page {
         id: zipDialog
         title: qsTr("Choose plugin package")
         fileMode: MD.FileDialog.OpenFile
-        nameFilters: ["Plugin package (*.zip)", "All files (*)"]
+        nameFilters: [qsTr("Plugin package (*.zip)"), qsTr("All files (*)")]
         onAccepted: {
             inspectQuery.zipPath = selectedFile.toString().replace(/^file:\/\//, "");
             inspectQuery.reload();
@@ -346,9 +332,7 @@ MD.Page {
                 }
                 MD.Text {
                     Layout.fillWidth: true
-                    text: inspectQuery.overwrite
-                        ? qsTr("%1 -> %2").arg(inspectQuery.existingVersion || qsTr("unknown")).arg(inspectQuery.version || qsTr("unknown"))
-                        : ("v" + (inspectQuery.version || "0.0.0"))
+                    text: inspectQuery.overwrite ? qsTr("%1 -> %2").arg(inspectQuery.existingVersion || qsTr("unknown")).arg(inspectQuery.version || qsTr("unknown")) : ("v" + (inspectQuery.version || "0.0.0"))
                     typescale: MD.Token.typescale.body_medium
                     color: inspectQuery.overwrite ? MD.Token.color.primary : MD.Token.color.on_surface
                     wrapMode: Text.WordWrap
@@ -410,7 +394,7 @@ MD.Page {
             MD.Text {
                 Layout.fillWidth: true
                 visible: !pluginListQuery.plugins || pluginListQuery.plugins.length === 0
-                text: "No plugins installed"
+                text: qsTr("No plugins installed")
                 typescale: MD.Token.typescale.body_medium
                 color: MD.Token.color.on_surface_variant
                 wrapMode: Text.WordWrap
@@ -457,12 +441,8 @@ MD.Page {
                         readonly property real actionButtonWidth: 40
                         readonly property int visibleActionCount: (pluginUpdateAction.visible ? 1 : 0) + (pluginDeleteAction.visible ? 1 : 0)
                         readonly property bool hasOverflow: visibleActionCount >= 2
-                        readonly property real actionAreaWidth: visibleActionCount > 0
-                            ? actionButtonWidth * (hasOverflow ? 2 : 1)
-                            : 0
-                        readonly property real actionAreaHeight: visibleActionCount > 0
-                            ? pluginFloatingTags.implicitHeight + 4 + pluginActionToolBar.implicitHeight
-                            : 0
+                        readonly property real actionAreaWidth: visibleActionCount > 0 ? actionButtonWidth * (hasOverflow ? 2 : 1) : 0
+                        readonly property real actionAreaHeight: visibleActionCount > 0 ? pluginFloatingTags.implicitHeight + 4 + pluginActionToolBar.implicitHeight : 0
 
                         implicitWidth: actionAreaWidth
                         implicitHeight: actionAreaHeight
@@ -486,15 +466,11 @@ MD.Page {
 
                         MD.Action {
                             id: pluginUpdateAction
-                            text: updateInstallQuery.pluginId === pluginItem.modelData.id && updateInstallQuery.querying
-                                ? qsTr("Updating")
-                                : qsTr("Update")
+                            text: updateInstallQuery.pluginId === pluginItem.modelData.id && updateInstallQuery.querying ? qsTr("Updating") : qsTr("Update")
                             icon.name: "download"
                             visible: root.updateActionVisible(pluginItem.modelData.updateInfo)
                             displayHint: MD.ToolBarLayout.KeepVisible
-                            busy: updateInstallQuery.pluginId === pluginItem.modelData.id && updateInstallQuery.querying
-                                ? (updateInstallQuery.progressing ? MD.Enum.Progress : MD.Enum.Busy)
-                                : MD.Enum.Idle
+                            busy: updateInstallQuery.pluginId === pluginItem.modelData.id && updateInstallQuery.querying ? (updateInstallQuery.progressing ? MD.Enum.Progress : MD.Enum.Busy) : MD.Enum.Idle
                             progress: updateInstallQuery.pluginId === pluginItem.modelData.id ? updateInstallQuery.progress : 0
                             onTriggered: {
                                 if (updateInstallQuery.querying || deleteQuery.querying)
@@ -508,9 +484,7 @@ MD.Page {
                             text: qsTr("Delete")
                             icon.name: MD.Token.icon.delete
                             visible: pluginItem.modelData.system !== true
-                            displayHint: pluginUpdateAction.visible
-                                ? MD.ToolBarLayout.AlwaysHide
-                                : MD.ToolBarLayout.KeepVisible
+                            displayHint: pluginUpdateAction.visible ? MD.ToolBarLayout.AlwaysHide : MD.ToolBarLayout.KeepVisible
                             enabled: !deleteQuery.querying && !updateInstallQuery.querying
                             onTriggered: deleteQuery.remove(pluginItem.modelData.id)
                         }

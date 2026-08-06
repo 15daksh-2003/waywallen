@@ -3,9 +3,11 @@ use anyhow::anyhow;
 use crate::error::{Error, Result};
 use mlua::prelude::*;
 use sea_orm::DatabaseConnection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
+use std::time::{Duration, Instant};
 
 use crate::model::repo;
 use crate::probe::media::{AvFormatProbe, MediaProbe};
@@ -13,10 +15,21 @@ use crate::wallpaper::types::{WallpaperEntry, WallpaperType};
 
 /// User-Agent the `ctx.http` default client sends.
 const WAYWALLEN_HTTP_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) waywallen";
+const LUA_CALLBACK_TIMEOUT: Duration = Duration::from_secs(25);
+const LUA_HOOK_INSTRUCTION_INTERVAL: u32 = 10_000;
+const RUNTIME_ACTIVE: u8 = 0;
+const RUNTIME_DRAINING: u8 = 1;
+const RUNTIME_INACTIVE: u8 = 2;
 
-/// Lua entry ABI supported by this daemon. Plugin manifests must declare
-/// the same value in `[plugin].entry_version`.
-pub const ENTRY_VERSION: u32 = 2;
+pub const ENTRY_VERSION_V2: u32 = 2;
+pub const ENTRY_VERSION_V3: u32 = 3;
+pub const ENTRY_VERSION: u32 = ENTRY_VERSION_V2;
+pub const LATEST_ENTRY_VERSION: u32 = ENTRY_VERSION_V3;
+pub const SUPPORTED_ENTRY_VERSIONS: &[u32] = &[ENTRY_VERSION_V2, ENTRY_VERSION_V3];
+
+pub fn supports_entry_version(version: u32) -> bool {
+    SUPPORTED_ENTRY_VERSIONS.contains(&version)
+}
 
 fn resolve_plugin_import(root: &Path, name: &str) -> LuaResult<PathBuf> {
     let mut rel = PathBuf::new();
@@ -69,8 +82,7 @@ pub struct SourcePluginInfo {
     /// May contain newlines or inline-code Markdown markers.
     pub library_hint: String,
     /// User-configurable settings the plugin declares via `info().settings`,
-    /// rendered by the UI's plugin-settings page and stored in the plugin's
-    /// `[plugin."<id>"]` config table.
+    /// stored under the Lua source name in the shared component settings map.
     pub settings: Vec<SourceSetting>,
 }
 
@@ -91,15 +103,40 @@ pub struct SourceSetting {
     pub choices: Vec<String>,
 }
 
-/// A button a source plugin declares via `info().actions`. Triggering it sends
-/// a `PluginAction{plugin_id, action_id}` the daemon routes to plugin-specific
-/// handling (e.g. the workshop's Steam sign-in/out).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceActionKind {
+    Invoke,
+    QrLogin,
+    Form,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SourceActionField {
+    pub key: String,
+    pub label: String,
+    pub description: String,
+    pub placeholder: String,
+    pub secret: bool,
+    pub required: bool,
+}
+
+/// A button declared by `info().actions` and routed through the generic plugin
+/// action contract.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SourceAction {
     pub id: String,
     pub label: String,
+    pub description: String,
+    pub browse_description: String,
+    pub browse_button_label: String,
     pub group: String,
     pub order: i32,
+    pub kind: SourceActionKind,
+    pub visible: bool,
+    pub enabled: bool,
+    pub fields: Vec<SourceActionField>,
+    pub required_for_browsing: bool,
 }
 
 /// A read-only status row a source plugin declares via `info().status`. The
@@ -121,6 +158,24 @@ pub struct DiscoverSort {
     pub label: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoverFilterType {
+    Select,
+    MultiSelect,
+    Toggle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DiscoverFilter {
+    pub id: String,
+    pub title: String,
+    pub ty: DiscoverFilterType,
+    pub values: Vec<String>,
+    pub description: String,
+    pub confirmation: String,
+}
+
 /// Discover capability of a single source plugin, derived from
 /// `info().capabilities.discover`. Plugins without that table are not listed.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -132,11 +187,13 @@ pub struct DiscoverSourceInfo {
     /// Human-readable display name (falls back to `name`).
     pub display_name: String,
     pub supports_search: bool,
+    pub remote_capability: Option<RemoteCapability>,
+    pub remote_hint: String,
     pub sorts: Vec<DiscoverSort>,
-    pub tags: Vec<String>,
+    pub filters: Vec<DiscoverFilter>,
     /// Domain id of the owning installable plugin (e.g.
-    /// `org.waywallen.open-wallpaper-engine`): the key of its `[plugin."<id>"]`
-    /// config table, so the UI can address settings for this source.
+    /// `org.waywallen.open-wallpaper-engine`). Source settings remain keyed by
+    /// `plugin_id`, the Lua source name.
     pub owner_plugin_id: String,
     /// User-configurable settings the plugin declares via `info().settings`.
     pub settings: Vec<SourceSetting>,
@@ -144,6 +201,112 @@ pub struct DiscoverSourceInfo {
     pub actions: Vec<SourceAction>,
     /// Status rows the plugin declares via `info().status` (values daemon-filled).
     pub status: Vec<SourceStatus>,
+    /// Provider-owned account image returned by `lifecycle.check()`.
+    pub avatar_url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteCapability {
+    Download,
+    Subscription,
+}
+
+fn validate_source_setting(
+    setting: &SourceSetting,
+    raw: &str,
+) -> std::result::Result<String, String> {
+    let value = match setting.ty.as_str() {
+        "u32" => raw
+            .parse::<u32>()
+            .map(|value| value.to_string())
+            .map_err(|_| ()),
+        "i32" => raw
+            .parse::<i32>()
+            .map(|value| value.to_string())
+            .map_err(|_| ()),
+        "f32" => raw
+            .parse::<f32>()
+            .map(|value| value.to_string())
+            .map_err(|_| ()),
+        "bool" => match raw {
+            "true" | "false" => Ok(raw.to_string()),
+            _ => Err(()),
+        },
+        "string" => Ok(raw.to_string()),
+        other => {
+            return Err(format!("{}.type '{other}' is unsupported", setting.key));
+        }
+    }
+    .map_err(|_| format!("{} expects {}, got '{raw}'", setting.key, setting.ty))?;
+
+    if !setting.choices.is_empty() && !setting.choices.iter().any(|choice| choice == &value) {
+        return Err(format!(
+            "{} value '{value}' is not one of [{}]",
+            setting.key,
+            setting.choices.join(", ")
+        ));
+    }
+    Ok(value)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionState {
+    Unknown,
+    Unsubscribed,
+    Subscribed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscriptionItemState {
+    pub id: String,
+    pub state: SubscriptionState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QrLoginBegin {
+    pub operation_id: u64,
+    pub challenge: String,
+    pub poll_after_ms: u64,
+    pub expires_in_ms: Option<u64>,
+    pub title: String,
+    pub instruction: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QrLoginPollState {
+    AwaitingScan,
+    AwaitingConfirmation,
+    ChallengeChanged,
+    Succeeded,
+    Expired,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QrLoginPoll {
+    pub state: QrLoginPollState,
+    pub challenge: String,
+    pub poll_after_ms: Option<u64>,
+    pub display_value: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginLifecycleState {
+    SignedOut,
+    SignedIn,
+    Expired,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginLifecycleCheck {
+    pub state: PluginLifecycleState,
+    pub display_value: String,
+    pub error: String,
+    pub avatar_url: String,
 }
 
 /// One remote item returned by a plugin's `discover.search(ctx, params)`.
@@ -160,11 +323,13 @@ pub struct DiscoverItem {
 /// Detail blob returned by a plugin's `discover.details(ctx, id)`.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct DiscoverDetails {
+    pub author: String,
     pub description: String,
     pub size: String,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub tags: Vec<String>,
+    pub web_url: String,
     pub extra: HashMap<String, String>,
 }
 
@@ -188,9 +353,6 @@ pub struct DiscoverDownload {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub content_rating: Option<String>,
-    /// Download provider. Absent / `"http"` fetches `url` as a single file;
-    /// `"steam_workshop"` routes to the DepotDownloader directory fetcher.
-    pub provider: Option<String>,
 }
 
 /// Directory item resolved by `discover.resolve` after a provider fetch.
@@ -222,10 +384,12 @@ struct DiscoverCapability {
     supports_details: bool,
     supports_download: bool,
     supports_resolve: bool,
+    remote: Option<RemoteCapability>,
+    remote_hint: String,
     sorts: Vec<DiscoverSort>,
-    tags: Vec<String>,
+    filters: Vec<DiscoverFilter>,
     /// The plugin exposes `discover.tags(ctx)`; the daemon calls it to refresh
-    /// `tags` from a live source instead of the static declaration.
+    /// a legacy multi-select filter from a live source.
     dynamic_tags: bool,
 }
 
@@ -241,6 +405,13 @@ struct PluginCapabilities {
     source_item_remove: bool,
     discover: Option<DiscoverCapability>,
     wallpaper: WallpaperCapability,
+    lifecycle: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PluginStateMigration {
+    schema_id: String,
+    file: String,
 }
 
 #[derive(Debug, Clone)]
@@ -255,15 +426,57 @@ struct LoadedPluginInfo {
     settings: Vec<SourceSetting>,
     actions: Vec<SourceAction>,
     status: Vec<SourceStatus>,
+    state_migrations: Vec<PluginStateMigration>,
+}
+
+#[derive(Default)]
+struct PluginCallbacks {
+    source_scan: Option<LuaRegistryKey>,
+    source_auto_detect: Option<LuaRegistryKey>,
+    source_remove: Option<LuaRegistryKey>,
+    discover_search: Option<LuaRegistryKey>,
+    discover_tags: Option<LuaRegistryKey>,
+    discover_details: Option<LuaRegistryKey>,
+    discover_download: Option<LuaRegistryKey>,
+    discover_resolve: Option<LuaRegistryKey>,
+    wallpaper_extras: Option<LuaRegistryKey>,
+    wallpaper_properties: Option<LuaRegistryKey>,
+    lifecycle_load: Option<LuaRegistryKey>,
+    lifecycle_save: Option<LuaRegistryKey>,
+    lifecycle_check: Option<LuaRegistryKey>,
+    lifecycle_migrate: Option<LuaRegistryKey>,
+    actions_status: Option<LuaRegistryKey>,
+    actions_invoke: Option<LuaRegistryKey>,
+    qrlogin_begin: Option<LuaRegistryKey>,
+    qrlogin_poll: Option<LuaRegistryKey>,
+    qrlogin_cancel: Option<LuaRegistryKey>,
+    subscription_status: Option<LuaRegistryKey>,
+    subscription_subscribe: Option<LuaRegistryKey>,
+    subscription_unsubscribe: Option<LuaRegistryKey>,
+}
+
+struct CallbackDeadlineGuard {
+    deadline: Arc<StdMutex<Option<Instant>>>,
+}
+
+impl Drop for CallbackDeadlineGuard {
+    fn drop(&mut self) {
+        if let Ok(mut deadline) = self.deadline.lock() {
+            *deadline = None;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
-// SourceManager
+// LuaPluginRuntime
 
-pub struct SourceManager {
+pub struct LuaPluginRuntime {
     lua: Lua,
+    callback_deadline: Arc<StdMutex<Option<Instant>>>,
+    callback_timeout: Duration,
     /// plugin name → registry key for the loaded module table.
     plugins: HashMap<String, LuaRegistryKey>,
+    callbacks: HashMap<String, PluginCallbacks>,
     /// source `info().name` → parsed ABI v2 metadata.
     plugin_infos: HashMap<String, LoadedPluginInfo>,
     /// Flattened scan results from all plugins.
@@ -277,33 +490,187 @@ pub struct SourceManager {
     db: Option<DatabaseConnection>,
     /// Settings store backing `ctx.plugin_config(key)`. `None` in DB-less tests.
     settings: Option<Arc<crate::settings::SettingsStore>>,
+    state_store: crate::plugin::state_store::PluginStateStore,
+    saved_states: HashMap<String, Option<String>>,
+    http_client: reqwest::Client,
+    http_cookie_store: Arc<mlua_extra::http::SessionCookieStore>,
+    generation_state: Arc<AtomicU8>,
+    qr_operations: HashMap<u64, LuaRegistryKey>,
+    next_qr_operation_id: u64,
 }
 
 // mlua with the `send` feature makes Lua: Send.
 // We wrap SourceManager in Arc<TokioMutex<>> so this is required.
-fn assert_source_manager_send() {
+fn assert_lua_plugin_runtime_send() {
     fn assert_send<T: Send>() {}
-    assert_send::<SourceManager>();
+    assert_send::<LuaPluginRuntime>();
 }
-const _: fn() = assert_source_manager_send;
+const _: fn() = assert_lua_plugin_runtime_send;
 
-impl SourceManager {
+impl LuaPluginRuntime {
     pub fn new() -> Result<Self> {
         Self::with_probe(Arc::new(AvFormatProbe::new()))
     }
 
     pub fn with_probe(probe: Arc<dyn MediaProbe>) -> Result<Self> {
         let lua = Lua::new();
+        let http_cookie_store = Arc::new(mlua_extra::http::SessionCookieStore::default());
+        let http_client = reqwest::Client::builder()
+            .user_agent(WAYWALLEN_HTTP_USER_AGENT)
+            .cookie_provider(http_cookie_store.clone())
+            .build()
+            .map_err(|error| Error::Internal(anyhow!("build plugin HTTP client: {error}")))?;
+        let callback_deadline = Arc::new(StdMutex::new(None));
+        let hook_deadline = callback_deadline.clone();
+        lua.set_hook(
+            LuaHookTriggers::new().every_nth_instruction(LUA_HOOK_INSTRUCTION_INTERVAL),
+            move |_, _| {
+                let expired = hook_deadline
+                    .lock()
+                    .map_err(|_| LuaError::RuntimeError("Lua callback deadline poisoned".into()))?
+                    .is_some_and(|deadline| Instant::now() >= deadline);
+                if expired {
+                    Err(LuaError::RuntimeError("Lua callback timed out".into()))
+                } else {
+                    Ok(LuaVmState::Continue)
+                }
+            },
+        );
         Ok(Self {
             lua,
+            callback_deadline,
+            callback_timeout: LUA_CALLBACK_TIMEOUT,
             plugins: HashMap::new(),
+            callbacks: HashMap::new(),
             plugin_infos: HashMap::new(),
             entries: Vec::new(),
             by_type: HashMap::new(),
             probe,
             db: None,
             settings: None,
+            state_store: crate::plugin::state_store::PluginStateStore::standard(),
+            saved_states: HashMap::new(),
+            http_client,
+            http_cookie_store,
+            generation_state: Arc::new(AtomicU8::new(RUNTIME_ACTIVE)),
+            qr_operations: HashMap::new(),
+            next_qr_operation_id: 1,
         })
+    }
+
+    fn arm_callback_deadline(&self) -> Result<CallbackDeadlineGuard> {
+        let mut deadline = self
+            .callback_deadline
+            .lock()
+            .map_err(|_| Error::Internal(anyhow!("Lua callback deadline poisoned")))?;
+        *deadline = Some(Instant::now() + self.callback_timeout);
+        drop(deadline);
+        Ok(CallbackDeadlineGuard {
+            deadline: self.callback_deadline.clone(),
+        })
+    }
+
+    fn call_callback<R>(&self, function: &LuaFunction, args: impl IntoLuaMulti) -> LuaResult<R>
+    where
+        R: FromLuaMulti,
+    {
+        let _deadline = self.arm_callback_deadline().map_err(LuaError::external)?;
+        function.call(args)
+    }
+
+    async fn call_callback_async<R>(
+        &self,
+        function: &LuaFunction,
+        args: impl IntoLuaMulti,
+    ) -> LuaResult<R>
+    where
+        R: FromLuaMulti,
+    {
+        let _deadline = self.arm_callback_deadline().map_err(LuaError::external)?;
+        let hook_deadline = self.callback_deadline.clone();
+        let thread = self.lua.create_thread(function.clone())?;
+        thread.set_hook(
+            LuaHookTriggers::new().every_nth_instruction(LUA_HOOK_INSTRUCTION_INTERVAL),
+            move |_, _| {
+                let expired = hook_deadline
+                    .lock()
+                    .map_err(|_| LuaError::RuntimeError("Lua callback deadline poisoned".into()))?
+                    .is_some_and(|deadline| Instant::now() >= deadline);
+                if expired {
+                    Err(LuaError::RuntimeError("Lua callback timed out".into()))
+                } else {
+                    Ok(LuaVmState::Continue)
+                }
+            },
+        );
+        tokio::time::timeout(self.callback_timeout, thread.into_async::<R>(args))
+            .await
+            .map_err(|_| LuaError::RuntimeError("Lua callback timed out".into()))?
+    }
+
+    async fn call_plugin_callback_async<R>(
+        &self,
+        plugin_name: &str,
+        function: &LuaFunction,
+        args: impl IntoLuaMulti,
+    ) -> LuaResult<R>
+    where
+        R: FromLuaMulti,
+    {
+        if self.generation_state.load(Ordering::Acquire) != RUNTIME_ACTIVE {
+            return Err(LuaError::runtime("source plugin runtime is reloading"));
+        }
+        let result = self.call_callback_async(function, args).await;
+        let persisted = self.persist_http_session(plugin_name);
+        match (result, persisted) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Ok(_), Err(error)) => Err(LuaError::external(error)),
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(persist_error)) => {
+                log::warn!(
+                    "persist HTTP session after failed callback for {plugin_name}: {persist_error:#}"
+                );
+                Err(error)
+            }
+        }
+    }
+
+    fn http_view(&self) -> mlua_extra::http::LuaHttpClient {
+        mlua_extra::http::LuaHttpClient::with_session(
+            self.http_client.clone(),
+            self.http_cookie_store.clone(),
+        )
+    }
+
+    fn restore_http_session(&self, plugin_id: &str) -> Result<()> {
+        let Some(snapshot) = self.state_store.load_http_session(plugin_id)? else {
+            return Ok(());
+        };
+        self.http_cookie_store.restore(&snapshot).map_err(|error| {
+            Error::Internal(anyhow!("restore HTTP session for {plugin_id}: {error}"))
+        })
+    }
+
+    fn persist_http_session(&self, plugin_name: &str) -> Result<()> {
+        let plugin_id = &self
+            .plugin_infos
+            .get(plugin_name)
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?
+            .plugin_id;
+        self.persist_http_session_by_id(plugin_id)
+    }
+
+    fn persist_http_session_by_id(&self, plugin_id: &str) -> Result<()> {
+        if !self.http_cookie_store.is_dirty() {
+            return Ok(());
+        }
+        let snapshot = self.http_cookie_store.snapshot().map_err(|error| {
+            Error::Internal(anyhow!("snapshot HTTP session for {plugin_id}: {error}"))
+        })?;
+        self.state_store
+            .save_http_session(plugin_id, &snapshot.value)?;
+        self.http_cookie_store.mark_clean(snapshot.revision);
+        Ok(())
     }
 
     /// Hand the DB to the source manager so `ctx.library_meta_get/set`
@@ -313,14 +680,21 @@ impl SourceManager {
     }
 
     /// Hand the settings store to the source manager so `ctx.plugin_config(key)`
-    /// can read the plugin's `[plugin."<id>"]` config table.
+    /// can read the Lua source component's config table.
     pub fn attach_settings(&mut self, settings: Arc<crate::settings::SettingsStore>) {
         self.settings = Some(settings);
     }
 
     pub fn clear_plugins(&mut self) {
+        self.persist_all_http_sessions();
+        self.generation_state
+            .store(RUNTIME_INACTIVE, Ordering::Release);
+        self.http_cookie_store.clear();
         self.plugins.clear();
+        self.callbacks.clear();
         self.plugin_infos.clear();
+        self.saved_states.clear();
+        self.qr_operations.clear();
         self.entries.clear();
         self.by_type.clear();
     }
@@ -450,6 +824,147 @@ impl SourceManager {
         Ok(sorts)
     }
 
+    fn legacy_discover_filter(tags: Vec<String>) -> Vec<DiscoverFilter> {
+        if tags.is_empty() {
+            return Vec::new();
+        }
+        vec![DiscoverFilter {
+            id: "tags".to_string(),
+            title: "Tags".to_string(),
+            ty: DiscoverFilterType::MultiSelect,
+            values: tags,
+            description: String::new(),
+            confirmation: String::new(),
+        }]
+    }
+
+    fn optional_discover_filters(discover_tbl: &LuaTable) -> Result<Option<Vec<DiscoverFilter>>> {
+        let Some(filters_tbl) =
+            Self::optional_table(discover_tbl, "filters", "info().capabilities.discover")?
+        else {
+            return Ok(None);
+        };
+
+        let mut filters = Vec::new();
+        let mut filter_ids = HashSet::new();
+        let mut filter_values = HashSet::new();
+        for (idx, filter) in filters_tbl.sequence_values::<LuaTable>().enumerate() {
+            let filter = filter.map_err(|error| {
+                Error::Internal(anyhow!(
+                    "info().capabilities.discover.filters[{}] must be a table: {error}",
+                    idx + 1
+                ))
+            })?;
+            let context = format!("info().capabilities.discover.filters[{}]", idx + 1);
+            let id = Self::require_string(&filter, "id", &context)?;
+            let title = Self::require_string(&filter, "title", &context)?;
+            if id.is_empty() || title.is_empty() {
+                return Err(Error::Internal(anyhow!(
+                    "{context}.id and {context}.title must not be empty"
+                )));
+            }
+            if !filter_ids.insert(id.clone()) {
+                return Err(Error::Internal(anyhow!(
+                    "{context}.id '{id}' is declared more than once"
+                )));
+            }
+
+            let type_name = Self::require_string(&filter, "type", &context)?;
+            let ty = match type_name.as_str() {
+                "select" => DiscoverFilterType::Select,
+                "multi_select" => DiscoverFilterType::MultiSelect,
+                "toggle" => DiscoverFilterType::Toggle,
+                _ => {
+                    return Err(Error::Internal(anyhow!(
+                        "{context}.type '{type_name}' must be select, multi_select, or toggle"
+                    )))
+                }
+            };
+            let values = Self::require_string_sequence(&filter, "values", &context)?;
+            if values.is_empty() {
+                return Err(Error::Internal(anyhow!(
+                    "{context}.values must not be empty"
+                )));
+            }
+            if ty == DiscoverFilterType::Toggle && values.len() != 1 {
+                return Err(Error::Internal(anyhow!(
+                    "{context}.values must contain exactly one value for a toggle"
+                )));
+            }
+            for value in &values {
+                if value.is_empty() {
+                    return Err(Error::Internal(anyhow!(
+                        "{context}.values must not contain an empty value"
+                    )));
+                }
+                if !filter_values.insert(value.clone()) {
+                    return Err(Error::Internal(anyhow!(
+                        "{context}.values contains duplicate discover value '{value}'"
+                    )));
+                }
+            }
+
+            let description = Self::optional_string(&filter, "description", &context)?;
+            let confirmation = Self::optional_string(&filter, "confirmation", &context)?;
+            if !confirmation.is_empty() && ty != DiscoverFilterType::Toggle {
+                return Err(Error::Internal(anyhow!(
+                    "{context}.confirmation is only supported for toggle filters"
+                )));
+            }
+            filters.push(DiscoverFilter {
+                id,
+                title,
+                ty,
+                values,
+                description,
+                confirmation,
+            });
+        }
+        Ok(Some(filters))
+    }
+
+    fn validate_discover_filter_values(
+        plugin_name: &str,
+        discover: &DiscoverCapability,
+        values: &[String],
+    ) -> Result<()> {
+        let mut selected = HashSet::new();
+        for value in values {
+            if !selected.insert(value.as_str()) {
+                return Err(Error::InvalidArgument(format!(
+                    "source plugin '{plugin_name}' discover filter value '{value}' is duplicated"
+                )));
+            }
+        }
+        for value in &selected {
+            if !discover
+                .filters
+                .iter()
+                .any(|filter| filter.values.iter().any(|candidate| candidate == *value))
+            {
+                return Err(Error::InvalidArgument(format!(
+                    "source plugin '{plugin_name}' does not declare discover filter value '{value}'"
+                )));
+            }
+        }
+        for filter in &discover.filters {
+            if filter.ty == DiscoverFilterType::Select
+                && filter
+                    .values
+                    .iter()
+                    .filter(|value| selected.contains(value.as_str()))
+                    .count()
+                    > 1
+            {
+                return Err(Error::InvalidArgument(format!(
+                    "source plugin '{plugin_name}' discover filter '{}' accepts one value",
+                    filter.id
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn require_table_function(tbl: &LuaTable, fn_name: &str, context: &str) -> Result<()> {
         tbl.get::<LuaFunction>(fn_name)
             .map(|_| ())
@@ -490,16 +1005,30 @@ impl SourceManager {
         }
     }
 
+    fn require_field_absent(tbl: &LuaTable, key: &str, context: &str) -> Result<()> {
+        let value = tbl
+            .get::<LuaValue>(key)
+            .map_err(|error| Error::Internal(anyhow!("{context}.{key}: {error}")))?;
+        if !matches!(value, LuaValue::Nil) {
+            return Err(Error::Internal(anyhow!(
+                "{context}.{key} must be absent unless its capability is declared"
+            )));
+        }
+        Ok(())
+    }
+
     fn parse_plugin_info(
+        &self,
         module: &LuaTable,
         plugin_id: &str,
         plugin_version: &str,
+        entry_version: u32,
     ) -> Result<LoadedPluginInfo> {
         let info_fn: LuaFunction = module
             .get("info")
             .map_err(|e| Error::Internal(anyhow!("plugin must export info(): {e}")))?;
-        let info_table: LuaTable = info_fn
-            .call(())
+        let info_table: LuaTable = self
+            .call_callback(&info_fn, ())
             .map_err(|e| Error::Internal(anyhow!("info() failed: {e}")))?;
         let name: String = info_table
             .get("name")
@@ -542,6 +1071,8 @@ impl SourceManager {
                 )?;
                 if auto_detect {
                     Self::require_table_function(&source_api, "auto_detect", "module.source")?;
+                } else if entry_version == ENTRY_VERSION_V3 {
+                    Self::require_field_absent(&source_api, "auto_detect", "module.source")?;
                 }
                 let types = Self::require_string_sequence(
                     &source_tbl,
@@ -597,6 +1128,12 @@ impl SourceManager {
                     "info().capabilities.discover",
                     false,
                 )?;
+                let supports_subscription = Self::optional_bool(
+                    &discover_tbl,
+                    "subscription",
+                    "info().capabilities.discover",
+                    false,
+                )?;
                 let supports_resolve = Self::optional_bool(
                     &discover_tbl,
                     "resolve",
@@ -605,6 +1142,8 @@ impl SourceManager {
                 )?;
                 if supports_details {
                     Self::require_table_function(&discover_api, "details", "module.discover")?;
+                } else if entry_version == ENTRY_VERSION_V3 {
+                    Self::require_field_absent(&discover_api, "details", "module.discover")?;
                 }
                 if supports_download {
                     Self::require_table_function(&discover_api, "download", "module.discover")?;
@@ -612,22 +1151,92 @@ impl SourceManager {
                 if supports_resolve {
                     Self::require_table_function(&discover_api, "resolve", "module.discover")?;
                 }
+                let remote = match (supports_download, supports_subscription) {
+                    (true, true) => {
+                        return Err(Error::Internal(anyhow!(
+                            "info().capabilities.discover download and subscription are mutually exclusive"
+                        )))
+                    }
+                    (true, false) => Some(RemoteCapability::Download),
+                    (false, true) => {
+                        if entry_version != ENTRY_VERSION_V3 {
+                            return Err(Error::Internal(anyhow!(
+                                "subscription capability requires entry_version {ENTRY_VERSION_V3}"
+                            )));
+                        }
+                        let subscription_api =
+                            Self::require_module_table(module, "subscription")?;
+                        Self::require_table_function(
+                            &subscription_api,
+                            "status",
+                            "module.subscription",
+                        )?;
+                        Self::require_table_function(
+                            &subscription_api,
+                            "subscribe",
+                            "module.subscription",
+                        )?;
+                        Self::require_table_function(
+                            &subscription_api,
+                            "unsubscribe",
+                            "module.subscription",
+                        )?;
+                        Some(RemoteCapability::Subscription)
+                    }
+                    (false, false) => None,
+                };
+                if entry_version == ENTRY_VERSION_V3
+                    && supports_resolve
+                    && remote != Some(RemoteCapability::Download)
+                {
+                    return Err(Error::Internal(anyhow!(
+                        "info().capabilities.discover.resolve requires download capability"
+                    )));
+                }
+                if entry_version == ENTRY_VERSION_V3 {
+                    for (callback, declared) in [
+                        ("download", supports_download),
+                        ("resolve", supports_resolve),
+                    ] {
+                        if !declared {
+                            Self::require_field_absent(&discover_api, callback, "module.discover")?;
+                        }
+                    }
+                    let subscription_api = Self::optional_table(module, "subscription", "module")?;
+                    if supports_subscription != subscription_api.is_some() {
+                        return Err(Error::Internal(anyhow!(
+                            "module.subscription presence must match the subscription capability"
+                        )));
+                    }
+                }
                 let sorts = Self::optional_discover_sorts(&discover_tbl)?;
-                let tags = Self::optional_string_sequence(
+                let declared_filters = Self::optional_discover_filters(&discover_tbl)?;
+                let legacy_tags = Self::optional_string_sequence(
                     &discover_tbl,
                     "tags",
                     "info().capabilities.discover",
                 )?;
-                // An optional `discover.tags(ctx)` function supplies the filter
-                // taxonomy at runtime; the static `tags` above is the fallback.
                 let dynamic_tags = discover_api.get::<LuaFunction>("tags").is_ok();
+                if declared_filters.is_some() && (!legacy_tags.is_empty() || dynamic_tags) {
+                    return Err(Error::Internal(anyhow!(
+                        "info().capabilities.discover.filters cannot be combined with legacy tags"
+                    )));
+                }
+                let filters =
+                    declared_filters.unwrap_or_else(|| Self::legacy_discover_filter(legacy_tags));
                 Some(DiscoverCapability {
                     supports_search: true,
                     supports_details,
                     supports_download,
                     supports_resolve,
+                    remote,
+                    remote_hint: Self::optional_string(
+                        &discover_tbl,
+                        "remote_hint",
+                        "info().capabilities.discover",
+                    )?,
                     sorts,
-                    tags,
+                    filters,
                     dynamic_tags,
                 })
             }
@@ -653,15 +1262,77 @@ impl SourceManager {
             )?;
             if wallpaper.extras {
                 Self::require_table_function(&wallpaper_api, "extras", "module.wallpaper")?;
+            } else if entry_version == ENTRY_VERSION_V3 {
+                Self::require_field_absent(&wallpaper_api, "extras", "module.wallpaper")?;
             }
             if wallpaper.properties {
                 Self::require_table_function(&wallpaper_api, "properties", "module.wallpaper")?;
+            } else if entry_version == ENTRY_VERSION_V3 {
+                Self::require_field_absent(&wallpaper_api, "properties", "module.wallpaper")?;
             }
         }
 
         let settings = Self::parse_source_settings(&info_table)?;
-        let actions = Self::parse_source_actions(&info_table)?;
+        let actions = Self::parse_source_actions(&info_table, entry_version)?;
         let status = Self::parse_source_status(&info_table)?;
+        let state_migrations = Self::parse_state_migrations(&info_table)?;
+        let lifecycle = Self::optional_table(module, "lifecycle", "module")?;
+        let actions_api = Self::optional_table(module, "actions", "module")?;
+        let qrlogin = Self::optional_table(module, "qrlogin", "module")?;
+        if entry_version == ENTRY_VERSION_V3 {
+            if let Some(lifecycle) = &lifecycle {
+                Self::require_table_function(lifecycle, "load", "module.lifecycle")?;
+                Self::require_table_function(lifecycle, "save", "module.lifecycle")?;
+                Self::require_table_function(lifecycle, "check", "module.lifecycle")?;
+                if !state_migrations.is_empty() {
+                    Self::require_table_function(lifecycle, "migrate", "module.lifecycle")?;
+                }
+            } else if !state_migrations.is_empty() {
+                return Err(Error::Internal(anyhow!(
+                    "info().state_migrations requires module.lifecycle"
+                )));
+            }
+
+            let has_action_surface = !actions.is_empty() || !status.is_empty();
+            if has_action_surface != actions_api.is_some() {
+                return Err(Error::Internal(anyhow!(
+                    "module.actions presence must match declared actions/status"
+                )));
+            }
+            if has_action_surface {
+                let actions_api = actions_api.as_ref().ok_or_else(|| {
+                    Error::Internal(anyhow!(
+                        "module.actions table required for declared actions/status"
+                    ))
+                })?;
+                Self::require_table_function(actions_api, "status", "module.actions")?;
+                if actions.iter().any(|action| {
+                    matches!(
+                        action.kind,
+                        SourceActionKind::Invoke | SourceActionKind::Form
+                    )
+                }) {
+                    Self::require_table_function(actions_api, "invoke", "module.actions")?;
+                } else {
+                    Self::require_field_absent(actions_api, "invoke", "module.actions")?;
+                }
+            }
+            let has_qr_action = actions
+                .iter()
+                .any(|action| action.kind == SourceActionKind::QrLogin);
+            if has_qr_action != qrlogin.is_some() {
+                return Err(Error::Internal(anyhow!(
+                    "module.qrlogin presence must match declared qr_login actions"
+                )));
+            }
+            if has_qr_action {
+                let qrlogin = qrlogin.as_ref().ok_or_else(|| {
+                    Error::Internal(anyhow!("module.qrlogin table required for qr_login action"))
+                })?;
+                Self::require_table_function(qrlogin, "begin", "module.qrlogin")?;
+                Self::require_table_function(qrlogin, "poll", "module.qrlogin")?;
+            }
+        }
         let display_name = {
             let dn = Self::optional_string(&info_table, "display_name", "info()")?;
             if dn.is_empty() {
@@ -681,16 +1352,19 @@ impl SourceManager {
                 source_item_remove,
                 discover,
                 wallpaper,
+                lifecycle: lifecycle.is_some(),
             },
             settings,
             actions,
             status,
+            state_migrations,
         })
     }
 
-    /// Parse the optional `info().actions` sequence (`{id,label,group,order}`).
-    fn parse_source_actions(info: &LuaTable) -> Result<Vec<SourceAction>> {
+    /// Parse the optional `info().actions` sequence.
+    fn parse_source_actions(info: &LuaTable, entry_version: u32) -> Result<Vec<SourceAction>> {
         let mut out = Vec::new();
+        let mut ids = HashSet::new();
         for entry in Self::info_sequence(info, "actions")? {
             let id: String = entry
                 .get("id")
@@ -700,22 +1374,172 @@ impl SourceManager {
                     "info().actions entry requires a non-empty id"
                 )));
             }
+            if !ids.insert(id.clone()) {
+                return Err(Error::Internal(anyhow!(
+                    "info().actions contains duplicate id '{id}'"
+                )));
+            }
+            let kind = match Self::optional_string(&entry, "kind", "info().actions")?.as_str() {
+                "" | "invoke" => SourceActionKind::Invoke,
+                "qr_login" if entry_version == ENTRY_VERSION_V3 => SourceActionKind::QrLogin,
+                "form" if entry_version == ENTRY_VERSION_V3 => SourceActionKind::Form,
+                value => {
+                    return Err(Error::Internal(anyhow!(
+                        "info().actions kind '{value}' is unsupported for entry_version {entry_version}"
+                    )))
+                }
+            };
+            let mut fields = Vec::new();
+            let mut field_keys = HashSet::new();
+            for field in Self::info_sequence(&entry, "fields")? {
+                let key = Self::require_string(&field, "key", "info().actions.fields")?;
+                if key.trim().is_empty() {
+                    return Err(Error::Internal(anyhow!(
+                        "info().actions.fields entry requires a non-empty key"
+                    )));
+                }
+                if !field_keys.insert(key.clone()) {
+                    return Err(Error::Internal(anyhow!(
+                        "info().actions contains duplicate field key '{key}'"
+                    )));
+                }
+                fields.push(SourceActionField {
+                    key,
+                    label: Self::optional_string(&field, "label", "info().actions.fields")?,
+                    description: Self::optional_string(
+                        &field,
+                        "description",
+                        "info().actions.fields",
+                    )?,
+                    placeholder: Self::optional_string(
+                        &field,
+                        "placeholder",
+                        "info().actions.fields",
+                    )?,
+                    secret: Self::optional_bool(&field, "secret", "info().actions.fields", false)?,
+                    required: Self::optional_bool(
+                        &field,
+                        "required",
+                        "info().actions.fields",
+                        false,
+                    )?,
+                });
+            }
+            if kind == SourceActionKind::Form && fields.is_empty() {
+                return Err(Error::Internal(anyhow!(
+                    "info().actions form action requires at least one field"
+                )));
+            }
+            if kind != SourceActionKind::Form && !fields.is_empty() {
+                return Err(Error::Internal(anyhow!(
+                    "info().actions fields are only valid for form actions"
+                )));
+            }
             out.push(SourceAction {
                 id,
                 label: Self::optional_string(&entry, "label", "info().actions")?,
+                description: Self::optional_string(&entry, "description", "info().actions")?,
+                browse_description: Self::optional_string(
+                    &entry,
+                    "browse_description",
+                    "info().actions",
+                )?,
+                browse_button_label: Self::optional_string(
+                    &entry,
+                    "browse_button_label",
+                    "info().actions",
+                )?,
                 group: Self::optional_string(&entry, "group", "info().actions")?,
                 order: entry
                     .get::<Option<i32>>("order")
                     .unwrap_or(None)
                     .unwrap_or(0),
+                kind,
+                visible: true,
+                enabled: true,
+                fields,
+                required_for_browsing: Self::optional_bool(
+                    &entry,
+                    "required_for_browsing",
+                    "info().actions",
+                    kind == SourceActionKind::QrLogin,
+                )?,
             });
         }
         Ok(out)
     }
 
+    fn parse_state_migrations(info: &LuaTable) -> Result<Vec<PluginStateMigration>> {
+        let mut out = Vec::new();
+        for entry in Self::info_sequence(info, "state_migrations")? {
+            let schema_id = Self::require_string(&entry, "schema_id", "info().state_migrations")?;
+            let file = Self::require_string(&entry, "file", "info().state_migrations")?;
+            if schema_id.trim().is_empty() || file.trim().is_empty() {
+                return Err(Error::Internal(anyhow!(
+                    "info().state_migrations schema_id/file must not be empty"
+                )));
+            }
+            out.push(PluginStateMigration { schema_id, file });
+        }
+        Ok(out)
+    }
+
+    fn callback_key(
+        &self,
+        module: &LuaTable,
+        table_name: &str,
+        function_name: &str,
+    ) -> Result<Option<LuaRegistryKey>> {
+        let Some(table) = Self::optional_table(module, table_name, "module")? else {
+            return Ok(None);
+        };
+        match table.get::<LuaValue>(function_name).map_err(|error| {
+            Error::Internal(anyhow!("module.{table_name}.{function_name}: {error}"))
+        })? {
+            LuaValue::Nil => Ok(None),
+            LuaValue::Function(function) => self
+                .lua
+                .create_registry_value(function)
+                .map(Some)
+                .map_err(Error::from),
+            other => Err(Error::Internal(anyhow!(
+                "module.{table_name}.{function_name} must be a function, got {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn parse_callbacks(&self, module: &LuaTable) -> Result<PluginCallbacks> {
+        Ok(PluginCallbacks {
+            source_scan: self.callback_key(module, "source", "scan")?,
+            source_auto_detect: self.callback_key(module, "source", "auto_detect")?,
+            source_remove: self.callback_key(module, "source", "remove")?,
+            discover_search: self.callback_key(module, "discover", "search")?,
+            discover_tags: self.callback_key(module, "discover", "tags")?,
+            discover_details: self.callback_key(module, "discover", "details")?,
+            discover_download: self.callback_key(module, "discover", "download")?,
+            discover_resolve: self.callback_key(module, "discover", "resolve")?,
+            wallpaper_extras: self.callback_key(module, "wallpaper", "extras")?,
+            wallpaper_properties: self.callback_key(module, "wallpaper", "properties")?,
+            lifecycle_load: self.callback_key(module, "lifecycle", "load")?,
+            lifecycle_save: self.callback_key(module, "lifecycle", "save")?,
+            lifecycle_check: self.callback_key(module, "lifecycle", "check")?,
+            lifecycle_migrate: self.callback_key(module, "lifecycle", "migrate")?,
+            actions_status: self.callback_key(module, "actions", "status")?,
+            actions_invoke: self.callback_key(module, "actions", "invoke")?,
+            qrlogin_begin: self.callback_key(module, "qrlogin", "begin")?,
+            qrlogin_poll: self.callback_key(module, "qrlogin", "poll")?,
+            qrlogin_cancel: self.callback_key(module, "qrlogin", "cancel")?,
+            subscription_status: self.callback_key(module, "subscription", "status")?,
+            subscription_subscribe: self.callback_key(module, "subscription", "subscribe")?,
+            subscription_unsubscribe: self.callback_key(module, "subscription", "unsubscribe")?,
+        })
+    }
+
     /// Parse the optional `info().status` sequence (`{id,label,group,order}`).
     fn parse_source_status(info: &LuaTable) -> Result<Vec<SourceStatus>> {
         let mut out = Vec::new();
+        let mut ids = HashSet::new();
         for entry in Self::info_sequence(info, "status")? {
             let id: String = entry
                 .get("id")
@@ -723,6 +1547,11 @@ impl SourceManager {
             if id.trim().is_empty() {
                 return Err(Error::Internal(anyhow!(
                     "info().status entry requires a non-empty id"
+                )));
+            }
+            if !ids.insert(id.clone()) {
+                return Err(Error::Internal(anyhow!(
+                    "info().status contains duplicate id '{id}'"
                 )));
             }
             out.push(SourceStatus {
@@ -775,6 +1604,7 @@ impl SourceManager {
             }
         };
         let mut out = Vec::new();
+        let mut keys = HashSet::new();
         for entry in tbl.sequence_values::<LuaTable>() {
             let s = entry.map_err(|e| Error::Internal(anyhow!("info().settings entry: {e}")))?;
             let key: String = s
@@ -785,8 +1615,18 @@ impl SourceManager {
                     "info().settings entry requires a non-empty key"
                 )));
             }
+            if !keys.insert(key.clone()) {
+                return Err(Error::Internal(anyhow!(
+                    "info().settings contains duplicate key '{key}'"
+                )));
+            }
             let ty = Self::optional_string(&s, "type", "info().settings")?;
             let ty = if ty.is_empty() { "string".into() } else { ty };
+            if !matches!(ty.as_str(), "string" | "bool" | "u32" | "i32" | "f32") {
+                return Err(Error::Internal(anyhow!(
+                    "info().settings type '{ty}' is unsupported"
+                )));
+            }
             let default = match s
                 .get::<LuaValue>("default")
                 .map_err(|e| Error::Internal(anyhow!("info().settings.default: {e}")))?
@@ -835,34 +1675,154 @@ impl SourceManager {
         plugin_version: &str,
         entry_version: u32,
     ) -> Result<String> {
-        if entry_version != ENTRY_VERSION {
+        if !supports_entry_version(entry_version) {
             return Err(Error::Internal(anyhow!(
-                "unsupported Lua entry_version {entry_version}; expected {ENTRY_VERSION}"
+                "unsupported Lua entry_version {entry_version}; supported versions are {SUPPORTED_ENTRY_VERSIONS:?}"
             )));
         }
         let source = std::fs::read_to_string(path)
             .map_err(|e| Error::Internal(anyhow!("read {}: {e}", path.display())))?;
         let root = path.parent().unwrap_or_else(|| Path::new("."));
         let env = self.plugin_lua_env(root)?;
-        let module: LuaTable = self
-            .lua
-            .load(&source)
-            .set_name(path.to_string_lossy())
-            .set_environment(env)
-            .eval()
-            .map_err(|e| Error::Internal(anyhow!("eval {}: {e}", path.display())))?;
+        let module: LuaTable = {
+            let _deadline = self.arm_callback_deadline()?;
+            self.lua
+                .load(&source)
+                .set_name(path.to_string_lossy())
+                .set_environment(env)
+                .eval()
+                .map_err(|e| Error::Internal(anyhow!("eval {}: {e}", path.display())))?
+        };
 
-        let info = Self::parse_plugin_info(&module, plugin_id, plugin_version)?;
+        let info = self.parse_plugin_info(&module, plugin_id, plugin_version, entry_version)?;
+        let callbacks = self.parse_callbacks(&module)?;
         let name = info.name.clone();
 
         let key = self.lua.create_registry_value(module)?;
         self.plugins.insert(name.clone(), key);
+        self.callbacks.insert(name.clone(), callbacks);
         self.plugin_infos.insert(name.clone(), info);
+        if let Err(error) = self
+            .restore_http_session(plugin_id)
+            .and_then(|()| self.initialize_state(&name))
+        {
+            self.plugins.remove(&name);
+            self.callbacks.remove(&name);
+            self.plugin_infos.remove(&name);
+            return Err(error);
+        }
         log::info!(
             "loaded source plugin: {name} (plugin {plugin_id}) from {}",
             path.display()
         );
         Ok(name)
+    }
+
+    fn initialize_state(&mut self, plugin_name: &str) -> Result<()> {
+        let info = self
+            .plugin_infos
+            .get(plugin_name)
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?
+            .clone();
+        if !info.capabilities.lifecycle {
+            return Ok(());
+        }
+        let callbacks = self
+            .callbacks
+            .get(plugin_name)
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+        let load_fn: LuaFunction = self.lua.registry_value(
+            callbacks
+                .lifecycle_load
+                .as_ref()
+                .ok_or_else(|| Error::Internal(anyhow!("module.lifecycle.load required")))?,
+        )?;
+
+        if let Some(state) = self.state_store.load(&info.plugin_id)? {
+            self.call_callback::<()>(&load_fn, state.clone())?;
+            self.saved_states
+                .insert(info.plugin_id.clone(), Some(state));
+            return Ok(());
+        }
+
+        for migration in &info.state_migrations {
+            let Some(raw) = self.state_store.load_legacy(&migration.file)? else {
+                continue;
+            };
+            let migrate_fn: LuaFunction =
+                self.lua
+                    .registry_value(callbacks.lifecycle_migrate.as_ref().ok_or_else(|| {
+                        Error::Internal(anyhow!("module.lifecycle.migrate required"))
+                    })?)?;
+            let state: String =
+                self.call_callback(&migrate_fn, (migration.schema_id.clone(), raw))?;
+            self.call_callback::<()>(&load_fn, state.clone())?;
+            self.state_store
+                .save_if_changed(&info.plugin_id, None, &state)?;
+            self.state_store.preserve_legacy(&migration.file)?;
+            self.saved_states
+                .insert(info.plugin_id.clone(), Some(state));
+            return Ok(());
+        }
+
+        self.call_callback::<()>(&load_fn, LuaValue::Nil)?;
+        self.saved_states.insert(info.plugin_id, None);
+        Ok(())
+    }
+
+    fn persist_state(&mut self, plugin_name: &str) -> Result<()> {
+        let (plugin_id, has_lifecycle) = self
+            .plugin_infos
+            .get(plugin_name)
+            .map(|info| (info.plugin_id.clone(), info.capabilities.lifecycle))
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+        let lifecycle_result = (|| -> Result<()> {
+            if !has_lifecycle {
+                return Ok(());
+            }
+            let callbacks = self
+                .callbacks
+                .get(plugin_name)
+                .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+            let save_fn: LuaFunction = self.lua.registry_value(
+                callbacks
+                    .lifecycle_save
+                    .as_ref()
+                    .ok_or_else(|| Error::Internal(anyhow!("module.lifecycle.save required")))?,
+            )?;
+            let state: String = self.call_callback(&save_fn, ())?;
+            let previous = self
+                .saved_states
+                .get(&plugin_id)
+                .and_then(|state| state.as_deref());
+            if self
+                .state_store
+                .save_if_changed(&plugin_id, previous, &state)?
+            {
+                self.saved_states.insert(plugin_id.clone(), Some(state));
+            }
+            Ok(())
+        })();
+        let http_result = self.persist_http_session_by_id(&plugin_id);
+        lifecycle_result?;
+        http_result
+    }
+
+    fn persist_all_http_sessions(&self) {
+        if self.generation_state.load(Ordering::Acquire) == RUNTIME_INACTIVE {
+            return;
+        }
+        let mut plugin_ids = HashSet::new();
+        for info in self.plugin_infos.values() {
+            if plugin_ids.insert(info.plugin_id.as_str()) {
+                if let Err(error) = self.persist_http_session_by_id(&info.plugin_id) {
+                    log::warn!(
+                        "persist HTTP session while releasing {}: {error:#}",
+                        info.plugin_id
+                    );
+                }
+            }
+        }
     }
 
     /// Run `scan(ctx)` on all loaded plugins and merge results.
@@ -877,6 +1837,11 @@ impl SourceManager {
             .filter_map(|(name, info)| info.capabilities.source.is_some().then(|| name.clone()))
             .collect();
         plugin_names.sort();
+        // Every plugin is scanned even if an earlier one fails, so one broken
+        // source does not hide the wallpapers the others found. The failures
+        // are still reported, otherwise a failed scan is indistinguishable from
+        // a scan that legitimately found nothing.
+        let mut failures: Vec<String> = Vec::new();
         for name in &plugin_names {
             let libs = libs_by_plugin
                 .get(name)
@@ -884,7 +1849,14 @@ impl SourceManager {
                 .unwrap_or(&[]);
             if let Err(e) = self.scan_plugin(name, libs).await {
                 log::warn!("scan plugin {name} failed: {e}");
+                failures.push(format!("{name}: {e:#}"));
             }
+        }
+        if !failures.is_empty() {
+            return Err(Error::Internal(anyhow!(
+                "source scan failed for {}",
+                failures.join("; ")
+            )));
         }
         Ok(())
     }
@@ -892,11 +1864,10 @@ impl SourceManager {
     /// Run `scan(ctx)` on a single plugin by name with the supplied
     /// library list exposed as `ctx.libraries()`.
     async fn scan_plugin(&mut self, name: &str, libraries: &[String]) -> Result<()> {
-        let key = self
-            .plugins
+        let callbacks = self
+            .callbacks
             .get(name)
             .ok_or_else(|| Error::SourcePluginNotFound(name.to_string()))?;
-        let module: LuaTable = self.lua.registry_value(key)?;
         let info = self
             .plugin_infos
             .get(name)
@@ -904,11 +1875,23 @@ impl SourceManager {
         if info.capabilities.source.is_none() {
             return Ok(());
         }
-        let source_api: LuaTable = module.get("source")?;
-        let scan_fn: LuaFunction = source_api.get("scan")?;
+        let scan_fn: LuaFunction = self.lua.registry_value(
+            callbacks
+                .source_scan
+                .as_ref()
+                .ok_or_else(|| Error::SourcePluginNotFound(name.to_string()))?,
+        )?;
 
         let ctx = self.build_ctx(Some(name), libraries)?;
-        let results: LuaTable = scan_fn.call_async(ctx).await?;
+        let results: LuaTable = self
+            .call_plugin_callback_async(name, &scan_fn, ctx)
+            .await
+            .map_err(|error| {
+                Error::Internal(anyhow!(
+                    "source plugin '{name}' scan failed: {}",
+                    redact_secrets(&error.to_string())
+                ))
+            })?;
 
         for pair in results.sequence_values::<LuaTable>() {
             let tbl = pair?;
@@ -945,7 +1928,30 @@ impl SourceManager {
                 .push(idx);
             self.entries.push(entry);
         }
+        self.persist_state(name)?;
         Ok(())
+    }
+
+    fn install_json_context(&self, ctx: &LuaTable) -> LuaResult<()> {
+        let json = mlua_extra::json::create_nullable_module(&self.lua)?;
+        let parse = json.get::<LuaFunction>("parse")?;
+        let encode = json.get::<LuaFunction>("encode")?;
+        ctx.set("json_parse", parse)?;
+        ctx.set("json_encode", encode)?;
+        ctx.set("json", json)
+    }
+
+    fn install_remote_utility_context(&self, ctx: &LuaTable) -> LuaResult<()> {
+        self.install_json_context(ctx)?;
+
+        let base64 = mlua_extra::base64::create_module(&self.lua)?;
+        ctx.set("base64_decode", base64.get::<LuaFunction>("decode")?)?;
+        ctx.set("base64", base64)?;
+
+        let time = mlua_extra::time::create_module(&self.lua)?;
+        ctx.set("time_unix", time.get::<LuaFunction>("unix")?)?;
+        ctx.set("time", time)?;
+        ctx.set("random", mlua_extra::random::create_module(&self.lua)?)
     }
 
     /// Build the `ctx` table passed to Lua callbacks.
@@ -967,7 +1973,7 @@ impl SourceManager {
             }
             Ok(paths)
         })?;
-        ctx.set("glob", glob_fn)?;
+        ctx.set("glob", glob_fn.clone())?;
 
         // ctx.list_dirs(path) -> list of subdirectory paths
         let list_dirs_fn = self.lua.create_function(|lua, path: String| {
@@ -985,13 +1991,13 @@ impl SourceManager {
             }
             Ok(dirs)
         })?;
-        ctx.set("list_dirs", list_dirs_fn)?;
+        ctx.set("list_dirs", list_dirs_fn.clone())?;
 
         // ctx.file_exists(path) -> bool
         let file_exists_fn = self
             .lua
             .create_function(|_, path: String| Ok(std::path::Path::new(&path).exists()))?;
-        ctx.set("file_exists", file_exists_fn)?;
+        ctx.set("file_exists", file_exists_fn.clone())?;
 
         // ctx.read_file(path) -> string|nil (capped at 1MB)
         let read_file_fn =
@@ -1004,7 +2010,7 @@ impl SourceManager {
                     },
                     Err(_) => Ok(mlua::Value::Nil),
                 })?;
-        ctx.set("read_file", read_file_fn)?;
+        ctx.set("read_file", read_file_fn.clone())?;
 
         // ctx.extension(path) -> string|nil
         let extension_fn = self.lua.create_function(|_, path: String| {
@@ -1013,7 +2019,7 @@ impl SourceManager {
                 .and_then(|e| e.to_str())
                 .map(String::from))
         })?;
-        ctx.set("extension", extension_fn)?;
+        ctx.set("extension", extension_fn.clone())?;
 
         // ctx.filename(path) -> string|nil
         let filename_fn = self.lua.create_function(|_, path: String| {
@@ -1025,7 +2031,7 @@ impl SourceManager {
         ctx.set("filename", filename_fn.clone())?;
 
         // ctx.basename(path) -> string|nil (same as filename on dirs)
-        ctx.set("basename", filename_fn)?;
+        ctx.set("basename", filename_fn.clone())?;
 
         // ctx.env(name) -> string|nil. Used for auto-detect probing of
         // well-known paths such as $HOME.
@@ -1034,8 +2040,8 @@ impl SourceManager {
             .create_function(|_, name: String| Ok(std::env::var(&name).ok()))?;
         ctx.set("env", env_fn)?;
 
-        // ctx.plugin_config(key) -> string|nil. Reads the plugin's
-        // `[plugin."<id>"]` table from config.toml. No-op without a settings store.
+        // ctx.plugin_config(key) -> string|nil. Reads the Lua source component's
+        // table from config.toml. No-op without a settings store.
         let cfg_settings = self.settings.clone();
         let cfg_plugin = plugin_name.map(str::to_owned);
         let plugin_config_fn = self.lua.create_function(move |_, key: String| {
@@ -1047,17 +2053,10 @@ impl SourceManager {
             };
             Ok(value)
         })?;
-        ctx.set("plugin_config", plugin_config_fn)?;
-
-        // ctx.steam_access_token() -> string|nil. The access token from the
-        // daemon-owned Steam sign-in, used to browse the workshop without a
-        // separate Web API key. Nil when signed out.
-        let steam_token_fn = self.lua.create_function(|_, ()| {
-            Ok(crate::steam_session::load()
-                .map(|s| s.access_token)
-                .filter(|t| !t.is_empty()))
-        })?;
-        ctx.set("steam_access_token", steam_token_fn)?;
+        ctx.set("plugin_config", plugin_config_fn.clone())?;
+        let config = self.lua.create_table()?;
+        config.set("get", plugin_config_fn)?;
+        ctx.set("config", config)?;
 
         // ctx.libraries() -> list of absolute library paths registered
         // for this plugin in the daemon DB.
@@ -1071,25 +2070,11 @@ impl SourceManager {
         })?;
         ctx.set("libraries", libraries_fn)?;
 
-        // ctx.json_parse(str) -> table|nil
-        let json_parse_fn =
-            self.lua.create_function(|lua, s: String| {
-                match serde_json::from_str::<serde_json::Value>(&s) {
-                    Ok(val) => json_to_lua(lua, &val),
-                    Err(_) => Ok(mlua::Value::Nil),
-                }
-            })?;
-        ctx.set("json_parse", json_parse_fn)?;
-
-        // ctx.json_encode(value) -> string|nil
-        let json_encode_fn = self.lua.create_function(|_, val: mlua::Value| {
-            Ok(lua_to_json(&val).and_then(|j| serde_json::to_string(&j).ok()))
-        })?;
-        ctx.set("json_encode", json_encode_fn)?;
+        self.install_json_context(&ctx)?;
 
         // ctx.log(msg)
         let log_fn = self.lua.create_function(|_, msg: String| {
-            log::info!("[lua] {msg}");
+            log::info!("[lua] {}", redact_secrets(&msg));
             Ok(())
         })?;
         ctx.set("log", log_fn)?;
@@ -1102,7 +2087,7 @@ impl SourceManager {
                 .and_then(|m| i64::try_from(m.len()).ok());
             Ok(bytes)
         })?;
-        ctx.set("file_size", file_size_fn)?;
+        ctx.set("file_size", file_size_fn.clone())?;
 
         // ctx.remove_file(path) -> bool
         let remove_file_fn =
@@ -1112,7 +2097,7 @@ impl SourceManager {
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
                     Err(e) => Err(mlua::Error::external(e)),
                 })?;
-        ctx.set("remove_file", remove_file_fn)?;
+        ctx.set("remove_file", remove_file_fn.clone())?;
 
         // ctx.remove_dir(path) -> bool. Recursively removes a directory, guarded
         // to the calling plugin's remote content dir (canonicalized, so `..` and
@@ -1139,7 +2124,20 @@ impl SourceManager {
                 Err(e) => Err(mlua::Error::external(e)),
             }
         })?;
-        ctx.set("remove_dir", remove_dir_fn)?;
+        ctx.set("remove_dir", remove_dir_fn.clone())?;
+
+        let fs = self.lua.create_table()?;
+        fs.set("glob", glob_fn)?;
+        fs.set("list_dirs", list_dirs_fn)?;
+        fs.set("exists", file_exists_fn)?;
+        fs.set("read", read_file_fn)?;
+        fs.set("extension", extension_fn)?;
+        fs.set("filename", filename_fn.clone())?;
+        fs.set("basename", filename_fn)?;
+        fs.set("size", file_size_fn)?;
+        fs.set("remove_file", remove_file_fn)?;
+        fs.set("remove_dir", remove_dir_fn)?;
+        ctx.set("fs", fs)?;
 
         // ctx.probe(path) -> table|nil
         // Returns present file/media fields, or nil if nothing was found.
@@ -1249,10 +2247,41 @@ impl SourceManager {
 
         // ctx.http is a fluent client:
         // ctx.http:get(url):headers({...}):send()
-        ctx.set("http", mlua_extra::http::default(WAYWALLEN_HTTP_USER_AGENT))?;
+        ctx.set("http", self.http_view())?;
         ctx.set("html", mlua_extra::html::create_module(&self.lua)?)?;
         ctx.set("url", mlua_extra::url::create_module(&self.lua)?)?;
 
+        Ok(ctx)
+    }
+
+    fn build_remote_ctx(&self, plugin_name: &str) -> Result<LuaTable> {
+        let ctx = self.lua.create_table()?;
+
+        let cfg_settings = self.settings.clone();
+        let cfg_plugin = plugin_name.to_owned();
+        let plugin_config = self.lua.create_function(move |_, key: String| {
+            Ok(cfg_settings
+                .as_ref()
+                .and_then(|store| store.plugin(&cfg_plugin))
+                .and_then(|values| values.get(&key).cloned()))
+        })?;
+        ctx.set("plugin_config", plugin_config.clone())?;
+        let config = self.lua.create_table()?;
+        config.set("get", plugin_config)?;
+        ctx.set("config", config)?;
+
+        self.install_remote_utility_context(&ctx)?;
+        let log_plugin = plugin_name.to_owned();
+        ctx.set(
+            "log",
+            self.lua.create_function(move |_, message: String| {
+                log::info!("[lua:{log_plugin}] {}", redact_secrets(&message));
+                Ok(())
+            })?,
+        )?;
+        ctx.set("http", self.http_view())?;
+        ctx.set("html", mlua_extra::html::create_module(&self.lua)?)?;
+        ctx.set("url", mlua_extra::url::create_module(&self.lua)?)?;
         Ok(ctx)
     }
 
@@ -1324,12 +2353,12 @@ impl SourceManager {
     /// Ask the plugin that produced `entry` for the CLI `extras`
     /// dictionary the daemon should pass to the renderer subprocess
     pub async fn call_extras(
-        &self,
+        &mut self,
         plugin_name: &str,
         entry: &WallpaperEntry,
     ) -> Result<HashMap<String, String>> {
-        let key = self
-            .plugins
+        let callbacks = self
+            .callbacks
             .get(plugin_name)
             .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
         let Some(info) = self.plugin_infos.get(plugin_name) else {
@@ -1342,9 +2371,12 @@ impl SourceManager {
         // Keep the Lua body in one block so failures map to one typed
         // SourceExtrasFailed carrying the plugin name.
         let body = async {
-            let module: LuaTable = self.lua.registry_value(key)?;
-            let wallpaper_api: LuaTable = module.get("wallpaper")?;
-            let extras_fn: LuaFunction = wallpaper_api.get("extras")?;
+            let extras_fn: LuaFunction = self.lua.registry_value(
+                callbacks
+                    .wallpaper_extras
+                    .as_ref()
+                    .ok_or_else(|| LuaError::external("module.wallpaper.extras required"))?,
+            )?;
             let entry_tbl = self
                 .wallpaper_entry_table(entry)
                 .map_err(mlua::Error::external)?;
@@ -1353,7 +2385,9 @@ impl SourceManager {
             let ctx = self
                 .build_ctx(Some(plugin_name), &[])
                 .map_err(mlua::Error::external)?;
-            let result: LuaTable = extras_fn.call_async((entry_tbl, ctx)).await?;
+            let result: LuaTable = self
+                .call_plugin_callback_async(plugin_name, &extras_fn, (entry_tbl, ctx))
+                .await?;
             let mut out = HashMap::new();
             for pair in result.pairs::<String, String>() {
                 let (k, v) = pair?;
@@ -1361,22 +2395,25 @@ impl SourceManager {
             }
             Ok(out)
         };
-        body.await
+        let result = body
+            .await
             .map_err(|e: mlua::Error| Error::SourceExtrasFailed {
                 plugin: plugin_name.to_string(),
-                message: e.to_string(),
-            })
+                message: redact_secrets(&e.to_string()),
+            })?;
+        self.persist_state(plugin_name)?;
+        Ok(result)
     }
 
     /// Ask the plugin that produced `entry` for the wallpaper's
     /// editable property schema as a JSON string.
     pub async fn call_properties(
-        &self,
+        &mut self,
         plugin_name: &str,
         entry: &WallpaperEntry,
     ) -> Result<Option<String>> {
-        let key = self
-            .plugins
+        let callbacks = self
+            .callbacks
             .get(plugin_name)
             .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
         let Some(info) = self.plugin_infos.get(plugin_name) else {
@@ -1385,25 +2422,34 @@ impl SourceManager {
         if !info.capabilities.wallpaper.properties {
             return Ok(None);
         }
-        let module: LuaTable = self.lua.registry_value(key)?;
-        let wallpaper_api: LuaTable = module.get("wallpaper")?;
-        let props_fn: LuaFunction = wallpaper_api.get("properties")?;
+        let props_fn: LuaFunction =
+            self.lua
+                .registry_value(callbacks.wallpaper_properties.as_ref().ok_or_else(|| {
+                    Error::Internal(anyhow!("module.wallpaper.properties required"))
+                })?)?;
         let entry_tbl = self.wallpaper_entry_table(entry)?;
         let ctx = self.build_ctx(Some(plugin_name), &[])?;
-        let result: mlua::Value = props_fn
-            .call_async((entry_tbl, ctx))
+        let result: mlua::Value = self
+            .call_plugin_callback_async(plugin_name, &props_fn, (entry_tbl, ctx))
             .await
-            .map_err(|e| Error::Internal(anyhow!("properties({plugin_name}): {e}")))?;
-        match result {
-            mlua::Value::Nil => Ok(None),
-            mlua::Value::String(s) => Ok(Some(s.to_str()?.to_string())),
-            other => Ok(lua_to_json(&other).map(|j| j.to_string())),
-        }
+            .map_err(|e| {
+                Error::Internal(anyhow!(
+                    "properties({plugin_name}): {}",
+                    redact_secrets(&e.to_string())
+                ))
+            })?;
+        let result = match result {
+            mlua::Value::Nil => None,
+            mlua::Value::String(s) => Some(s.to_str()?.to_string()),
+            other => mlua_extra::json::encode(&other),
+        };
+        self.persist_state(plugin_name)?;
+        Ok(result)
     }
 
     /// Ask every plugin that exports `auto_detect(ctx)` to probe
     /// well-known filesystem locations and report any that exist.
-    pub async fn auto_detect_all(&self) -> Result<HashMap<String, Vec<String>>> {
+    pub async fn auto_detect_all(&mut self) -> Result<HashMap<String, Vec<String>>> {
         let mut out: HashMap<String, Vec<String>> = HashMap::new();
         let empty: [String; 0] = [];
         let mut plugin_names: Vec<String> = self.plugin_infos.keys().cloned().collect();
@@ -1418,25 +2464,32 @@ impl SourceManager {
             if !source.auto_detect {
                 continue;
             }
-            let key = self
-                .plugins
+            let callbacks = self
+                .callbacks
                 .get(&name)
                 .ok_or_else(|| Error::SourcePluginNotFound(name.clone()))?;
-            let module: LuaTable = self.lua.registry_value(key)?;
-            let source_api: LuaTable = module.get("source")?;
-            let auto_fn: LuaFunction = source_api.get("auto_detect")?;
+            let auto_fn: LuaFunction =
+                self.lua
+                    .registry_value(callbacks.source_auto_detect.as_ref().ok_or_else(|| {
+                        Error::Internal(anyhow!("module.source.auto_detect required"))
+                    })?)?;
             let ctx = self.build_ctx(None, &empty)?;
-            let results: LuaTable = match auto_fn.call_async(ctx).await {
-                Ok(t) => t,
-                Err(e) => {
-                    log::warn!("auto_detect plugin {name}: {e}");
-                    continue;
-                }
-            };
+            let results: LuaTable =
+                match self.call_plugin_callback_async(&name, &auto_fn, ctx).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        log::warn!(
+                            "auto_detect plugin {name}: {}",
+                            redact_secrets(&e.to_string())
+                        );
+                        continue;
+                    }
+                };
             let paths: Vec<String> = results
                 .sequence_values::<String>()
                 .filter_map(|v| v.ok())
                 .collect();
+            self.persist_state(&name)?;
             if !paths.is_empty() {
                 out.insert(name, paths);
             }
@@ -1447,7 +2500,7 @@ impl SourceManager {
     // -----------------------------------------------------------------------
     // Discover API — generic remote browsing relayed into plugin Lua.
 
-    /// List plugins that opt into discovery and their declared sort/tag
+    /// List plugins that opt into discovery and their declared sort/filter
     /// options.
     pub fn discover_sources(&self) -> Result<Vec<DiscoverSourceInfo>> {
         let mut out = Vec::new();
@@ -1460,12 +2513,15 @@ impl SourceManager {
                 name: info.name.clone(),
                 display_name: info.display_name.clone(),
                 supports_search: disc.supports_search,
+                remote_capability: disc.remote,
+                remote_hint: disc.remote_hint.clone(),
                 sorts: disc.sorts.clone(),
-                tags: disc.tags.clone(),
+                filters: disc.filters.clone(),
                 owner_plugin_id: info.plugin_id.clone(),
                 settings: info.settings.clone(),
                 actions: info.actions.clone(),
                 status: info.status.clone(),
+                avatar_url: String::new(),
             });
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1475,23 +2531,26 @@ impl SourceManager {
     /// Relay a discover/search request to a plugin's `discover.search(ctx, params)`
     /// Lua function. `params` is `{ query, sort, page, tags }`.
     pub async fn call_discover(
-        &self,
+        &mut self,
         plugin_name: &str,
         query: &str,
         sort: &str,
         page: u32,
         tags: &[String],
     ) -> Result<DiscoverSearchResult> {
-        let key = self
-            .plugins
+        let callbacks = self
+            .callbacks
             .get(plugin_name)
             .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
         let Some(info) = self.plugin_infos.get(plugin_name) else {
             return Err(Error::SourcePluginNotFound(plugin_name.to_string()));
         };
-        if info.capabilities.discover.is_none() {
-            return Err(Error::DiscoverUnsupported(plugin_name.to_string()));
-        }
+        let discover = info
+            .capabilities
+            .discover
+            .as_ref()
+            .ok_or_else(|| Error::DiscoverUnsupported(plugin_name.to_string()))?;
+        Self::validate_discover_filter_values(plugin_name, discover, tags)?;
         let default_wp_type = info
             .capabilities
             .source
@@ -1499,11 +2558,12 @@ impl SourceManager {
             .and_then(|source| source.types.first())
             .cloned()
             .unwrap_or_default();
-        let module: LuaTable = self.lua.registry_value(key)?;
-        let discover_api: LuaTable = module.get("discover")?;
-        let discover_fn: LuaFunction = discover_api
-            .get("search")
-            .map_err(|_| Error::DiscoverUnsupported(plugin_name.to_string()))?;
+        let discover_fn: LuaFunction = self.lua.registry_value(
+            callbacks
+                .discover_search
+                .as_ref()
+                .ok_or_else(|| Error::DiscoverUnsupported(plugin_name.to_string()))?,
+        )?;
 
         let params = self.lua.create_table()?;
         params.set("query", query)?;
@@ -1515,15 +2575,14 @@ impl SourceManager {
         }
         params.set("tags", tags_tbl)?;
 
-        let ctx = self.build_ctx(Some(plugin_name), &[])?;
-        let result: LuaTable =
-            discover_fn
-                .call_async((ctx, params))
-                .await
-                .map_err(|e| Error::DiscoverFailed {
-                    plugin: plugin_name.to_string(),
-                    message: e.to_string(),
-                })?;
+        let ctx = self.build_remote_ctx(plugin_name)?;
+        let result: LuaTable = self
+            .call_plugin_callback_async(plugin_name, &discover_fn, (ctx, params))
+            .await
+            .map_err(|e| Error::DiscoverFailed {
+                plugin: plugin_name.to_string(),
+                message: redact_secrets(&e.to_string()),
+            })?;
 
         let mut items = Vec::new();
         let item_rows: LuaTable = result.get("items").map_err(|e| Error::DiscoverFailed {
@@ -1561,33 +2620,36 @@ impl SourceManager {
                 plugin: plugin_name.to_string(),
                 message: format!("discover.search result.has_more required: {e}"),
             })?;
+        self.persist_state(plugin_name)?;
         Ok(DiscoverSearchResult { items, has_more })
     }
 
-    /// Fetch a plugin's live filter taxonomy via its `discover.tags(ctx)` Lua
-    /// function.
-    pub async fn call_tags(&self, plugin_name: &str) -> Result<Vec<String>> {
-        let key = self
-            .plugins
+    /// Fetch a legacy plugin's live tag taxonomy via `discover.tags(ctx)`.
+    pub async fn call_tags(&mut self, plugin_name: &str) -> Result<Vec<String>> {
+        let callbacks = self
+            .callbacks
             .get(plugin_name)
             .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
-        let module: LuaTable = self.lua.registry_value(key)?;
-        let discover_api: LuaTable = module.get("discover")?;
-        let tags_fn: LuaFunction = discover_api
-            .get("tags")
-            .map_err(|_| Error::DiscoverUnsupported(plugin_name.to_string()))?;
-        let ctx = self.build_ctx(Some(plugin_name), &[])?;
-        tags_fn
-            .call_async(ctx)
+        let tags_fn: LuaFunction = self.lua.registry_value(
+            callbacks
+                .discover_tags
+                .as_ref()
+                .ok_or_else(|| Error::DiscoverUnsupported(plugin_name.to_string()))?,
+        )?;
+        let ctx = self.build_remote_ctx(plugin_name)?;
+        let tags = self
+            .call_plugin_callback_async(plugin_name, &tags_fn, ctx)
             .await
             .map_err(|e| Error::DiscoverFailed {
                 plugin: plugin_name.to_string(),
-                message: e.to_string(),
-            })
+                message: redact_secrets(&e.to_string()),
+            })?;
+        self.persist_state(plugin_name)?;
+        Ok(tags)
     }
 
-    /// Replace the declared filter tags of every plugin that supplies them
-    /// dynamically. Best-effort: a plugin whose fetch fails keeps its fallback.
+    /// Replace the compatibility filter of every legacy plugin that supplies
+    /// tags dynamically. Best-effort: a failed fetch keeps its fallback.
     pub async fn refresh_dynamic_tags(&mut self) {
         let names: Vec<String> = self
             .plugin_infos
@@ -1608,7 +2670,7 @@ impl SourceManager {
                         .get_mut(&name)
                         .and_then(|info| info.capabilities.discover.as_mut())
                     {
-                        disc.tags = tags;
+                        disc.filters = Self::legacy_discover_filter(tags);
                     }
                 }
                 Ok(_) => {}
@@ -1618,9 +2680,9 @@ impl SourceManager {
     }
 
     /// Relay a detail request to a plugin's `discover.details(ctx, id)` Lua function.
-    pub async fn call_details(&self, plugin_name: &str, id: &str) -> Result<DiscoverDetails> {
-        let key = self
-            .plugins
+    pub async fn call_details(&mut self, plugin_name: &str, id: &str) -> Result<DiscoverDetails> {
+        let callbacks = self
+            .callbacks
             .get(plugin_name)
             .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
         let Some(info) = self.plugin_infos.get(plugin_name) else {
@@ -1632,22 +2694,24 @@ impl SourceManager {
         if !discover.supports_details {
             return Err(Error::DiscoverUnsupported(plugin_name.to_string()));
         }
-        let module: LuaTable = self.lua.registry_value(key)?;
-        let discover_api: LuaTable = module.get("discover")?;
-        let details_fn: LuaFunction = discover_api
-            .get("details")
-            .map_err(|_| Error::DiscoverUnsupported(plugin_name.to_string()))?;
+        let details_fn: LuaFunction = self.lua.registry_value(
+            callbacks
+                .discover_details
+                .as_ref()
+                .ok_or_else(|| Error::DiscoverUnsupported(plugin_name.to_string()))?,
+        )?;
 
-        let ctx = self.build_ctx(Some(plugin_name), &[])?;
-        let result: LuaTable = details_fn
-            .call_async((ctx, id.to_string()))
+        let ctx = self.build_remote_ctx(plugin_name)?;
+        let result: LuaTable = self
+            .call_plugin_callback_async(plugin_name, &details_fn, (ctx, id.to_string()))
             .await
             .map_err(|e| Error::DiscoverFailed {
                 plugin: plugin_name.to_string(),
-                message: e.to_string(),
+                message: redact_secrets(&e.to_string()),
             })?;
 
-        Ok(DiscoverDetails {
+        let details = DiscoverDetails {
+            author: Self::optional_string(&result, "author", "module.discover.details result")?,
             description: Self::require_string(
                 &result,
                 "description",
@@ -1657,15 +2721,18 @@ impl SourceManager {
             width: result.get::<u32>("width").ok(),
             height: result.get::<u32>("height").ok(),
             tags: Self::require_string_sequence(&result, "tags", "module.discover.details result")?,
+            web_url: Self::optional_string(&result, "web_url", "module.discover.details result")?,
             extra: parse_lua_string_map(&result, "extra", "module.discover.details result")?,
-        })
+        };
+        self.persist_state(plugin_name)?;
+        Ok(details)
     }
 
     /// Relay a download-resolution request to a plugin's
     /// `discover.download(ctx, id)` function. The daemon owns the actual file transfer.
-    pub async fn call_download(&self, plugin_name: &str, id: &str) -> Result<DiscoverDownload> {
-        let key = self
-            .plugins
+    pub async fn call_download(&mut self, plugin_name: &str, id: &str) -> Result<DiscoverDownload> {
+        let callbacks = self
+            .callbacks
             .get(plugin_name)
             .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
         let Some(info) = self.plugin_infos.get(plugin_name) else {
@@ -1677,26 +2744,23 @@ impl SourceManager {
         if !discover.supports_download {
             return Err(Error::DiscoverUnsupported(plugin_name.to_string()));
         }
-        let module: LuaTable = self.lua.registry_value(key)?;
-        let discover_api: LuaTable = module.get("discover")?;
-        let download_fn: LuaFunction = discover_api
-            .get("download")
-            .map_err(|_| Error::DiscoverUnsupported(plugin_name.to_string()))?;
+        let download_fn: LuaFunction = self.lua.registry_value(
+            callbacks
+                .discover_download
+                .as_ref()
+                .ok_or_else(|| Error::DiscoverUnsupported(plugin_name.to_string()))?,
+        )?;
 
-        let ctx = self.build_ctx(Some(plugin_name), &[])?;
-        let result: LuaTable = download_fn
-            .call_async((ctx, id.to_string()))
+        let ctx = self.build_remote_ctx(plugin_name)?;
+        let result: LuaTable = self
+            .call_plugin_callback_async(plugin_name, &download_fn, (ctx, id.to_string()))
             .await
             .map_err(|e| Error::DiscoverFailed {
                 plugin: plugin_name.to_string(),
-                message: e.to_string(),
+                message: redact_secrets(&e.to_string()),
             })?;
 
-        // url/filename are optional: only the http provider needs them (validated
-        // in the download pipeline), so directory providers can omit them.
-        let provider =
-            Self::optional_string(&result, "provider", "module.discover.download result")?;
-        Ok(DiscoverDownload {
+        let download = DiscoverDownload {
             wp_type: Self::require_string(&result, "wp_type", "module.discover.download result")?,
             url: Self::optional_string(&result, "url", "module.discover.download result")?,
             filename: Self::optional_string(
@@ -1729,24 +2793,21 @@ impl SourceManager {
             width: result.get::<u32>("width").ok(),
             height: result.get::<u32>("height").ok(),
             content_rating: result.get::<String>("content_rating").ok(),
-            provider: if provider.is_empty() {
-                None
-            } else {
-                Some(provider)
-            },
-        })
+        };
+        self.persist_state(plugin_name)?;
+        Ok(download)
     }
 
     /// Classify a directory fetched by a download provider. `dir` is the absolute
     /// path of the fetched item directory; returned paths are relative to it.
     pub async fn call_resolve(
-        &self,
+        &mut self,
         plugin_name: &str,
         id: &str,
         dir: &str,
     ) -> Result<DiscoverResolve> {
-        let key = self
-            .plugins
+        let callbacks = self
+            .callbacks
             .get(plugin_name)
             .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
         let Some(info) = self.plugin_infos.get(plugin_name) else {
@@ -1758,26 +2819,26 @@ impl SourceManager {
         if !discover.supports_resolve {
             return Err(Error::DiscoverUnsupported(plugin_name.to_string()));
         }
-        let module: LuaTable = self.lua.registry_value(key)?;
-        let discover_api: LuaTable = module.get("discover")?;
-        let resolve_fn: LuaFunction = discover_api
-            .get("resolve")
-            .map_err(|_| Error::DiscoverUnsupported(plugin_name.to_string()))?;
+        let resolve_fn: LuaFunction = self.lua.registry_value(
+            callbacks
+                .discover_resolve
+                .as_ref()
+                .ok_or_else(|| Error::DiscoverUnsupported(plugin_name.to_string()))?,
+        )?;
 
         let ctx = self.build_ctx(Some(plugin_name), &[])?;
         let params = self.lua.create_table()?;
         params.set("id", id.to_string())?;
         params.set("dir", dir.to_string())?;
-        let result: LuaTable =
-            resolve_fn
-                .call_async((ctx, params))
-                .await
-                .map_err(|e| Error::ResolveFailed {
-                    plugin: plugin_name.to_string(),
-                    message: e.to_string(),
-                })?;
+        let result: LuaTable = self
+            .call_plugin_callback_async(plugin_name, &resolve_fn, (ctx, params))
+            .await
+            .map_err(|e| Error::ResolveFailed {
+                plugin: plugin_name.to_string(),
+                message: redact_secrets(&e.to_string()),
+            })?;
 
-        Ok(DiscoverResolve {
+        let resolved = DiscoverResolve {
             name: Self::require_string(&result, "name", "module.discover.resolve result")?,
             wp_type: Self::require_string(&result, "wp_type", "module.discover.resolve result")?,
             resource: Self::require_string(&result, "resource", "module.discover.resolve result")?,
@@ -1802,7 +2863,484 @@ impl SourceManager {
             )?,
             size: result.get::<i64>("size").ok(),
             content_rating: result.get::<String>("content_rating").ok(),
+        };
+        self.persist_state(plugin_name)?;
+        Ok(resolved)
+    }
+
+    pub async fn check_lifecycle(
+        &mut self,
+        plugin_name: &str,
+    ) -> Result<Option<PluginLifecycleCheck>> {
+        let info = self
+            .plugin_infos
+            .get(plugin_name)
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+        if !info.capabilities.lifecycle {
+            return Ok(None);
+        }
+        let callbacks = self
+            .callbacks
+            .get(plugin_name)
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+        let check_fn: LuaFunction = self.lua.registry_value(
+            callbacks
+                .lifecycle_check
+                .as_ref()
+                .ok_or_else(|| Error::Internal(anyhow!("module.lifecycle.check required")))?,
+        )?;
+        let ctx = self.build_remote_ctx(plugin_name)?;
+        let result: LuaTable = self
+            .call_plugin_callback_async(plugin_name, &check_fn, ctx)
+            .await
+            .map_err(|error| Error::DiscoverFailed {
+                plugin: plugin_name.to_string(),
+                message: redact_secrets(&error.to_string()),
+            })?;
+        let state_name = Self::require_string(&result, "state", "module.lifecycle.check result")?;
+        let state = match state_name.as_str() {
+            "signed_out" => PluginLifecycleState::SignedOut,
+            "signed_in" => PluginLifecycleState::SignedIn,
+            "expired" => PluginLifecycleState::Expired,
+            "error" => PluginLifecycleState::Error,
+            _ => {
+                return Err(Error::Internal(anyhow!(
+                    "module.lifecycle.check returned unknown state '{state_name}'"
+                )))
+            }
+        };
+        let checked = PluginLifecycleCheck {
+            state,
+            display_value: Self::optional_string(
+                &result,
+                "display_value",
+                "module.lifecycle.check result",
+            )?,
+            error: redact_secrets(&Self::optional_string(
+                &result,
+                "error",
+                "module.lifecycle.check result",
+            )?),
+            avatar_url: Self::optional_string(
+                &result,
+                "avatar_url",
+                "module.lifecycle.check result",
+            )?,
+        };
+        self.persist_state(plugin_name)?;
+        Ok(Some(checked))
+    }
+
+    pub async fn call_action_status(
+        &mut self,
+        plugin_name: &str,
+    ) -> Result<(Vec<SourceAction>, Vec<SourceStatus>, String)> {
+        let avatar_url = self
+            .check_lifecycle(plugin_name)
+            .await?
+            .map(|checked| checked.avatar_url)
+            .unwrap_or_default();
+        let info = self
+            .plugin_infos
+            .get(plugin_name)
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?
+            .clone();
+        let mut actions = info.actions;
+        let mut status = info.status;
+        let callbacks = self
+            .callbacks
+            .get(plugin_name)
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+        let Some(status_key) = callbacks.actions_status.as_ref() else {
+            return Ok((actions, status, avatar_url));
+        };
+        let status_fn: LuaFunction = self.lua.registry_value(status_key)?;
+        let ctx = self.build_remote_ctx(plugin_name)?;
+        let result: LuaTable = self
+            .call_plugin_callback_async(plugin_name, &status_fn, ctx)
+            .await
+            .map_err(|error| Error::DiscoverFailed {
+                plugin: plugin_name.to_string(),
+                message: redact_secrets(&error.to_string()),
+            })?;
+
+        if let Some(values) =
+            Self::optional_table(&result, "status", "module.actions.status result")?
+        {
+            for row in &mut status {
+                row.value = values.get::<String>(row.id.as_str()).unwrap_or_default();
+            }
+        }
+        if let Some(values) =
+            Self::optional_table(&result, "actions", "module.actions.status result")?
+        {
+            for action in &mut actions {
+                if let Ok(state) = values.get::<LuaTable>(action.id.as_str()) {
+                    action.visible = Self::optional_bool(
+                        &state,
+                        "visible",
+                        "module.actions.status result.actions",
+                        true,
+                    )?;
+                    action.enabled = Self::optional_bool(
+                        &state,
+                        "enabled",
+                        "module.actions.status result.actions",
+                        true,
+                    )?;
+                }
+            }
+        }
+        self.persist_state(plugin_name)?;
+        Ok((actions, status, avatar_url))
+    }
+
+    pub async fn invoke_action(
+        &mut self,
+        plugin_name: &str,
+        action_id: &str,
+        values: &HashMap<String, String>,
+    ) -> Result<()> {
+        let info = self
+            .plugin_infos
+            .get(plugin_name)
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+        let action = info
+            .actions
+            .iter()
+            .find(|action| action.id == action_id)
+            .cloned()
+            .ok_or_else(|| {
+                Error::InvalidArgument(format!(
+                    "plugin action '{plugin_name}:{action_id}' is not invokable"
+                ))
+            })?;
+        if !matches!(
+            action.kind,
+            SourceActionKind::Invoke | SourceActionKind::Form
+        ) {
+            return Err(Error::InvalidArgument(format!(
+                "plugin action '{plugin_name}:{action_id}' is not invokable"
+            )));
+        }
+        if action.kind == SourceActionKind::Form {
+            let fields: HashMap<_, _> = action
+                .fields
+                .iter()
+                .map(|field| (field.key.as_str(), field))
+                .collect();
+            for key in values.keys() {
+                if !fields.contains_key(key.as_str()) {
+                    return Err(Error::InvalidArgument(format!(
+                        "plugin action '{plugin_name}:{action_id}' has no field '{key}'"
+                    )));
+                }
+            }
+            for field in &action.fields {
+                if field.required && values.get(&field.key).map_or(true, String::is_empty) {
+                    return Err(Error::InvalidArgument(format!(
+                        "plugin action '{plugin_name}:{action_id}' requires field '{}'",
+                        field.key
+                    )));
+                }
+            }
+        } else if !values.is_empty() {
+            return Err(Error::InvalidArgument(format!(
+                "plugin action '{plugin_name}:{action_id}' does not accept fields"
+            )));
+        }
+        let callbacks = self
+            .callbacks
+            .get(plugin_name)
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+        let invoke_fn: LuaFunction = self.lua.registry_value(
+            callbacks
+                .actions_invoke
+                .as_ref()
+                .ok_or_else(|| Error::InvalidArgument("plugin action is unsupported".into()))?,
+        )?;
+        let ctx = self.build_remote_ctx(plugin_name)?;
+        let value_table = self.lua.create_table()?;
+        for (key, value) in values {
+            value_table.set(key.as_str(), value.as_str())?;
+        }
+        self.call_plugin_callback_async::<()>(
+            plugin_name,
+            &invoke_fn,
+            (ctx, action_id.to_string(), value_table),
+        )
+        .await
+        .map_err(|error| Error::DiscoverFailed {
+            plugin: plugin_name.to_string(),
+            message: redact_secrets(&error.to_string()),
+        })?;
+        self.persist_state(plugin_name)
+    }
+
+    pub async fn begin_qr_login(
+        &mut self,
+        plugin_name: &str,
+        action_id: &str,
+    ) -> Result<QrLoginBegin> {
+        let info = self
+            .plugin_infos
+            .get(plugin_name)
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+        if !info
+            .actions
+            .iter()
+            .any(|action| action.id == action_id && action.kind == SourceActionKind::QrLogin)
+        {
+            return Err(Error::InvalidArgument(format!(
+                "plugin action '{plugin_name}:{action_id}' is not a QR login"
+            )));
+        }
+        let callbacks = self
+            .callbacks
+            .get(plugin_name)
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+        let begin_fn: LuaFunction = self.lua.registry_value(
+            callbacks
+                .qrlogin_begin
+                .as_ref()
+                .ok_or_else(|| Error::InvalidArgument("QR login is unsupported".into()))?,
+        )?;
+        let ctx = self.build_remote_ctx(plugin_name)?;
+        let result: LuaTable = self
+            .call_plugin_callback_async(plugin_name, &begin_fn, (ctx, action_id.to_string()))
+            .await
+            .map_err(|error| Error::DiscoverFailed {
+                plugin: plugin_name.to_string(),
+                message: redact_secrets(&error.to_string()),
+            })?;
+        let key = result
+            .get::<LuaValue>("key")
+            .map_err(|error| Error::Internal(anyhow!("qrlogin.begin result.key: {error}")))?;
+        if matches!(key, LuaValue::Nil) {
+            return Err(Error::Internal(anyhow!(
+                "qrlogin.begin result.key must not be nil"
+            )));
+        }
+        let challenge = Self::require_string(&result, "challenge", "qrlogin.begin result")?;
+        let poll_after_ms = result.get::<Option<u64>>("poll_after_ms")?.unwrap_or(1000);
+        let expires_in_ms = result.get::<Option<u64>>("expires_in_ms")?;
+        let title = Self::optional_string(&result, "title", "qrlogin.begin result")?;
+        let instruction = Self::optional_string(&result, "instruction", "qrlogin.begin result")?;
+        let operation_id = self.next_qr_operation_id;
+        self.next_qr_operation_id = self.next_qr_operation_id.wrapping_add(1).max(1);
+        self.qr_operations
+            .insert(operation_id, self.lua.create_registry_value(key)?);
+        Ok(QrLoginBegin {
+            operation_id,
+            challenge,
+            poll_after_ms,
+            expires_in_ms,
+            title,
+            instruction,
         })
+    }
+
+    pub async fn poll_qr_login(
+        &mut self,
+        plugin_name: &str,
+        operation_id: u64,
+    ) -> Result<QrLoginPoll> {
+        let callbacks = self
+            .callbacks
+            .get(plugin_name)
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+        let poll_fn: LuaFunction = self.lua.registry_value(
+            callbacks
+                .qrlogin_poll
+                .as_ref()
+                .ok_or_else(|| Error::InvalidArgument("QR login is unsupported".into()))?,
+        )?;
+        let key = self
+            .qr_operations
+            .get(&operation_id)
+            .ok_or_else(|| Error::InvalidArgument("QR login operation is not active".into()))?;
+        let opaque: LuaValue = self.lua.registry_value(key)?;
+        let ctx = self.build_remote_ctx(plugin_name)?;
+        let result: LuaTable = self
+            .call_plugin_callback_async(plugin_name, &poll_fn, (ctx, opaque))
+            .await
+            .map_err(|error| Error::DiscoverFailed {
+                plugin: plugin_name.to_string(),
+                message: redact_secrets(&error.to_string()),
+            })?;
+        let state_name = Self::require_string(&result, "state", "qrlogin.poll result")?;
+        let state = match state_name.as_str() {
+            "awaiting_scan" => QrLoginPollState::AwaitingScan,
+            "awaiting_confirmation" => QrLoginPollState::AwaitingConfirmation,
+            "challenge_changed" => QrLoginPollState::ChallengeChanged,
+            "succeeded" => QrLoginPollState::Succeeded,
+            "expired" => QrLoginPollState::Expired,
+            "failed" => QrLoginPollState::Failed,
+            _ => {
+                return Err(Error::Internal(anyhow!(
+                    "qrlogin.poll returned unknown state '{state_name}'"
+                )))
+            }
+        };
+        if matches!(
+            state,
+            QrLoginPollState::Succeeded | QrLoginPollState::Expired | QrLoginPollState::Failed
+        ) {
+            if let Some(key) = self.qr_operations.remove(&operation_id) {
+                self.lua.remove_registry_value(key)?;
+            }
+        }
+        if state == QrLoginPollState::Succeeded {
+            self.persist_state(plugin_name)?;
+        }
+        Ok(QrLoginPoll {
+            state,
+            challenge: Self::optional_string(&result, "challenge", "qrlogin.poll result")?,
+            poll_after_ms: result.get::<Option<u64>>("poll_after_ms")?,
+            display_value: Self::optional_string(&result, "display_value", "qrlogin.poll result")?,
+            error: redact_secrets(&Self::optional_string(
+                &result,
+                "error",
+                "qrlogin.poll result",
+            )?),
+        })
+    }
+
+    pub async fn cancel_qr_login(&mut self, plugin_name: &str, operation_id: u64) -> Result<()> {
+        let Some(key) = self.qr_operations.remove(&operation_id) else {
+            return Ok(());
+        };
+        let opaque: LuaValue = self.lua.registry_value(&key)?;
+        let callback_result = if let Some(cancel_key) = self
+            .callbacks
+            .get(plugin_name)
+            .and_then(|callbacks| callbacks.qrlogin_cancel.as_ref())
+        {
+            let cancel_fn: LuaFunction = self.lua.registry_value(cancel_key)?;
+            let ctx = self.build_remote_ctx(plugin_name)?;
+            self.call_plugin_callback_async::<()>(plugin_name, &cancel_fn, (ctx, opaque))
+                .await
+                .map_err(|error| Error::DiscoverFailed {
+                    plugin: plugin_name.to_string(),
+                    message: redact_secrets(&error.to_string()),
+                })
+        } else {
+            Ok(())
+        };
+        let remove_result = self.lua.remove_registry_value(key);
+        callback_result?;
+        remove_result?;
+        Ok(())
+    }
+
+    pub async fn subscription_status(
+        &mut self,
+        plugin_name: &str,
+        ids: &[String],
+    ) -> Result<Vec<SubscriptionItemState>> {
+        self.require_remote_capability(plugin_name, RemoteCapability::Subscription)?;
+        let callbacks = self
+            .callbacks
+            .get(plugin_name)
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+        let status_fn: LuaFunction = self.lua.registry_value(
+            callbacks
+                .subscription_status
+                .as_ref()
+                .ok_or_else(|| Error::DiscoverUnsupported(plugin_name.to_string()))?,
+        )?;
+        let id_table = self.lua.create_table()?;
+        for (index, id) in ids.iter().enumerate() {
+            id_table.set(index + 1, id.clone())?;
+        }
+        let ctx = self.build_remote_ctx(plugin_name)?;
+        let result: LuaTable = self
+            .call_plugin_callback_async(plugin_name, &status_fn, (ctx, id_table))
+            .await
+            .map_err(|error| Error::DiscoverFailed {
+                plugin: plugin_name.to_string(),
+                message: redact_secrets(&error.to_string()),
+            })?;
+        let mut states = Vec::with_capacity(ids.len());
+        for id in ids {
+            let value = result.get::<String>(id.as_str()).unwrap_or_default();
+            let state = match value.as_str() {
+                "subscribed" => SubscriptionState::Subscribed,
+                "unsubscribed" => SubscriptionState::Unsubscribed,
+                _ => SubscriptionState::Unknown,
+            };
+            states.push(SubscriptionItemState {
+                id: id.clone(),
+                state,
+            });
+        }
+        self.persist_state(plugin_name)?;
+        Ok(states)
+    }
+
+    pub async fn set_subscription(
+        &mut self,
+        plugin_name: &str,
+        id: &str,
+        subscribed: bool,
+    ) -> Result<()> {
+        self.require_remote_capability(plugin_name, RemoteCapability::Subscription)?;
+        let callbacks = self
+            .callbacks
+            .get(plugin_name)
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
+        let callback = if subscribed {
+            callbacks.subscription_subscribe.as_ref()
+        } else {
+            callbacks.subscription_unsubscribe.as_ref()
+        }
+        .ok_or_else(|| Error::DiscoverUnsupported(plugin_name.to_string()))?;
+        let function: LuaFunction = self.lua.registry_value(callback)?;
+        let ctx = self.build_remote_ctx(plugin_name)?;
+        let result: LuaTable = self
+            .call_plugin_callback_async(plugin_name, &function, (ctx, id.to_string()))
+            .await
+            .map_err(|error| Error::DiscoverFailed {
+                plugin: plugin_name.to_string(),
+                message: redact_secrets(&error.to_string()),
+            })?;
+        let accepted = result
+            .get::<bool>("accepted")
+            .map_err(|error| Error::DiscoverFailed {
+                plugin: plugin_name.to_string(),
+                message: format!("subscription mutation result.accepted required: {error}"),
+            })?;
+        if !accepted {
+            let message =
+                Self::optional_string(&result, "error", "module.subscription mutation result")?;
+            return Err(Error::DiscoverFailed {
+                plugin: plugin_name.to_string(),
+                message: if message.is_empty() {
+                    "subscription mutation was not accepted".into()
+                } else {
+                    redact_secrets(&message)
+                },
+            });
+        }
+        self.persist_state(plugin_name)
+    }
+
+    fn require_remote_capability(
+        &self,
+        plugin_name: &str,
+        expected: RemoteCapability,
+    ) -> Result<()> {
+        let actual = self
+            .plugin_infos
+            .get(plugin_name)
+            .and_then(|info| info.capabilities.discover.as_ref())
+            .and_then(|discover| discover.remote);
+        if actual != Some(expected) {
+            return Err(Error::InvalidArgument(format!(
+                "remote capability mismatch for '{plugin_name}': expected {expected:?}, got {actual:?}"
+            )));
+        }
+        Ok(())
     }
 
     pub fn plugins(&self) -> Result<Vec<SourcePluginInfo>> {
@@ -1833,13 +3371,13 @@ impl SourceManager {
     }
 
     pub async fn remove_item(
-        &self,
+        &mut self,
         plugin_name: &str,
         entry: &WallpaperEntry,
         libraries: &[String],
     ) -> Result<()> {
-        let key = self
-            .plugins
+        let callbacks = self
+            .callbacks
             .get(plugin_name)
             .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
         let Some(info) = self.plugin_infos.get(plugin_name) else {
@@ -1849,28 +3387,753 @@ impl SourceManager {
             return Err(Error::SourceItemRemoveUnsupported(plugin_name.to_string()));
         }
 
-        let module: LuaTable = self.lua.registry_value(key)?;
-        let source_api: LuaTable = module
-            .get("source")
-            .map_err(|_| Error::SourceItemRemoveUnsupported(plugin_name.to_string()))?;
-        let remove_fn: LuaFunction = source_api
-            .get("remove")
-            .map_err(|_| Error::SourceItemRemoveUnsupported(plugin_name.to_string()))?;
+        let remove_fn: LuaFunction = self.lua.registry_value(
+            callbacks
+                .source_remove
+                .as_ref()
+                .ok_or_else(|| Error::SourceItemRemoveUnsupported(plugin_name.to_string()))?,
+        )?;
         let ctx = self.build_ctx(Some(plugin_name), libraries)?;
         let entry_tbl = self.wallpaper_entry_table(entry)?;
-        remove_fn
-            .call_async::<()>((ctx, entry_tbl))
+        self.call_plugin_callback_async::<()>(plugin_name, &remove_fn, (ctx, entry_tbl))
             .await
             .map_err(|e| Error::SourceItemRemoveFailed {
                 plugin: plugin_name.to_string(),
-                message: e.to_string(),
-            })
+                message: redact_secrets(&e.to_string()),
+            })?;
+        self.persist_state(plugin_name)?;
+        Ok(())
     }
 
     pub fn plugin_version(&self, plugin_name: &str) -> Option<String> {
         self.plugin_infos
             .get(plugin_name)
             .map(|info| info.version.clone())
+    }
+}
+
+impl Drop for LuaPluginRuntime {
+    fn drop(&mut self) {
+        self.persist_all_http_sessions();
+    }
+}
+
+#[derive(Default)]
+pub struct SourceCatalog {
+    entries: Vec<WallpaperEntry>,
+    by_type: HashMap<WallpaperType, Vec<usize>>,
+}
+
+impl SourceCatalog {
+    fn replace(&mut self, entries: Vec<WallpaperEntry>) {
+        self.by_type.clear();
+        for (idx, entry) in entries.iter().enumerate() {
+            self.by_type
+                .entry(entry.wp_type.clone())
+                .or_default()
+                .push(idx);
+        }
+        self.entries = entries;
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.by_type.clear();
+    }
+}
+
+struct PluginHandle {
+    runtime: Arc<tokio::sync::Mutex<LuaPluginRuntime>>,
+    info: StdRwLock<LoadedPluginInfo>,
+    generation_state: Arc<AtomicU8>,
+}
+
+/// Registry and source catalog for Lua plugins.
+///
+/// Each plugin owns its Lua VM and async mutex. Registry/catalog locks are only
+/// held while cloning handles or replacing snapshots, so callbacks belonging to
+/// different plugins can make progress concurrently.
+pub struct LuaPluginRegistry {
+    plugins: StdRwLock<HashMap<String, Arc<PluginHandle>>>,
+    catalog: StdRwLock<SourceCatalog>,
+    probe: Arc<dyn MediaProbe>,
+    db: StdRwLock<Option<DatabaseConnection>>,
+    settings: StdRwLock<Option<Arc<crate::settings::SettingsStore>>>,
+    state_store: crate::plugin::state_store::PluginStateStore,
+}
+
+pub type SourceManager = LuaPluginRegistry;
+
+impl LuaPluginRegistry {
+    pub fn new() -> Result<Self> {
+        Self::with_probe(Arc::new(AvFormatProbe::new()))
+    }
+
+    pub fn with_probe(probe: Arc<dyn MediaProbe>) -> Result<Self> {
+        Self::with_probe_and_state_store(
+            probe,
+            crate::plugin::state_store::PluginStateStore::standard(),
+        )
+    }
+
+    fn with_probe_and_state_store(
+        probe: Arc<dyn MediaProbe>,
+        state_store: crate::plugin::state_store::PluginStateStore,
+    ) -> Result<Self> {
+        Ok(Self {
+            plugins: StdRwLock::new(HashMap::new()),
+            catalog: StdRwLock::new(SourceCatalog::default()),
+            probe,
+            db: StdRwLock::new(None),
+            settings: StdRwLock::new(None),
+            state_store,
+        })
+    }
+
+    pub fn attach_db(&self, db: DatabaseConnection) {
+        *self.db.write().expect("plugin DB lock poisoned") = Some(db);
+    }
+
+    pub fn attach_settings(&self, settings: Arc<crate::settings::SettingsStore>) {
+        *self
+            .settings
+            .write()
+            .expect("plugin settings lock poisoned") = Some(settings);
+    }
+
+    pub fn clear_plugins(&self) {
+        let mut plugins = self.plugins.write().expect("plugin registry lock poisoned");
+        for handle in plugins.values() {
+            handle
+                .generation_state
+                .store(RUNTIME_INACTIVE, Ordering::Release);
+        }
+        plugins.clear();
+        drop(plugins);
+        self.catalog
+            .write()
+            .expect("source catalog lock poisoned")
+            .clear();
+    }
+
+    pub async fn suspend_plugins(&self) {
+        let handles = self.handles();
+        for (_, handle) in &handles {
+            handle
+                .generation_state
+                .store(RUNTIME_DRAINING, Ordering::Release);
+        }
+        for (_, handle) in handles {
+            let _runtime = handle.runtime.lock().await;
+        }
+    }
+
+    pub fn resume_plugins(&self) {
+        for (_, handle) in self.handles() {
+            let _ = handle.generation_state.compare_exchange(
+                RUNTIME_DRAINING,
+                RUNTIME_ACTIVE,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+    }
+
+    pub fn retain_plugins_from(&self, current: &Self, plugin_ids: &HashSet<String>) -> Result<()> {
+        let current = current
+            .plugins
+            .read()
+            .expect("plugin registry lock poisoned");
+        let mut replacement = self.plugins.write().expect("plugin registry lock poisoned");
+        for (name, handle) in current.iter() {
+            let plugin_id = &handle
+                .info
+                .read()
+                .expect("plugin info lock poisoned")
+                .plugin_id;
+            if !plugin_ids.contains(plugin_id) {
+                continue;
+            }
+            if replacement.contains_key(name) {
+                return Err(Error::Internal(anyhow!(
+                    "duplicate retained Lua plugin name '{name}'"
+                )));
+            }
+            replacement.insert(name.clone(), handle.clone());
+        }
+        Ok(())
+    }
+
+    pub fn replace_plugins(&self, replacement: Self) -> Result<()> {
+        let plugins = replacement
+            .plugins
+            .into_inner()
+            .map_err(|_| Error::Internal(anyhow!("replacement plugin registry lock poisoned")))?;
+        let catalog = replacement
+            .catalog
+            .into_inner()
+            .map_err(|_| Error::Internal(anyhow!("replacement source catalog lock poisoned")))?;
+        let mut current = self.plugins.write().expect("plugin registry lock poisoned");
+        for handle in current.values() {
+            handle
+                .generation_state
+                .store(RUNTIME_INACTIVE, Ordering::Release);
+        }
+        *current = plugins;
+        for handle in current.values() {
+            handle
+                .generation_state
+                .store(RUNTIME_ACTIVE, Ordering::Release);
+        }
+        drop(current);
+        *self.catalog.write().expect("source catalog lock poisoned") = catalog;
+        Ok(())
+    }
+
+    pub fn load_plugin(
+        &self,
+        path: &Path,
+        plugin_id: &str,
+        plugin_version: &str,
+        entry_version: u32,
+    ) -> Result<String> {
+        let mut runtime = LuaPluginRuntime::with_probe(self.probe.clone())?;
+        runtime.state_store = self.state_store.clone();
+        if let Some(db) = self.db.read().expect("plugin DB lock poisoned").clone() {
+            runtime.attach_db(db);
+        }
+        if let Some(settings) = self
+            .settings
+            .read()
+            .expect("plugin settings lock poisoned")
+            .clone()
+        {
+            runtime.attach_settings(settings);
+        }
+        let name = runtime.load_plugin(path, plugin_id, plugin_version, entry_version)?;
+        let info = runtime
+            .plugin_infos
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| Error::SourcePluginNotFound(name.clone()))?;
+        let generation_state = runtime.generation_state.clone();
+        let handle = Arc::new(PluginHandle {
+            runtime: Arc::new(tokio::sync::Mutex::new(runtime)),
+            info: StdRwLock::new(info),
+            generation_state,
+        });
+        let mut plugins = self.plugins.write().expect("plugin registry lock poisoned");
+        if plugins.contains_key(&name) {
+            return Err(Error::Internal(anyhow!(
+                "duplicate Lua plugin name '{name}'"
+            )));
+        }
+        plugins.insert(name.clone(), handle);
+        Ok(name)
+    }
+
+    fn handle(&self, plugin_name: &str) -> Result<Arc<PluginHandle>> {
+        self.plugins
+            .read()
+            .expect("plugin registry lock poisoned")
+            .get(plugin_name)
+            .cloned()
+            .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))
+    }
+
+    fn handles(&self) -> Vec<(String, Arc<PluginHandle>)> {
+        self.plugins
+            .read()
+            .expect("plugin registry lock poisoned")
+            .iter()
+            .map(|(name, handle)| (name.clone(), handle.clone()))
+            .collect()
+    }
+
+    pub async fn scan_all(&self, libs_by_plugin: &HashMap<String, Vec<String>>) -> Result<()> {
+        let scans = self.handles().into_iter().filter_map(|(name, handle)| {
+            let has_source = handle
+                .info
+                .read()
+                .expect("plugin info lock poisoned")
+                .capabilities
+                .source
+                .is_some();
+            has_source.then(|| {
+                let libraries = libs_by_plugin.get(&name).cloned().unwrap_or_default();
+                async move {
+                    let mut runtime = handle.runtime.lock().await;
+                    let mut only_this = HashMap::new();
+                    only_this.insert(name.clone(), libraries);
+                    runtime.scan_all(&only_this).await?;
+                    Ok::<_, Error>(runtime.list().to_vec())
+                }
+            })
+        });
+        let results = futures_util::future::join_all(scans).await;
+        let mut entries = Vec::new();
+        // The catalog is still replaced with whatever the healthy plugins
+        // returned, so one broken source does not hide the rest. The failures
+        // are reported afterwards: a scan that failed must not be presented as
+        // a scan that simply found nothing.
+        let mut failures: Vec<String> = Vec::new();
+        for result in results {
+            match result {
+                Ok(mut plugin_entries) => entries.append(&mut plugin_entries),
+                Err(e) => {
+                    log::warn!("scan Lua plugin failed: {e}");
+                    failures.push(format!("{e:#}"));
+                }
+            }
+        }
+        entries.sort_by(|a, b| {
+            a.plugin_name
+                .cmp(&b.plugin_name)
+                .then_with(|| a.resource.cmp(&b.resource))
+        });
+        self.catalog
+            .write()
+            .expect("source catalog lock poisoned")
+            .replace(entries);
+        if !failures.is_empty() {
+            return Err(Error::Internal(anyhow!(
+                "source scan failed: {}",
+                failures.join("; ")
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn list(&self) -> Vec<WallpaperEntry> {
+        self.catalog
+            .read()
+            .expect("source catalog lock poisoned")
+            .entries
+            .clone()
+    }
+
+    pub fn list_by_type(&self, wp_type: &str) -> Vec<WallpaperEntry> {
+        let catalog = self.catalog.read().expect("source catalog lock poisoned");
+        catalog
+            .by_type
+            .get(wp_type)
+            .map(|indices| {
+                indices
+                    .iter()
+                    .map(|&idx| catalog.entries[idx].clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn get(&self, id: &str) -> Option<WallpaperEntry> {
+        self.catalog
+            .read()
+            .expect("source catalog lock poisoned")
+            .entries
+            .iter()
+            .find(|entry| entry.item_id.to_string() == id)
+            .cloned()
+    }
+
+    pub async fn call_extras(
+        &self,
+        plugin_name: &str,
+        entry: &WallpaperEntry,
+    ) -> Result<HashMap<String, String>> {
+        self.handle(plugin_name)?
+            .runtime
+            .lock()
+            .await
+            .call_extras(plugin_name, entry)
+            .await
+    }
+
+    pub fn action_kind(&self, plugin_name: &str, action_id: &str) -> Option<SourceActionKind> {
+        self.handle(plugin_name).ok().and_then(|handle| {
+            handle
+                .info
+                .read()
+                .expect("plugin info lock poisoned")
+                .actions
+                .iter()
+                .find(|action| action.id == action_id)
+                .map(|action| action.kind)
+        })
+    }
+
+    pub async fn check_lifecycle(&self, plugin_name: &str) -> Result<Option<PluginLifecycleCheck>> {
+        self.handle(plugin_name)?
+            .runtime
+            .lock()
+            .await
+            .check_lifecycle(plugin_name)
+            .await
+    }
+
+    pub async fn invoke_action(
+        &self,
+        plugin_name: &str,
+        action_id: &str,
+        values: &HashMap<String, String>,
+    ) -> Result<()> {
+        self.handle(plugin_name)?
+            .runtime
+            .lock()
+            .await
+            .invoke_action(plugin_name, action_id, values)
+            .await
+    }
+
+    pub async fn begin_qr_login(&self, plugin_name: &str, action_id: &str) -> Result<QrLoginBegin> {
+        self.handle(plugin_name)?
+            .runtime
+            .lock()
+            .await
+            .begin_qr_login(plugin_name, action_id)
+            .await
+    }
+
+    pub async fn poll_qr_login(&self, plugin_name: &str, operation_id: u64) -> Result<QrLoginPoll> {
+        self.handle(plugin_name)?
+            .runtime
+            .lock()
+            .await
+            .poll_qr_login(plugin_name, operation_id)
+            .await
+    }
+
+    pub async fn cancel_qr_login(&self, plugin_name: &str, operation_id: u64) -> Result<()> {
+        self.handle(plugin_name)?
+            .runtime
+            .lock()
+            .await
+            .cancel_qr_login(plugin_name, operation_id)
+            .await
+    }
+
+    pub async fn subscription_status(
+        &self,
+        plugin_name: &str,
+        ids: &[String],
+    ) -> Result<Vec<SubscriptionItemState>> {
+        self.handle(plugin_name)?
+            .runtime
+            .lock()
+            .await
+            .subscription_status(plugin_name, ids)
+            .await
+    }
+
+    pub async fn set_subscription(
+        &self,
+        plugin_name: &str,
+        id: &str,
+        subscribed: bool,
+    ) -> Result<()> {
+        self.handle(plugin_name)?
+            .runtime
+            .lock()
+            .await
+            .set_subscription(plugin_name, id, subscribed)
+            .await
+    }
+
+    pub async fn call_properties(
+        &self,
+        plugin_name: &str,
+        entry: &WallpaperEntry,
+    ) -> Result<Option<String>> {
+        self.handle(plugin_name)?
+            .runtime
+            .lock()
+            .await
+            .call_properties(plugin_name, entry)
+            .await
+    }
+
+    pub async fn auto_detect_all(&self) -> Result<HashMap<String, Vec<String>>> {
+        let calls = self
+            .handles()
+            .into_iter()
+            .map(|(_, handle)| async move { handle.runtime.lock().await.auto_detect_all().await });
+        let mut out = HashMap::new();
+        for result in futures_util::future::join_all(calls).await {
+            out.extend(result?);
+        }
+        Ok(out)
+    }
+
+    pub fn discover_sources(&self) -> Result<Vec<DiscoverSourceInfo>> {
+        let mut out = Vec::new();
+        for (_, handle) in self.handles() {
+            let info = handle.info.read().expect("plugin info lock poisoned");
+            let Some(disc) = &info.capabilities.discover else {
+                continue;
+            };
+            out.push(DiscoverSourceInfo {
+                plugin_id: info.name.clone(),
+                name: info.name.clone(),
+                display_name: info.display_name.clone(),
+                supports_search: disc.supports_search,
+                remote_capability: disc.remote,
+                remote_hint: disc.remote_hint.clone(),
+                sorts: disc.sorts.clone(),
+                filters: disc.filters.clone(),
+                owner_plugin_id: info.plugin_id.clone(),
+                settings: info.settings.clone(),
+                actions: info.actions.clone(),
+                status: info.status.clone(),
+                avatar_url: String::new(),
+            });
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
+    /// Validate and canonicalize a partial settings update for one discover
+    /// source. The Lua declaration is authoritative; callers cannot add
+    /// undeclared keys to the source's config table.
+    pub fn validate_remote_settings_patch(
+        &self,
+        source_id: &str,
+        values: HashMap<String, String>,
+    ) -> Result<HashMap<String, String>> {
+        let handle = self.handle(source_id)?;
+        let info = handle.info.read().expect("plugin info lock poisoned");
+        if info.capabilities.discover.is_none() {
+            return Err(Error::DiscoverUnsupported(source_id.to_string()));
+        }
+
+        let schemas: HashMap<_, _> = info
+            .settings
+            .iter()
+            .map(|setting| (setting.key.as_str(), setting))
+            .collect();
+        let mut validated = HashMap::with_capacity(values.len());
+        for (key, raw) in values {
+            let setting = schemas.get(key.as_str()).ok_or_else(|| {
+                Error::SettingsValidationFailed(format!(
+                    "{source_id}.{key} is not declared by the remote source"
+                ))
+            })?;
+            let value = validate_source_setting(setting, &raw)
+                .map_err(|error| Error::SettingsValidationFailed(format!("{source_id}.{error}")))?;
+            validated.insert(key, value);
+        }
+        Ok(validated)
+    }
+
+    pub async fn discover_sources_with_status(&self) -> Result<Vec<DiscoverSourceInfo>> {
+        let calls = self.handles().into_iter().filter_map(|(name, handle)| {
+            let has_discover = handle
+                .info
+                .read()
+                .expect("plugin info lock poisoned")
+                .capabilities
+                .discover
+                .is_some();
+            has_discover.then(|| async move {
+                let result = handle.runtime.lock().await.call_action_status(&name).await;
+                (name, result)
+            })
+        });
+        let dynamic: HashMap<_, _> = futures_util::future::join_all(calls)
+            .await
+            .into_iter()
+            .filter_map(|(name, result)| match result {
+                Ok(value) => Some((name, value)),
+                Err(error) => {
+                    log::warn!("plugin action status failed: {error}");
+                    None
+                }
+            })
+            .collect();
+        let mut sources = self.discover_sources()?;
+        for source in &mut sources {
+            if let Some((actions, status, avatar_url)) = dynamic.get(&source.plugin_id) {
+                source.actions = actions.clone();
+                source.status = status.clone();
+                source.avatar_url = avatar_url.clone();
+            }
+        }
+        Ok(sources)
+    }
+
+    pub async fn call_discover(
+        &self,
+        plugin_name: &str,
+        query: &str,
+        sort: &str,
+        page: u32,
+        tags: &[String],
+    ) -> Result<DiscoverSearchResult> {
+        self.handle(plugin_name)?
+            .runtime
+            .lock()
+            .await
+            .call_discover(plugin_name, query, sort, page, tags)
+            .await
+    }
+
+    pub async fn call_tags(&self, plugin_name: &str) -> Result<Vec<String>> {
+        self.handle(plugin_name)?
+            .runtime
+            .lock()
+            .await
+            .call_tags(plugin_name)
+            .await
+    }
+
+    pub async fn refresh_dynamic_tags(&self) {
+        let handles: Vec<_> = self
+            .handles()
+            .into_iter()
+            .filter(|(_, handle)| {
+                handle
+                    .info
+                    .read()
+                    .expect("plugin info lock poisoned")
+                    .capabilities
+                    .discover
+                    .as_ref()
+                    .is_some_and(|discover| discover.dynamic_tags)
+            })
+            .collect();
+        for (name, handle) in handles {
+            match handle.runtime.lock().await.call_tags(&name).await {
+                Ok(tags) if !tags.is_empty() => {
+                    if let Some(discover) = handle
+                        .info
+                        .write()
+                        .expect("plugin info lock poisoned")
+                        .capabilities
+                        .discover
+                        .as_mut()
+                    {
+                        discover.filters = LuaPluginRuntime::legacy_discover_filter(tags);
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("refresh discover tags for {name}: {e:#}"),
+            }
+        }
+    }
+
+    pub async fn call_details(&self, plugin_name: &str, id: &str) -> Result<DiscoverDetails> {
+        self.handle(plugin_name)?
+            .runtime
+            .lock()
+            .await
+            .call_details(plugin_name, id)
+            .await
+    }
+
+    pub async fn call_download(&self, plugin_name: &str, id: &str) -> Result<DiscoverDownload> {
+        self.handle(plugin_name)?
+            .runtime
+            .lock()
+            .await
+            .call_download(plugin_name, id)
+            .await
+    }
+
+    pub async fn call_resolve(
+        &self,
+        plugin_name: &str,
+        id: &str,
+        dir: &str,
+    ) -> Result<DiscoverResolve> {
+        self.handle(plugin_name)?
+            .runtime
+            .lock()
+            .await
+            .call_resolve(plugin_name, id, dir)
+            .await
+    }
+
+    pub fn plugins(&self) -> Result<Vec<SourcePluginInfo>> {
+        let mut out = Vec::new();
+        for (_, handle) in self.handles() {
+            let info = handle.info.read().expect("plugin info lock poisoned");
+            let Some(source) = &info.capabilities.source else {
+                continue;
+            };
+            out.push(SourcePluginInfo {
+                name: info.name.clone(),
+                plugin_id: info.plugin_id.clone(),
+                types: source.types.clone(),
+                version: info.version.clone(),
+                library_label: source.library_label.clone(),
+                library_hint: source.library_hint.clone(),
+                settings: info.settings.clone(),
+            });
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
+    pub fn supports_item_remove(&self, plugin_name: &str) -> bool {
+        self.handle(plugin_name).ok().is_some_and(|handle| {
+            handle
+                .info
+                .read()
+                .expect("plugin info lock poisoned")
+                .capabilities
+                .source_item_remove
+        })
+    }
+
+    pub fn supports_item_unsubscribe(&self, entry: &WallpaperEntry) -> bool {
+        if entry.external_id.as_deref().is_none_or(str::is_empty) {
+            return false;
+        }
+        self.handle(&entry.plugin_name).ok().is_some_and(|handle| {
+            handle
+                .info
+                .read()
+                .expect("plugin info lock poisoned")
+                .capabilities
+                .discover
+                .as_ref()
+                .and_then(|discover| discover.remote)
+                == Some(RemoteCapability::Subscription)
+        })
+    }
+
+    pub async fn remove_item(
+        &self,
+        plugin_name: &str,
+        entry: &WallpaperEntry,
+        libraries: &[String],
+    ) -> Result<()> {
+        self.handle(plugin_name)?
+            .runtime
+            .lock()
+            .await
+            .remove_item(plugin_name, entry, libraries)
+            .await
+    }
+
+    pub fn plugin_version(&self, plugin_name: &str) -> Option<String> {
+        self.handle(plugin_name).ok().map(|handle| {
+            handle
+                .info
+                .read()
+                .expect("plugin info lock poisoned")
+                .version
+                .clone()
+        })
+    }
+
+    #[cfg(test)]
+    fn test_runtime(&self, plugin_name: &str) -> Arc<tokio::sync::Mutex<LuaPluginRuntime>> {
+        self.handle(plugin_name).unwrap().runtime.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_test_callback_timeout(&self, plugin_name: &str, timeout: Duration) {
+        self.test_runtime(plugin_name).lock().await.callback_timeout = timeout;
     }
 }
 
@@ -1883,7 +4146,7 @@ fn parse_lua_string_map(
     context: &str,
 ) -> Result<HashMap<String, String>> {
     let mut map = HashMap::new();
-    let Some(meta) = SourceManager::optional_table(tbl, key, context)? else {
+    let Some(meta) = LuaPluginRuntime::optional_table(tbl, key, context)? else {
         return Ok(map);
     };
     for pair in meta.pairs::<String, String>() {
@@ -1894,86 +4157,45 @@ fn parse_lua_string_map(
     Ok(map)
 }
 
-fn json_to_lua(lua: &Lua, val: &serde_json::Value) -> LuaResult<LuaValue> {
-    match val {
-        serde_json::Value::Null => Ok(LuaValue::Nil),
-        serde_json::Value::Bool(b) => Ok(LuaValue::Boolean(*b)),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(LuaValue::Integer(i))
-            } else {
-                Ok(LuaValue::Number(n.as_f64().unwrap_or(0.0)))
-            }
-        }
-        serde_json::Value::String(s) => Ok(LuaValue::String(lua.create_string(s)?)),
-        serde_json::Value::Array(arr) => {
-            let t = lua.create_table()?;
-            for (i, v) in arr.iter().enumerate() {
-                t.set(i + 1, json_to_lua(lua, v)?)?;
-            }
-            Ok(LuaValue::Table(t))
-        }
-        serde_json::Value::Object(obj) => {
-            let t = lua.create_table()?;
-            for (k, v) in obj {
-                t.set(k.as_str(), json_to_lua(lua, v)?)?;
-            }
-            Ok(LuaValue::Table(t))
+fn redact_secrets(message: &str) -> String {
+    let mut out = message.to_string();
+    for marker in ["Authorization:", "authorization:", "Cookie:", "cookie:"] {
+        let mut from = 0;
+        while let Some(relative) = out[from..].find(marker) {
+            let start = from + relative + marker.len();
+            let end = out[start..]
+                .find(['\r', '\n'])
+                .map(|relative| start + relative)
+                .unwrap_or(out.len());
+            out.replace_range(start..end, " [REDACTED]");
+            from = start + " [REDACTED]".len();
         }
     }
-}
-
-/// Convert a `LuaValue` back to `serde_json::Value`.
-/// Lua tables become arrays only with contiguous 1..=N integer keys.
-fn lua_to_json(val: &LuaValue) -> Option<serde_json::Value> {
-    match val {
-        LuaValue::Nil => Some(serde_json::Value::Null),
-        LuaValue::Boolean(b) => Some(serde_json::Value::Bool(*b)),
-        LuaValue::Integer(i) => Some(serde_json::Value::Number((*i).into())),
-        LuaValue::Number(n) => serde_json::Number::from_f64(*n).map(serde_json::Value::Number),
-        LuaValue::String(s) => s
-            .to_str()
-            .ok()
-            .map(|cow| serde_json::Value::String(cow.to_string())),
-        LuaValue::Table(t) => {
-            let len = t.raw_len();
-            let mut all_int = len > 0;
-            let mut count = 0;
-            for pair in t.clone().pairs::<LuaValue, LuaValue>() {
-                count += 1;
-                let Ok((k, _)) = pair else {
-                    all_int = false;
-                    break;
-                };
-                if !matches!(&k, LuaValue::Integer(_)) {
-                    all_int = false;
-                    break;
-                }
-            }
-            if all_int && count == len {
-                let mut arr = Vec::with_capacity(len);
-                for i in 1..=len {
-                    let v: LuaValue = t.get(i).ok()?;
-                    arr.push(lua_to_json(&v)?);
-                }
-                Some(serde_json::Value::Array(arr))
-            } else {
-                let mut map = serde_json::Map::new();
-                for pair in t.clone().pairs::<LuaValue, LuaValue>() {
-                    let (k, v) = pair.ok()?;
-                    let key = match k {
-                        LuaValue::String(s) => s.to_str().ok()?.to_string(),
-                        LuaValue::Integer(i) => i.to_string(),
-                        LuaValue::Number(n) => n.to_string(),
-                        _ => continue,
-                    };
-                    map.insert(key, lua_to_json(&v)?);
-                }
-                Some(serde_json::Value::Object(map))
-            }
+    for marker in [
+        "access_token=",
+        "refresh_token=",
+        "authorization=",
+        "cookie=",
+        "\"access_token\":\"",
+        "\"access_token\": \"",
+        "\"refresh_token\":\"",
+        "\"refresh_token\": \"",
+    ] {
+        let mut from = 0;
+        while let Some(relative) = out[from..].find(marker) {
+            let start = from + relative + marker.len();
+            let end = out[start..]
+                .find(|character: char| {
+                    character.is_whitespace()
+                        || matches!(character, '&' | ',' | '}' | ']' | '"' | '\'')
+                })
+                .map(|relative| start + relative)
+                .unwrap_or(out.len());
+            out.replace_range(start..end, "[REDACTED]");
+            from = start + "[REDACTED]".len();
         }
-        _ => None,
     }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1984,10 +4206,147 @@ mod tests {
     use super::*;
     use crate::probe::media::{MediaMeta, MediaProbe};
     use std::io::Write;
+    use std::time::Duration;
 
     struct FakeProbe {
         meta: MediaMeta,
     }
+
+    #[test]
+    fn remote_errors_redact_credentials() {
+        let redacted = redact_secrets(
+            "access_token=access-secret&refresh_token=refresh-secret\nAuthorization: Bearer bearer-secret\nCookie: session-secret\n{\"access_token\": \"json-secret\"}",
+        );
+        assert!(!redacted.contains("access-secret"));
+        assert!(!redacted.contains("refresh-secret"));
+        assert!(!redacted.contains("bearer-secret"));
+        assert!(!redacted.contains("session-secret"));
+        assert!(!redacted.contains("json-secret"));
+    }
+
+    #[test]
+    fn discover_callback_errors_do_not_expose_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = dir.path().join("redaction.lua");
+        std::fs::write(
+            &entry,
+            r#"
+local M = {}
+function M.info()
+    return { name = "redaction", capabilities = { discover = { search = true } } }
+end
+M.discover = {}
+function M.discover.search(ctx, params)
+    error("request failed: access_token=access-secret&refresh_token=refresh-secret")
+end
+return M
+"#,
+        )
+        .unwrap();
+        let manager = SourceManager::new().unwrap();
+        manager
+            .load_plugin(&entry, "org.redaction", "1", ENTRY_VERSION_V3)
+            .unwrap();
+        let error = block_value(async { manager.call_discover("redaction", "", "", 1, &[]).await })
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("access-secret"));
+        assert!(!error.contains("refresh-secret"));
+        assert!(error.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn remote_settings_patch_uses_source_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = dir.path().join("settings.lua");
+        std::fs::write(
+            &entry,
+            r#"
+local M = {}
+function M.info()
+    return {
+        name = "settings_remote",
+        settings = {
+            { key = "count", type = "u32", default = 1 },
+            { key = "enabled", type = "bool", default = false },
+            { key = "mode", type = "string", default = "one", choices = { "one", "two" } },
+        },
+        capabilities = { discover = { search = true } },
+    }
+end
+M.discover = {}
+function M.discover.search(ctx, params)
+    return { items = {}, has_more = false }
+end
+return M
+"#,
+        )
+        .unwrap();
+        let manager = SourceManager::new().unwrap();
+        manager
+            .load_plugin(&entry, "org.settings", "1", ENTRY_VERSION_V3)
+            .unwrap();
+
+        let values = HashMap::from([
+            ("count".to_string(), "007".to_string()),
+            ("enabled".to_string(), "true".to_string()),
+            ("mode".to_string(), "two".to_string()),
+        ]);
+        let validated = manager
+            .validate_remote_settings_patch("settings_remote", values)
+            .unwrap();
+        assert_eq!(validated.get("count").map(String::as_str), Some("7"));
+        assert_eq!(validated.get("enabled").map(String::as_str), Some("true"));
+        assert_eq!(validated.get("mode").map(String::as_str), Some("two"));
+
+        for values in [
+            HashMap::from([("missing".to_string(), "value".to_string())]),
+            HashMap::from([("enabled".to_string(), "yes".to_string())]),
+            HashMap::from([("mode".to_string(), "three".to_string())]),
+        ] {
+            assert!(manager
+                .validate_remote_settings_patch("settings_remote", values)
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn source_settings_reject_invalid_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = dir.path().join("settings.lua");
+        let script = |settings: &str| {
+            format!(
+                r#"
+local M = {{}}
+function M.info()
+    return {{
+        name = "invalid_settings",
+        settings = {{ {settings} }},
+        capabilities = {{ discover = {{ search = true }} }},
+    }}
+end
+M.discover = {{}}
+function M.discover.search(ctx, params)
+    return {{ items = {{}}, has_more = false }}
+end
+return M
+"#,
+            )
+        };
+
+        std::fs::write(&entry, script(r#"{ key = "same" }, { key = "same" }"#)).unwrap();
+        assert!(SourceManager::new()
+            .unwrap()
+            .load_plugin(&entry, "org.invalid", "1", ENTRY_VERSION_V3)
+            .is_err());
+
+        std::fs::write(&entry, script(r#"{ key = "value", type = "object" }"#)).unwrap();
+        assert!(SourceManager::new()
+            .unwrap()
+            .load_plugin(&entry, "org.invalid", "1", ENTRY_VERSION_V3)
+            .is_err());
+    }
+
     impl MediaProbe for FakeProbe {
         fn probe_media(&self, _path: &str) -> MediaMeta {
             self.meta.clone()
@@ -2058,7 +4417,7 @@ return M
         )
         .unwrap();
 
-        let mut mgr = SourceManager::with_probe(probe as Arc<dyn MediaProbe>).unwrap();
+        let mgr = SourceManager::with_probe(probe as Arc<dyn MediaProbe>).unwrap();
         mgr.load_plugin(&plugin_path, "test.plugin", "1.0", ENTRY_VERSION)
             .unwrap();
         block(async { mgr.scan_all(&HashMap::new()).await.unwrap() });
@@ -2068,6 +4427,82 @@ return M
         // The Lua plugin called ctx.probe successfully (it would error() otherwise).
         // Verify the entry was emitted correctly.
         assert_eq!(entries[0].resource, "/lib/v1.mp4");
+    }
+
+    #[test]
+    fn v3_source_context_has_grouped_interfaces_and_v2_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_path = dir.path().join("grouped_ctx.lua");
+        std::fs::write(
+            &plugin_path,
+            r#"
+local M = {}
+function M.info()
+    return {
+        name = "grouped_ctx",
+        capabilities = { source = { types = {"image"}, scan = true } },
+    }
+end
+M.source = {}
+function M.source.scan(ctx)
+    assert(type(ctx.fs) == "table" and type(ctx.fs.exists) == "function")
+    assert(type(ctx.config) == "table" and type(ctx.config.get) == "function")
+    assert(type(ctx.json) == "table" and type(ctx.json.parse) == "function")
+    assert(type(ctx.file_exists) == "function")
+    assert(type(ctx.plugin_config) == "function")
+    assert(type(ctx.json_parse) == "function")
+    return {}
+end
+return M
+"#,
+        )
+        .unwrap();
+
+        let manager = SourceManager::new().unwrap();
+        manager
+            .load_plugin(&plugin_path, "org.grouped", "1", ENTRY_VERSION_V3)
+            .unwrap();
+        block_value(async { manager.scan_all(&HashMap::new()).await }).unwrap();
+    }
+
+    #[test]
+    fn scan_all_reports_a_failing_plugin_instead_of_reporting_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_path = dir.path().join("failing_source.lua");
+        let mut f = std::fs::File::create(&plugin_path).unwrap();
+        write!(
+            f,
+            r#"
+local M = {{}}
+function M.info()
+    return {{
+        name = "failing",
+        capabilities = {{
+            source = {{ types = {{"image"}}, scan = true }},
+        }},
+    }}
+end
+M.source = {{}}
+function M.source.scan(ctx)
+    error("library root is unreadable")
+end
+return M
+"#
+        )
+        .unwrap();
+
+        let mgr = SourceManager::new().unwrap();
+        mgr.load_plugin(&plugin_path, "failing.plugin", "1.0", ENTRY_VERSION)
+            .unwrap();
+
+        let result = block_value(async { mgr.scan_all(&HashMap::new()).await });
+
+        let err = result.expect_err("a failing source scan must not report success");
+        assert!(
+            err.to_string().contains("failing"),
+            "error should name the plugin that failed, got: {err}"
+        );
+        assert!(mgr.list().is_empty());
     }
 
     #[test]
@@ -2101,7 +4536,7 @@ return M
         )
         .unwrap();
 
-        let mut mgr = SourceManager::new().unwrap();
+        let mgr = SourceManager::new().unwrap();
         let name = mgr
             .load_plugin(&plugin_path, "test.plugin", "1.0", ENTRY_VERSION)
             .unwrap();
@@ -2177,11 +4612,13 @@ function M.discover.search(ctx, params)
 end
 function M.discover.details(ctx, id)
     return {
+        author = "Imported Author",
         description = names.name(),
         size = "42",
         width = 10,
         height = 20,
         tags = {"tag"},
+        web_url = "https://example.invalid/item/" .. id,
     }
 end
 function M.discover.download(ctx, id)
@@ -2203,7 +4640,7 @@ return M
         )
         .unwrap();
 
-        let mut mgr = SourceManager::new().unwrap();
+        let mgr = SourceManager::new().unwrap();
         let name = mgr
             .load_plugin(&plugin_path, "test.plugin", "1.0", ENTRY_VERSION)
             .unwrap();
@@ -2225,6 +4662,8 @@ return M
         let detail = block_value(async { mgr.call_details("imported", "abc").await.unwrap() });
         assert_eq!(detail.width, Some(10));
         assert_eq!(detail.height, Some(20));
+        assert_eq!(detail.web_url, "https://example.invalid/item/abc");
+        assert_eq!(detail.author, "Imported Author");
     }
 
     #[test]
@@ -2255,7 +4694,7 @@ return M
         )
         .unwrap();
 
-        let mut mgr = SourceManager::new().unwrap();
+        let mgr = SourceManager::new().unwrap();
         let name = mgr
             .load_plugin(&plugin_path, "test.plugin", "1.0", ENTRY_VERSION)
             .unwrap();
@@ -2304,7 +4743,7 @@ return M
         )
         .unwrap();
 
-        let mut mgr = SourceManager::new().unwrap();
+        let mgr = SourceManager::new().unwrap();
         let name = mgr
             .load_plugin(&plugin_path, "test.plugin", "1.0", ENTRY_VERSION)
             .unwrap();
@@ -2350,14 +4789,14 @@ return bad
         )
         .unwrap();
 
-        let mut mgr = SourceManager::new().unwrap();
+        let mgr = SourceManager::new().unwrap();
         assert!(mgr
             .load_plugin(&plugin_path, "test.plugin", "1.0", ENTRY_VERSION)
             .is_err());
     }
 
     #[test]
-    fn unsupported_entry_version_is_rejected() {
+    fn entry_versions_v2_and_v3_are_supported_and_newer_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let plugin_path = dir.path().join("main.lua");
         std::fs::write(
@@ -2381,20 +4820,28 @@ return M
         )
         .unwrap();
 
-        let mut mgr = SourceManager::new().unwrap();
+        let mgr = SourceManager::new().unwrap();
         assert!(mgr
-            .load_plugin(&plugin_path, "test.plugin", "1.0", ENTRY_VERSION + 1)
+            .load_plugin(&plugin_path, "test.plugin", "1.0", ENTRY_VERSION_V2)
+            .is_ok());
+        let mgr = SourceManager::new().unwrap();
+        assert!(mgr
+            .load_plugin(&plugin_path, "test.plugin", "1.0", ENTRY_VERSION_V3)
+            .is_ok());
+        let mgr = SourceManager::new().unwrap();
+        assert!(mgr
+            .load_plugin(&plugin_path, "test.plugin", "1.0", LATEST_ENTRY_VERSION + 1,)
             .is_err());
     }
 
     #[test]
-    fn wallhaven_plugin_is_discover_only() {
+    fn wallhaven_plugin_supports_optional_api_key_login() {
         let plugin_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("plugins/org.waywallen.wallhaven/main.lua");
 
-        let mut mgr = SourceManager::new().unwrap();
+        let mgr = SourceManager::new().unwrap();
         let name = mgr
-            .load_plugin(&plugin_path, "test.plugin", "1.0", ENTRY_VERSION)
+            .load_plugin(&plugin_path, "test.plugin", "1.0", ENTRY_VERSION_V3)
             .unwrap();
         assert_eq!(name, "wallhaven");
         assert!(mgr.plugins().unwrap().is_empty());
@@ -2403,16 +4850,53 @@ return M
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].plugin_id, "wallhaven");
         assert!(sources[0].supports_search);
-        assert!(sources[0].tags.iter().any(|tag| tag == "Anime"));
+        assert!(sources[0].filters.iter().any(|filter| {
+            filter.ty == DiscoverFilterType::MultiSelect
+                && filter.values.iter().any(|value| value == "Anime")
+        }));
+        assert_eq!(sources[0].actions[0].kind, SourceActionKind::Form);
+        assert_eq!(sources[0].actions[0].fields.len(), 1);
+        assert_eq!(sources[0].actions[0].fields[0].key, "api_key");
+        assert!(sources[0].actions[0].fields[0].secret);
+        assert!(sources[0].actions[0].fields[0].required);
+        assert_eq!(
+            block_value(async { mgr.check_lifecycle("wallhaven").await })
+                .unwrap()
+                .unwrap()
+                .state,
+            PluginLifecycleState::SignedOut
+        );
 
-        let env = mgr.plugin_lua_env(plugin_path.parent().unwrap()).unwrap();
+        let runtime = mgr.test_runtime("wallhaven");
+        let runtime = runtime.blocking_lock();
+        let env = runtime
+            .plugin_lua_env(plugin_path.parent().unwrap())
+            .unwrap();
         let import: LuaFunction = env.get("import").unwrap();
         let map: LuaTable = import.call("wallhaven.map").unwrap();
         let search_item: LuaFunction = map.get("search_item").unwrap();
-        let item = mgr.lua.create_table().unwrap();
+        let item = runtime.lua.create_table().unwrap();
         item.set("id", "abc").unwrap();
         let mapped: LuaTable = search_item.call(item).unwrap();
         assert_eq!(mapped.get::<String>("wp_type").unwrap(), "image");
+
+        let details: LuaFunction = map.get("details").unwrap();
+        let detail = runtime.lua.create_table().unwrap();
+        detail.set("url", "https://wallhaven.cc/w/abc123").unwrap();
+        let mapped: LuaTable = details.call(detail.clone()).unwrap();
+        assert_eq!(
+            mapped.get::<String>("web_url").unwrap(),
+            "https://wallhaven.cc/w/abc123"
+        );
+        // A wallpaper Wallhaven reports no uploader for keeps the empty author
+        // the listing has always produced.
+        assert_eq!(mapped.get::<String>("author").unwrap(), "");
+
+        let uploader = runtime.lua.create_table().unwrap();
+        uploader.set("username", "Qtn").unwrap();
+        detail.set("uploader", uploader).unwrap();
+        let mapped: LuaTable = details.call(detail).unwrap();
+        assert_eq!(mapped.get::<String>("author").unwrap(), "Qtn");
     }
 
     #[test]
@@ -2445,7 +4929,7 @@ return M
         )
         .unwrap();
 
-        let mut mgr = SourceManager::new().unwrap();
+        let mgr = SourceManager::new().unwrap();
         mgr.load_plugin(&path, "test.plugin", "1.0", ENTRY_VERSION)
             .unwrap();
         let got =
@@ -2480,27 +4964,73 @@ return M
         )
         .unwrap();
 
-        let mut mgr = SourceManager::new().unwrap();
+        let mgr = SourceManager::new().unwrap();
         mgr.load_plugin(&path, "test.plugin", "1.0", ENTRY_VERSION)
             .unwrap();
         // Before the refresh, discovery advertises the static fallback.
-        assert_eq!(mgr.discover_sources().unwrap()[0].tags, vec!["fallback"]);
+        assert_eq!(
+            mgr.discover_sources().unwrap()[0].filters[0].values,
+            vec!["fallback"]
+        );
 
         block_value(async { mgr.refresh_dynamic_tags().await });
         assert_eq!(
-            mgr.discover_sources().unwrap()[0].tags,
+            mgr.discover_sources().unwrap()[0].filters[0].values,
             vec!["Live1", "Live2"]
         );
     }
 
     #[test]
-    fn remove_dir_guards_the_plugin_remote_dir() {
-        // remote_content_dir is derived from XDG_DATA_HOME; point it at a tempdir.
-        let data = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_DATA_HOME", data.path());
-        let remote = crate::settings::remote_content_dir("guarded");
-        std::fs::create_dir_all(&remote).unwrap();
+    fn discover_filters_validate_selected_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("filters.lua");
+        std::fs::write(
+            &path,
+            r#"
+local M = {}
+function M.info()
+    return {
+        name = "filters",
+        capabilities = {
+            discover = {
+                search = true,
+                filters = {
+                    { id = "kind", title = "Kind", type = "select", values = { "A", "B" } },
+                    { id = "tags", title = "Tags", type = "multi_select", values = { "X", "Y" } },
+                },
+            },
+        },
+    }
+end
+M.discover = {}
+function M.discover.search(ctx, params) return { items = {}, has_more = false } end
+return M
+"#,
+        )
+        .unwrap();
 
+        let mgr = SourceManager::new().unwrap();
+        mgr.load_plugin(&path, "test.plugin", "1.0", ENTRY_VERSION_V3)
+            .unwrap();
+        assert!(block_value(async {
+            mgr.call_discover("filters", "", "", 1, &["A".to_string(), "X".to_string()])
+                .await
+        })
+        .is_ok());
+        assert!(block_value(async {
+            mgr.call_discover("filters", "", "", 1, &["A".to_string(), "B".to_string()])
+                .await
+        })
+        .is_err());
+        assert!(block_value(async {
+            mgr.call_discover("filters", "", "", 1, &["unknown".to_string()])
+                .await
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn remote_discovery_context_omits_filesystem_mutation() {
         let plugin = tempfile::tempdir().unwrap();
         let path = plugin.path().join("guarded.lua");
         std::fs::write(
@@ -2512,43 +5042,877 @@ function M.info()
 end
 M.discover = {}
 function M.discover.search(ctx, params)
-    local ok = ctx.remove_dir(params.query)
-    return { items = { { id = tostring(ok), title = "", preview_url = "", author = "" } }, has_more = false }
+    local parsed = ctx.json.parse('{"ok":true}')
+    ctx.http:set_cookie(
+        "https://example.com/",
+        "fixture=cookie; Domain=example.com; Path=/; Secure"
+    )
+    local slept = pcall(function() ctx.time.sleep(0) end)
+    return {
+        items = { {
+            id = tostring(
+                ctx.remove_dir == nil and ctx.libraries == nil and ctx.fs == nil
+                and ctx.config ~= nil and ctx.json ~= nil
+                and ctx.base64 ~= nil and ctx.time ~= nil and ctx.random ~= nil
+                and parsed.ok and ctx.json_parse('{"ok":true}').ok
+                and ctx.json.encode({1, 2}) == "[1,2]"
+                and ctx.json_encode({1, 2}) == "[1,2]"
+                and ctx.base64.decode("d2FsbA==") == "wall"
+                and ctx.base64_decode("d2FsbA==") == "wall"
+                and ctx.time.unix() > 1000000000
+                and ctx.time_unix() > 1000000000
+                and #ctx.random.hex(12) == 24
+                and slept
+                and ctx.url.decode_component("wall%7Cpaper") == "wall|paper"
+                and ctx.http:cookie("https://example.com/", "fixture") == "cookie"
+            ),
+            title = "",
+            preview_url = "",
+            author = "",
+        } },
+        has_more = false,
+    }
 end
 return M
 "#,
         )
         .unwrap();
-        let mut mgr = SourceManager::new().unwrap();
+        let mgr = SourceManager::new().unwrap();
         mgr.load_plugin(&path, "test.plugin", "1.0", ENTRY_VERSION)
             .unwrap();
+        let r = block_value(async { mgr.call_discover("guarded", "", "", 1, &[]).await }).unwrap();
+        assert_eq!(r.items[0].id, "true");
+    }
 
-        let removed = |p: &str| -> Result<DiscoverSearchResult> {
-            block_value(async { mgr.call_discover("guarded", p, "", 1, &[]).await })
+    #[test]
+    fn v3_lifecycle_actions_qrlogin_and_subscription_share_plugin_owned_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_root = dir.path().join("state");
+        std::fs::write(dir.path().join("legacy-session.json"), "legacy secret").unwrap();
+        let state_store = crate::plugin::state_store::PluginStateStore::new(
+            state_root.clone(),
+            dir.path().to_path_buf(),
+        );
+        let manager =
+            SourceManager::with_probe_and_state_store(Arc::new(AvFormatProbe::new()), state_store)
+                .unwrap();
+        let plugin_path = dir.path().join("main.lua");
+        std::fs::write(
+            &plugin_path,
+            r#"
+local M = {}
+local signed_in = false
+local display = ""
+local subscriptions = {}
+
+function M.info()
+    return {
+        name = "account_provider",
+        capabilities = {
+            discover = { search = true, subscription = true },
+        },
+        actions = {
+            {
+                id = "sign_in",
+                kind = "qr_login",
+                label = "Log in",
+                description = "Open the account app",
+                browse_description = "Log in to browse this source",
+                browse_button_label = "Continue",
+            },
+            { id = "sign_out", kind = "invoke" },
+            {
+                id = "set_alias",
+                kind = "form",
+                fields = {
+                    { key = "alias", label = "Alias", required = true },
+                },
+            },
+        },
+        status = { { id = "account" } },
+        state_migrations = {
+            { schema_id = "legacy-session-v1", file = "legacy-session.json" },
+        },
+    }
+end
+
+M.lifecycle = {}
+function M.lifecycle.load(blob)
+    if blob == nil then return end
+    local flag, value = string.match(blob, "^([^|]+)|(.*)$")
+    signed_in = flag == "1"
+    display = value or ""
+end
+function M.lifecycle.save()
+    return (signed_in and "1" or "0") .. "|" .. display
+end
+function M.lifecycle.check(ctx)
+    return {
+        state = signed_in and "signed_in" or "signed_out",
+        display_value = display,
+        avatar_url = "https://example.invalid/avatar.png",
+    }
+end
+function M.lifecycle.migrate(schema_id, raw)
+    if schema_id ~= "legacy-session-v1" or raw ~= "legacy secret" then
+        error("wrong migration input")
+    end
+    return "0|migrated"
+end
+
+M.actions = {}
+function M.actions.status(ctx)
+    return {
+        status = { account = display },
+        actions = {
+            sign_in = { visible = not signed_in, enabled = not signed_in },
+            sign_out = { visible = signed_in, enabled = signed_in },
+        },
+    }
+end
+function M.actions.invoke(ctx, action_id, values)
+    if action_id == "sign_out" then
+        signed_in = false
+        display = ""
+    elseif action_id == "set_alias" then
+        display = values.alias
+    else
+        error("unexpected action")
+    end
+end
+
+M.qrlogin = {}
+function M.qrlogin.begin(ctx, action_id)
+    return {
+        key = { polls = 0 },
+        challenge = "https://example.invalid/challenge",
+        poll_after_ms = 25,
+        expires_in_ms = 1000,
+        title = "Sign in",
+        instruction = "Scan",
+    }
+end
+function M.qrlogin.poll(ctx, key)
+    key.polls = key.polls + 1
+    if key.polls == 1 then
+        return { state = "awaiting_confirmation", display_value = "phone" }
+    end
+    signed_in = true
+    display = "alice"
+    return { state = "succeeded", display_value = display }
+end
+function M.qrlogin.cancel(ctx, key)
+    key.cancelled = true
+end
+
+M.discover = {}
+function M.discover.search(ctx, params)
+    return { items = {}, has_more = false }
+end
+
+M.subscription = {}
+function M.subscription.status(ctx, ids)
+    local result = {}
+    for _, id in ipairs(ids) do result[id] = subscriptions[id] or "unknown" end
+    return result
+end
+function M.subscription.subscribe(ctx, id)
+    if id == "rejected" then return { accepted = false, error = "denied" } end
+    subscriptions[id] = "subscribed"
+    return { accepted = true }
+end
+function M.subscription.unsubscribe(ctx, id)
+    subscriptions[id] = "unsubscribed"
+    return { accepted = true }
+end
+
+return M
+"#,
+        )
+        .unwrap();
+
+        manager
+            .load_plugin(&plugin_path, "org.test", "1.0", ENTRY_VERSION_V3)
+            .unwrap();
+        assert!(dir.path().join("legacy-session.migrated.bak").is_file());
+        assert_eq!(
+            std::fs::read_to_string(state_root.join("org.test.state")).unwrap(),
+            "0|migrated"
+        );
+        assert_eq!(
+            manager.discover_sources().unwrap()[0].remote_capability,
+            Some(RemoteCapability::Subscription)
+        );
+
+        let sources = block_value(async { manager.discover_sources_with_status().await }).unwrap();
+        assert_eq!(sources[0].status[0].value, "migrated");
+        assert_eq!(sources[0].avatar_url, "https://example.invalid/avatar.png");
+        assert_eq!(sources[0].actions[0].label, "Log in");
+        assert_eq!(sources[0].actions[0].description, "Open the account app");
+        assert_eq!(sources[0].actions[0].browse_button_label, "Continue");
+        assert_eq!(
+            sources[0].actions[0].browse_description,
+            "Log in to browse this source"
+        );
+        assert!(sources[0].actions[0].visible);
+        assert!(!sources[0].actions[1].visible);
+        assert_eq!(sources[0].actions[2].fields[0].key, "alias");
+
+        let begin =
+            block_value(async { manager.begin_qr_login("account_provider", "sign_in").await })
+                .unwrap();
+        assert_eq!(begin.challenge, "https://example.invalid/challenge");
+        assert_eq!(begin.poll_after_ms, 25);
+        let first = block_value(async {
+            manager
+                .poll_qr_login("account_provider", begin.operation_id)
+                .await
+        })
+        .unwrap();
+        assert_eq!(first.state, QrLoginPollState::AwaitingConfirmation);
+        let second = block_value(async {
+            manager
+                .poll_qr_login("account_provider", begin.operation_id)
+                .await
+        })
+        .unwrap();
+        assert_eq!(second.state, QrLoginPollState::Succeeded);
+        assert_eq!(
+            block_value(async { manager.check_lifecycle("account_provider").await })
+                .unwrap()
+                .unwrap()
+                .state,
+            PluginLifecycleState::SignedIn
+        );
+        assert_eq!(
+            std::fs::read_to_string(state_root.join("org.test.state")).unwrap(),
+            "1|alice"
+        );
+
+        let ids = vec!["item".to_string(), "missing".to_string()];
+        let before =
+            block_value(async { manager.subscription_status("account_provider", &ids).await })
+                .unwrap();
+        assert!(before
+            .iter()
+            .all(|item| item.state == SubscriptionState::Unknown));
+        block_value(async {
+            manager
+                .set_subscription("account_provider", "item", true)
+                .await
+        })
+        .unwrap();
+        let subscribed =
+            block_value(async { manager.subscription_status("account_provider", &ids).await })
+                .unwrap();
+        assert_eq!(subscribed[0].state, SubscriptionState::Subscribed);
+        assert_eq!(subscribed[1].state, SubscriptionState::Unknown);
+        let rejected = block_value(async {
+            manager
+                .set_subscription("account_provider", "rejected", true)
+                .await
+        })
+        .unwrap_err();
+        assert!(rejected.to_string().contains("denied"));
+        block_value(async {
+            manager
+                .set_subscription("account_provider", "item", false)
+                .await
+        })
+        .unwrap();
+        let unsubscribed =
+            block_value(async { manager.subscription_status("account_provider", &ids).await })
+                .unwrap();
+        assert_eq!(unsubscribed[0].state, SubscriptionState::Unsubscribed);
+
+        let missing = block_value(async {
+            manager
+                .invoke_action("account_provider", "set_alias", &HashMap::new())
+                .await
+        });
+        assert!(missing
+            .unwrap_err()
+            .to_string()
+            .contains("requires field 'alias'"));
+        let values = HashMap::from([("alias".to_string(), "configured".to_string())]);
+        block_value(async {
+            manager
+                .invoke_action("account_provider", "set_alias", &values)
+                .await
+        })
+        .unwrap();
+        assert_eq!(
+            block_value(async { manager.check_lifecycle("account_provider").await })
+                .unwrap()
+                .unwrap()
+                .display_value,
+            "configured"
+        );
+
+        block_value(async {
+            manager
+                .invoke_action("account_provider", "sign_out", &HashMap::new())
+                .await
+        })
+        .unwrap();
+        assert_eq!(
+            block_value(async { manager.check_lifecycle("account_provider").await })
+                .unwrap()
+                .unwrap()
+                .state,
+            PluginLifecycleState::SignedOut
+        );
+    }
+
+    #[test]
+    fn v3_remote_capabilities_are_mutually_exclusive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.lua");
+        let script = |flags: &str, api: &str| {
+            format!(
+                r#"
+local M = {{}}
+function M.info()
+    return {{ name = "remote", capabilities = {{ discover = {{ search = true, {flags} }} }} }}
+end
+M.discover = {{}}
+function M.discover.search(ctx, params) return {{ items = {{}}, has_more = false }} end
+{api}
+return M
+"#
+            )
         };
 
-        // Inside the remote dir: removed.
-        let inside = remote.join("item123");
-        std::fs::create_dir_all(&inside).unwrap();
-        let r = removed(inside.to_str().unwrap()).unwrap();
-        assert_eq!(r.items[0].id, "true");
-        assert!(!inside.exists());
+        std::fs::write(&path, script("", "")).unwrap();
+        assert!(SourceManager::new()
+            .unwrap()
+            .load_plugin(&path, "org.test", "1", ENTRY_VERSION_V3)
+            .is_ok());
 
-        // Outside the remote dir: refused (Lua error surfaces as DiscoverFailed).
-        let outside = tempfile::tempdir().unwrap();
-        assert!(removed(outside.path().to_str().unwrap()).is_err());
+        let orphan_details = "function M.discover.details(ctx, id) return {} end";
+        std::fs::write(&path, script("", orphan_details)).unwrap();
+        assert!(SourceManager::new()
+            .unwrap()
+            .load_plugin(&path, "org.test", "1", ENTRY_VERSION_V3)
+            .is_err());
+        assert!(SourceManager::new()
+            .unwrap()
+            .load_plugin(&path, "org.test", "1", ENTRY_VERSION_V2)
+            .is_ok());
 
-        // `..` escape from inside the remote dir: refused.
-        let escape = format!("{}/../../escape", remote.display());
-        assert!(removed(&escape).is_err());
+        let orphan_actions = "M.actions = {}\nfunction M.actions.status(ctx) return {} end";
+        std::fs::write(&path, script("", orphan_actions)).unwrap();
+        assert!(SourceManager::new()
+            .unwrap()
+            .load_plugin(&path, "org.test", "1", ENTRY_VERSION_V3)
+            .is_err());
 
-        // Symlink escaping the remote dir: refused (canonicalize resolves it out).
-        let link = remote.join("link");
-        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
-        assert!(removed(link.to_str().unwrap()).is_err());
-        assert!(outside.path().exists());
+        std::fs::write(
+            &path,
+            script(
+                "download = true",
+                "function M.discover.download(ctx, id) return { wp_type = \"image\" } end",
+            ),
+        )
+        .unwrap();
+        let download_manager = SourceManager::new().unwrap();
+        download_manager
+            .load_plugin(&path, "org.test", "1", ENTRY_VERSION_V3)
+            .unwrap();
+        assert!(block_value(async {
+            download_manager
+                .subscription_status("remote", &["item".to_string()])
+                .await
+        })
+        .is_err());
 
-        std::env::remove_var("XDG_DATA_HOME");
+        let subscription_api = r#"
+M.subscription = {}
+function M.subscription.status(ctx, ids) return {} end
+function M.subscription.subscribe(ctx, id) return {} end
+        function M.subscription.unsubscribe(ctx, id) return {} end
+"#;
+        std::fs::write(&path, script("subscription = true", subscription_api)).unwrap();
+        let subscription_manager = SourceManager::new().unwrap();
+        subscription_manager
+            .load_plugin(&path, "org.test", "1", ENTRY_VERSION_V3)
+            .unwrap();
+        assert!(
+            block_value(async { subscription_manager.call_download("remote", "item").await })
+                .is_err()
+        );
+
+        std::fs::write(
+            &path,
+            script(
+                "subscription = true",
+                &format!(
+                    "function M.discover.download(ctx, id) return {{}} end\n{subscription_api}"
+                ),
+            ),
+        )
+        .unwrap();
+        assert!(SourceManager::new()
+            .unwrap()
+            .load_plugin(&path, "org.test", "1", ENTRY_VERSION_V3)
+            .is_err());
+
+        std::fs::write(
+            &path,
+            script(
+                "download = true",
+                &format!(
+                    "function M.discover.download(ctx, id) return {{}} end\n{subscription_api}"
+                ),
+            ),
+        )
+        .unwrap();
+        assert!(SourceManager::new()
+            .unwrap()
+            .load_plugin(&path, "org.test", "1", ENTRY_VERSION_V3)
+            .is_err());
+
+        std::fs::write(
+            &path,
+            script(
+                "download = true, subscription = true",
+                &format!(
+                    "function M.discover.download(ctx, id) return {{ wp_type = \"image\" }} end\n{subscription_api}"
+                ),
+            ),
+        )
+        .unwrap();
+        assert!(SourceManager::new()
+            .unwrap()
+            .load_plugin(&path, "org.test", "1", ENTRY_VERSION_V3)
+            .is_err());
+    }
+
+    #[test]
+    fn failed_state_migration_preserves_the_legacy_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("legacy.json");
+        std::fs::write(&legacy, "legacy secret").unwrap();
+        let state_root = dir.path().join("state");
+        let state_store = crate::plugin::state_store::PluginStateStore::new(
+            state_root.clone(),
+            dir.path().to_path_buf(),
+        );
+        let manager =
+            SourceManager::with_probe_and_state_store(Arc::new(AvFormatProbe::new()), state_store)
+                .unwrap();
+        let entry = dir.path().join("main.lua");
+        std::fs::write(
+            &entry,
+            r#"
+local M = {}
+function M.info()
+    return {
+        name = "migration_failure",
+        capabilities = {},
+        state_migrations = { { schema_id = "legacy", file = "legacy.json" } },
+    }
+end
+M.lifecycle = {}
+function M.lifecycle.load(blob) end
+function M.lifecycle.save() return "new" end
+function M.lifecycle.check(ctx) return { state = "signed_out" } end
+function M.lifecycle.migrate(schema_id, raw) error("migration rejected") end
+return M
+"#,
+        )
+        .unwrap();
+
+        assert!(manager
+            .load_plugin(&entry, "org.failure", "1", ENTRY_VERSION_V3)
+            .is_err());
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), "legacy secret");
+        assert!(!dir.path().join("legacy.migrated.bak").exists());
+        assert!(!state_root.join("org.failure.state").exists());
+    }
+
+    #[test]
+    fn invalid_qr_begin_result_does_not_retain_the_opaque_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = dir.path().join("main.lua");
+        std::fs::write(
+            &entry,
+            r#"
+local M = {}
+function M.info()
+    return {
+        name = "invalid_qr",
+        capabilities = {},
+        actions = { { id = "sign_in", kind = "qr_login" } },
+    }
+end
+M.actions = {}
+function M.actions.status(ctx) return { actions = {} } end
+M.qrlogin = {}
+function M.qrlogin.begin(ctx, action_id) return { key = {} } end
+function M.qrlogin.poll(ctx, key) return { state = "awaiting_scan" } end
+return M
+"#,
+        )
+        .unwrap();
+        let manager = SourceManager::new().unwrap();
+        manager
+            .load_plugin(&entry, "org.invalid", "1", ENTRY_VERSION_V3)
+            .unwrap();
+        assert!(
+            block_value(async { manager.begin_qr_login("invalid_qr", "sign_in").await }).is_err()
+        );
+        assert!(manager
+            .test_runtime("invalid_qr")
+            .blocking_lock()
+            .qr_operations
+            .is_empty());
+    }
+
+    #[test]
+    fn subscription_mutation_does_not_scan_source_libraries() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_root = dir.path().join("state");
+        let state_store = crate::plugin::state_store::PluginStateStore::new(
+            state_root.clone(),
+            dir.path().to_path_buf(),
+        );
+        let manager =
+            SourceManager::with_probe_and_state_store(Arc::new(AvFormatProbe::new()), state_store)
+                .unwrap();
+        let entry = dir.path().join("main.lua");
+        std::fs::write(
+            &entry,
+            r#"
+local M = {}
+local scans = 0
+function M.info()
+    return {
+        name = "separate_flows",
+        capabilities = {
+            source = { scan = true, types = { "image" } },
+            discover = { search = true, subscription = true },
+        },
+    }
+end
+M.lifecycle = {}
+function M.lifecycle.load(blob) end
+function M.lifecycle.save() return tostring(scans) end
+function M.lifecycle.check(ctx)
+    return { state = "signed_in", display_value = "test" }
+end
+M.source = {}
+function M.source.scan(ctx) scans = scans + 1 return {} end
+M.discover = {}
+function M.discover.search(ctx, params) return { items = {}, has_more = false } end
+M.subscription = {}
+function M.subscription.status(ctx, ids)
+    local result = {}
+    for _, id in ipairs(ids) do result[id] = "unknown" end
+    return result
+end
+function M.subscription.subscribe(ctx, id) return { accepted = true } end
+function M.subscription.unsubscribe(ctx, id) return { accepted = true } end
+return M
+"#,
+        )
+        .unwrap();
+        manager
+            .load_plugin(&entry, "org.test", "1", ENTRY_VERSION_V3)
+            .unwrap();
+
+        let subscription_entry = WallpaperEntry {
+            item_id: 1,
+            name: "Workshop item".to_string(),
+            wp_type: "image".to_string(),
+            resource: "item.jpg".to_string(),
+            preview: None,
+            description: None,
+            tags: Vec::new(),
+            external_id: Some("item".to_string()),
+            size: None,
+            width: None,
+            height: None,
+            content_rating: None,
+            modified_at: None,
+            create_at: 0,
+            plugin_name: "separate_flows".to_string(),
+            library_root: String::new(),
+        };
+        assert!(manager.supports_item_unsubscribe(&subscription_entry));
+        assert!(!manager.supports_item_unsubscribe(&WallpaperEntry {
+            external_id: None,
+            ..subscription_entry
+        }));
+
+        block_value(async {
+            manager
+                .set_subscription("separate_flows", "item", true)
+                .await
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(state_root.join("org.test.state")).unwrap(),
+            "0"
+        );
+    }
+
+    #[test]
+    fn plugin_http_sessions_are_isolated_persisted_and_cleared_by_the_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_root = dir.path().join("state");
+        let state_store = crate::plugin::state_store::PluginStateStore::new(
+            state_root.clone(),
+            dir.path().to_path_buf(),
+        );
+        let script = |name: &str, cookie: &str| {
+            format!(
+                r#"
+local M = {{}}
+function M.info()
+    return {{
+        name = "{name}",
+        capabilities = {{ discover = {{ search = true }} }},
+        actions = {{ {{ id = "sign_out", kind = "invoke" }} }},
+    }}
+end
+M.discover = {{}}
+function M.discover.search(ctx, params)
+    if params.query == "set" then
+        ctx.http:set_cookie(
+            "https://example.com/",
+            "session={cookie}; Domain=example.com; Path=/; Secure"
+        )
+    elseif params.query == "fail" then
+        ctx.http:set_cookie(
+            "https://example.com/",
+            "session=failed; Domain=example.com; Path=/; Secure"
+        )
+        error("callback failed")
+    end
+    return {{
+        items = {{ {{
+            id = ctx.http:cookie("https://example.com/", "session") or "none",
+            title = "",
+            preview_url = "",
+            author = "",
+        }} }},
+        has_more = false,
+    }}
+end
+M.actions = {{}}
+function M.actions.status(ctx)
+    return {{ actions = {{ sign_out = {{ visible = true, enabled = true }} }} }}
+end
+function M.actions.invoke(ctx, action_id)
+    if action_id ~= "sign_out" then error("unexpected action") end
+    ctx.http:clear_cookies()
+end
+return M
+"#
+            )
+        };
+        let first_path = dir.path().join("first.lua");
+        let second_path = dir.path().join("second.lua");
+        std::fs::write(&first_path, script("first", "first")).unwrap();
+        std::fs::write(&second_path, script("second", "second")).unwrap();
+
+        let manager = SourceManager::with_probe_and_state_store(
+            Arc::new(AvFormatProbe::new()),
+            state_store.clone(),
+        )
+        .unwrap();
+        manager
+            .load_plugin(&first_path, "org.first", "1", ENTRY_VERSION_V3)
+            .unwrap();
+        manager
+            .load_plugin(&second_path, "org.second", "1", ENTRY_VERSION_V3)
+            .unwrap();
+        let first =
+            block_value(async { manager.call_discover("first", "set", "", 1, &[]).await }).unwrap();
+        assert_eq!(first.items[0].id, "first");
+        let second =
+            block_value(async { manager.call_discover("second", "", "", 1, &[]).await }).unwrap();
+        assert_eq!(second.items[0].id, "none");
+        assert!(state_root.join("org.first.cookies").is_file());
+        assert!(!state_root.join("org.first.state").exists());
+
+        let failed =
+            block_value(async { manager.call_discover("first", "fail", "", 1, &[]).await });
+        assert!(failed.is_err());
+
+        let restored = SourceManager::with_probe_and_state_store(
+            Arc::new(AvFormatProbe::new()),
+            state_store.clone(),
+        )
+        .unwrap();
+        restored
+            .load_plugin(&first_path, "org.first", "1", ENTRY_VERSION_V3)
+            .unwrap();
+        let after_restart =
+            block_value(async { restored.call_discover("first", "", "", 1, &[]).await }).unwrap();
+        assert_eq!(after_restart.items[0].id, "failed");
+
+        block_value(async {
+            restored
+                .invoke_action("first", "sign_out", &HashMap::new())
+                .await
+        })
+        .unwrap();
+        let signed_out =
+            SourceManager::with_probe_and_state_store(Arc::new(AvFormatProbe::new()), state_store)
+                .unwrap();
+        signed_out
+            .load_plugin(&first_path, "org.first", "1", ENTRY_VERSION_V3)
+            .unwrap();
+        let after_sign_out =
+            block_value(async { signed_out.call_discover("first", "", "", 1, &[]).await }).unwrap();
+        assert_eq!(after_sign_out.items[0].id, "none");
+    }
+
+    #[tokio::test]
+    async fn plugins_have_independent_runtime_locks() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = |name: &str| {
+            format!(
+                r#"
+local M = {{}}
+function M.info()
+    return {{
+        name = "{name}",
+        capabilities = {{ discover = {{ search = true }} }},
+    }}
+end
+M.discover = {{}}
+function M.discover.search(ctx, params)
+    return {{ items = {{}}, has_more = false }}
+end
+return M
+"#,
+            )
+        };
+        let first = dir.path().join("first.lua");
+        let second = dir.path().join("second.lua");
+        std::fs::write(&first, script("first")).unwrap();
+        std::fs::write(&second, script("second")).unwrap();
+        let manager = SourceManager::new().unwrap();
+        manager
+            .load_plugin(&first, "org.first", "1", ENTRY_VERSION_V3)
+            .unwrap();
+        manager
+            .load_plugin(&second, "org.second", "1", ENTRY_VERSION_V3)
+            .unwrap();
+
+        let first_handle = manager.handle("first").unwrap();
+        let first_guard = first_handle.runtime.lock().await;
+        assert!(tokio::time::timeout(
+            Duration::from_millis(50),
+            manager.call_discover("second", "", "", 1, &[]),
+        )
+        .await
+        .is_ok());
+        assert!(tokio::time::timeout(
+            Duration::from_millis(20),
+            manager.call_discover("first", "", "", 1, &[]),
+        )
+        .await
+        .is_err());
+        drop(first_guard);
+    }
+
+    #[test]
+    fn plugin_registry_replacement_keeps_current_runtime_until_candidate_is_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = |name: &str| {
+            format!(
+                r#"
+local M = {{}}
+function M.info()
+    return {{ name = "{name}", capabilities = {{ discover = {{ search = true }} }} }}
+end
+M.discover = {{}}
+function M.discover.search(ctx, params) return {{ items = {{}}, has_more = false }} end
+return M
+"#
+            )
+        };
+        let old_path = dir.path().join("old.lua");
+        let new_path = dir.path().join("new.lua");
+        let invalid_path = dir.path().join("invalid.lua");
+        std::fs::write(&old_path, script("old")).unwrap();
+        std::fs::write(&new_path, script("new")).unwrap();
+        std::fs::write(&invalid_path, "error('invalid replacement')").unwrap();
+
+        let current = SourceManager::new().unwrap();
+        current
+            .load_plugin(&old_path, "org.old", "1", ENTRY_VERSION_V3)
+            .unwrap();
+        block_value(current.suspend_plugins());
+        let invalid = SourceManager::new().unwrap();
+        assert!(invalid
+            .load_plugin(&invalid_path, "org.new", "1", ENTRY_VERSION_V3)
+            .is_err());
+        assert_eq!(current.discover_sources().unwrap()[0].name, "old");
+        assert!(block_value(async { current.call_discover("old", "", "", 1, &[]).await }).is_err());
+        current.resume_plugins();
+        assert!(block_value(async { current.call_discover("old", "", "", 1, &[]).await }).is_ok());
+
+        let replacement = SourceManager::new().unwrap();
+        replacement
+            .load_plugin(&new_path, "org.new", "1", ENTRY_VERSION_V3)
+            .unwrap();
+        replacement
+            .retain_plugins_from(&current, &HashSet::from(["org.old".to_string()]))
+            .unwrap();
+        block_value(current.suspend_plugins());
+        current.replace_plugins(replacement).unwrap();
+        assert_eq!(
+            current
+                .discover_sources()
+                .unwrap()
+                .into_iter()
+                .map(|source| source.name)
+                .collect::<Vec<_>>(),
+            vec!["new", "old"]
+        );
+    }
+
+    #[tokio::test]
+    async fn lua_callbacks_have_a_host_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = dir.path().join("deadline.lua");
+        std::fs::write(
+            &entry,
+            r#"
+local M = {}
+function M.info()
+    return { name = "deadline", capabilities = { discover = { search = true } } }
+end
+M.discover = {}
+function M.discover.search(ctx, params)
+    while true do end
+end
+return M
+"#,
+        )
+        .unwrap();
+
+        let manager = SourceManager::new().unwrap();
+        manager
+            .load_plugin(&entry, "org.deadline", "1", ENTRY_VERSION_V3)
+            .unwrap();
+        manager
+            .set_test_callback_timeout("deadline", Duration::from_millis(40))
+            .await;
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.call_discover("deadline", "", "", 1, &[]),
+        )
+        .await
+        .expect("host deadline did not interrupt Lua")
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
     }
 
     #[test]
@@ -2564,7 +5928,7 @@ return M
         let plugin_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("plugins/org.waywallen.video/main.lua");
 
-        let mut mgr = SourceManager::new().unwrap();
+        let mgr = SourceManager::new().unwrap();
         let name = mgr
             .load_plugin(&plugin_path, "test.plugin", "1.0", ENTRY_VERSION)
             .unwrap();

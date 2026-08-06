@@ -237,7 +237,11 @@ fn read_framed(sock: &UnixStream) -> CodecResult<(u16, Vec<u8>, Vec<OwnedFd>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::generated::{Event, EventIn, PROTOCOL_VERSION};
+    use crate::ipc::generated::{
+        AudioStreamFormat, AudioWindow, BufferFormat, BufferPool, ControlTransition, Event,
+        EventIn, EventSubscription, EventSubscriptionResult, EventSubscriptionStatus, Extent,
+        Frame, MediaPlaybackState, MprisSnapshot, RendererInit, PROTOCOL_VERSION,
+    };
     use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
     use std::ffi::CString;
     use std::io::{Read, Seek, SeekFrom, Write};
@@ -250,7 +254,9 @@ mod tests {
     #[test]
     fn roundtrip_control_no_fds() {
         let (a, b) = pair();
-        let sent = EventIn::SetFps { fps: 30 };
+        let sent = EventIn::Pause {
+            transition: ControlTransition { fade_ms: 30 },
+        };
         send_control(&a, &sent, &[]).unwrap();
         let (got, fds) = recv_control(&b).unwrap();
         assert_eq!(sent, got);
@@ -286,10 +292,12 @@ mod tests {
     fn roundtrip_init() {
         let (a, b) = pair();
         let sent = EventIn::Init {
-            protocol_version: PROTOCOL_VERSION,
-            spawn_version: 8,
-            settings: vec![("fps".into(), "60".into()), ("volume".into(), "1.0".into())],
-            user_properties: String::new(),
+            config: RendererInit {
+                protocol_version: PROTOCOL_VERSION,
+                spawn_version: 9,
+                settings: vec![("fps".into(), "60".into()), ("volume".into(), "1.0".into())],
+                user_properties: String::new(),
+            },
         };
         let _ = PROTOCOL_VERSION; // silence unused-import warning
         send_control(&a, &sent, &[]).unwrap();
@@ -301,10 +309,18 @@ mod tests {
     fn roundtrip_play_pause_shutdown() {
         let (a, b) = pair();
         for msg in [
-            EventIn::Play { fade_ms: 750 },
-            EventIn::Pause { fade_ms: 750 },
-            EventIn::Mute { fade_ms: 750 },
-            EventIn::Unmute { fade_ms: 750 },
+            EventIn::Play {
+                transition: ControlTransition { fade_ms: 750 },
+            },
+            EventIn::Pause {
+                transition: ControlTransition { fade_ms: 750 },
+            },
+            EventIn::Mute {
+                transition: ControlTransition { fade_ms: 750 },
+            },
+            EventIn::Unmute {
+                transition: ControlTransition { fade_ms: 750 },
+            },
             EventIn::Shutdown,
         ] {
             send_control(&a, &msg, &[]).unwrap();
@@ -317,17 +333,68 @@ mod tests {
     fn roundtrip_mpris() {
         let (a, b) = pair();
         let sent = EventIn::Mpris {
-            state: 1,
-            title: "Song".into(),
-            artist: "Artist".into(),
-            album: "Album".into(),
-            album_artist: "Album Artist".into(),
-            art_url: "/tmp/cover.png".into(),
-            previous_art_url: "/tmp/previous.png".into(),
+            snapshot: MprisSnapshot {
+                state: MediaPlaybackState::Playing,
+                title: "Song".into(),
+                artist: "Artist".into(),
+                album: "Album".into(),
+                album_artist: "Album Artist".into(),
+                art_url: "/tmp/cover.png".into(),
+                previous_art_url: "/tmp/previous.png".into(),
+            },
         };
         send_control(&a, &sent, &[]).unwrap();
         let (got, _) = recv_control(&b).unwrap();
         assert_eq!(sent, got);
+    }
+
+    #[test]
+    fn roundtrip_runtime_subscriptions_and_audio() {
+        let (a, b) = pair();
+        let subscription = Event::SetEventSubscriptions {
+            subscription: EventSubscription {
+                revision: 7,
+                kinds: vec!["audio".into(), "pointer".into()],
+            },
+        };
+        send_event(&a, &subscription, &[]).unwrap();
+        let (got, fds) = recv_event(&b).unwrap();
+        assert_eq!(subscription, got);
+        assert!(fds.is_empty());
+
+        let applied = EventIn::EventSubscriptionsApplied {
+            result: EventSubscriptionResult {
+                revision: 7,
+                status: EventSubscriptionStatus::Applied,
+                kinds: vec!["pointer".into(), "audio".into()],
+                reason: String::new(),
+            },
+        };
+        send_control(&a, &applied, &[]).unwrap();
+        let (got, fds) = recv_control(&b).unwrap();
+        assert_eq!(applied, got);
+        assert!(fds.is_empty());
+
+        let audio = EventIn::AudioWindow {
+            window: AudioWindow {
+                subscription_revision: 7,
+                generation: 3,
+                sequence: 11,
+                captured_at_ns: 42,
+                end_sample_frame: 4096,
+                format: AudioStreamFormat {
+                    sample_rate_hz: 48_000,
+                    channels: 2,
+                },
+                frames: 4096,
+                flags: 0,
+                samples: (0..8192).map(|index| index as f32 / 8191.0).collect(),
+            },
+        };
+        send_control(&a, &audio, &[]).unwrap();
+        let (got, fds) = recv_control(&b).unwrap();
+        assert_eq!(audio, got);
+        assert!(fds.is_empty());
     }
 
     fn make_memfd() -> OwnedFd {
@@ -348,17 +415,23 @@ mod tests {
         let fd_to_send: RawFd = f.as_raw_fd();
 
         let sent = Event::BindBuffers {
-            generation: 1,
-            flags: 0,
-            count: 1,
-            fourcc: 0x34324152, // 'AR24'
-            width: 1280,
-            height: 720,
-            modifier: 0,
-            planes_per_buffer: 1,
-            stride: vec![1280 * 4],
-            plane_offset: vec![0],
-            size: vec![payload.len() as u64],
+            pool: BufferPool {
+                generation: 1,
+                flags: 0,
+                count: 1,
+                format: BufferFormat {
+                    fourcc: 0x34324152, // 'AR24'
+                    modifier: 0,
+                    plane_count: 1,
+                },
+                extent: Extent {
+                    width: 1280,
+                    height: 720,
+                },
+                stride: vec![1280 * 4],
+                plane_offset: vec![0],
+                size: vec![payload.len() as u64],
+            },
         };
         send_event(&a, &sent, &[fd_to_send]).unwrap();
 
@@ -385,10 +458,12 @@ mod tests {
         let err = send_event(
             &a,
             &Event::FrameReady {
-                image_index: 0,
-                seq: 1,
-                ts_ns: 0,
-                release_point: 0,
+                frame: Frame {
+                    image_index: 0,
+                    sequence: 1,
+                    produced_at_ns: 0,
+                    release_point: 0,
+                },
             },
             &[],
         )
@@ -406,19 +481,32 @@ mod tests {
     fn fd_limit_enforced() {
         let (a, _b) = pair();
         let fds: Vec<RawFd> = (0..(MAX_FDS_PER_MSG + 1) as i32).collect();
-        let err = send_control(&a, &EventIn::Play { fade_ms: 0 }, &fds).unwrap_err();
+        let err = send_control(
+            &a,
+            &EventIn::Play {
+                transition: ControlTransition { fade_ms: 0 },
+            },
+            &fds,
+        )
+        .unwrap_err();
         assert!(matches!(err, CodecError::TooManyFds(_)));
     }
 
     #[test]
     fn back_to_back_frames() {
         let (a, b) = pair();
-        send_control(&a, &EventIn::Play { fade_ms: 0 }, &[]).unwrap();
-        send_control(&a, &EventIn::SetFps { fps: 60 }, &[]).unwrap();
+        let play = EventIn::Play {
+            transition: ControlTransition { fade_ms: 0 },
+        };
+        let settings = EventIn::SettingChanged {
+            settings: vec![("fps".into(), "60".into())],
+        };
+        send_control(&a, &play, &[]).unwrap();
+        send_control(&a, &settings, &[]).unwrap();
         let (r1, _) = recv_control(&b).unwrap();
         let (r2, _) = recv_control(&b).unwrap();
-        assert_eq!(r1, EventIn::Play { fade_ms: 0 });
-        assert_eq!(r2, EventIn::SetFps { fps: 60 });
+        assert_eq!(r1, play);
+        assert_eq!(r2, settings);
     }
 
     #[test]

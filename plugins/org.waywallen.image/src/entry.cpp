@@ -4,13 +4,9 @@ module;
 
 #include "av_image.hpp"
 
-#include <cmath>
 #include <errno.h>
 #include <signal.h>
-#include <string.h>
-
-#include <ctype.h>
-#include <stdlib.h>
+#include <stdio.h>
 
 #include <sys/prctl.h>
 #include <sys/socket.h>
@@ -27,6 +23,8 @@ import waywallen.bridge;
 
 namespace
 {
+
+using namespace rstd::literals;
 
 struct Options {
     std::string ipc_path;
@@ -64,19 +62,26 @@ constexpr const char* kSchemeColorKey = "waywallen.scheme_color";
 }
 
 std::string to_std_string(const rstd::string::String& value) {
-    return { value.data(), value.size() };
+    return rstd::cppstd::to_string(value);
+}
+
+auto as_rstd_str(std::string_view value) -> rstd::ref<rstd::str> {
+    return rstd::move(rstd::cppstd::as_str(value)).unwrap();
 }
 
 void write_cli_output(rstd::ref<rstd::str> text, rstd::argparse::OutputTarget::Tag target) {
     FILE* stream = target == rstd::argparse::OutputTarget::Tag::Stderr ? stderr : stdout;
-    std::fwrite(text.data(), 1, text.size(), stream);
+    std::fwrite(text.data(), 1, text.size().to_primitive(), stream);
 }
 
 rstd::prelude::Vec<rstd::ffi::OsString> cli_argv(int argc, char** argv) {
     auto values =
         rstd::prelude::Vec<rstd::ffi::OsString>::with_capacity(static_cast<rstd::usize>(argc));
     for (int i = 0; i < argc; ++i) {
-        values.push(rstd::ffi::OsString::from(rstd::ref<rstd::ffi::OsStr>(argv[i])));
+        auto bytes = rstd::slice<rstd::u8>::from_raw_parts(
+            reinterpret_cast<const rstd::byte*>(argv[i]), rstd::usize(std::strlen(argv[i])));
+        values.push(rstd::ffi::OsString::from(
+            rstd::ref<rstd::ffi::OsStr>::from_encoded_bytes_unchecked(bytes)));
     }
     return values;
 }
@@ -137,30 +142,30 @@ bool parse_color_wire(const char* raw, ClearColor& out) {
 ParseArgsResult parse_args(int argc, char** argv) {
     using namespace rstd::argparse;
 
-    auto command = Command::make("waywallen-image-renderer");
-    command.about("Render image wallpapers for waywallen");
-    auto ipc  = command.add_arg(Arg<rstd::string::String>::value("ipc", string_parser())
-                                    .long_name("ipc")
-                                    .value_name("SOCKET")
-                                    .help("Connect to the renderer IPC socket"));
-    auto path = command.add_arg(Arg<rstd::string::String>::value("path", string_parser())
-                                    .long_name("path")
-                                    .value_name("IMAGE")
-                                    .help("Image wallpaper path"));
-    command.add_arg(Arg<bool>::flag("decode-only")
-                        .long_name("decode-only")
-                        .help("Decode the image without starting the renderer"));
-    command.add_arg(Arg<bool>::flag("vulkan-probe")
-                        .long_name("vulkan-probe")
-                        .help("Probe Vulkan renderer initialization"));
-    command.add_arg(Arg<bool>::flag("print-caps")
-                        .long_name("print-caps")
-                        .help("Print renderer capabilities as JSON"));
+    auto command = Command::make("waywallen-image-renderer"_str);
+    command.about("Render image wallpapers for waywallen"_str);
+    auto ipc  = command.add_arg(Arg<rstd::string::String>::value("ipc"_str, string_parser())
+                                    .long_name("ipc"_str)
+                                    .value_name("SOCKET"_str)
+                                    .help("Connect to the renderer IPC socket"_str));
+    auto path = command.add_arg(Arg<rstd::string::String>::value("path"_str, string_parser())
+                                    .long_name("path"_str)
+                                    .value_name("IMAGE"_str)
+                                    .help("Image wallpaper path"_str));
+    command.add_arg(Arg<bool>::flag("decode-only"_str)
+                        .long_name("decode-only"_str)
+                        .help("Decode the image without starting the renderer"_str));
+    command.add_arg(Arg<bool>::flag("vulkan-probe"_str)
+                        .long_name("vulkan-probe"_str)
+                        .help("Probe Vulkan renderer initialization"_str));
+    command.add_arg(Arg<bool>::flag("print-caps"_str)
+                        .long_name("print-caps"_str)
+                        .help("Print renderer capabilities as JSON"_str));
     auto render_node =
-        command.add_arg(Arg<rstd::string::String>::value("render-node", string_parser())
-                            .long_name("render-node")
-                            .value_name("DEVICE")
-                            .help("Use a specific DRM render node"));
+        command.add_arg(Arg<rstd::string::String>::value("render-node"_str, string_parser())
+                            .long_name("render-node"_str)
+                            .value_name("DEVICE"_str)
+                            .help("Use a specific DRM render node"_str));
 
     auto built = std::move(command).build();
     if (built.is_err()) {
@@ -174,14 +179,14 @@ ParseArgsResult parse_args(int argc, char** argv) {
         auto error  = std::move(parsed).unwrap_err();
         auto report = parser.render_error(error);
         write_cli_output(report.text(), report.target());
-        return { .exit_code = report.exit_code() };
+        return { .exit_code = report.exit_code().to_primitive() };
     }
 
     auto outcome = std::move(parsed).unwrap();
     if (outcome.is_Display()) {
         const auto& request = outcome.as_Display().request;
         write_cli_output(request.text(), request.target());
-        return { .exit_code = request.exit_code() };
+        return { .exit_code = request.exit_code().to_primitive() };
     }
 
     auto    known   = std::move(outcome).as_Parsed().value;
@@ -196,9 +201,9 @@ ParseArgsResult parse_args(int argc, char** argv) {
     if (auto value = get_arg(*matches, render_node); value.is_some()) {
         options.render_node = to_std_string(**value);
     }
-    options.decode_only  = matches->contains("decode-only");
-    options.vulkan_probe = matches->contains("vulkan-probe");
-    options.print_caps   = matches->contains("print-caps");
+    options.decode_only  = matches->contains("decode-only"_str);
+    options.vulkan_probe = matches->contains("vulkan-probe"_str);
+    options.print_caps   = matches->contains("print-caps"_str);
     return { .options = std::move(options), .should_run = true };
 }
 
@@ -248,13 +253,13 @@ static void maybe_dump_producer_frame(const HostState& host, const ww_pool_direc
                   "%s/producer-%06llu-0x%08x-0x%016llx.bin",
                   dir,
                   static_cast<unsigned long long>(seq),
-                  d.fourcc,
-                  static_cast<unsigned long long>(d.modifier));
+                  d.format.fourcc,
+                  static_cast<unsigned long long>(d.format.modifier));
     FILE* f = std::fopen(path, "wb");
     if (! f) {
         rstd_warn("waywallen-image-renderer: dump open {}: {}",
                   static_cast<const char*>(path),
-                  static_cast<const char*>(::strerror(errno)));
+                  static_cast<const char*>(std::strerror(errno)));
         return;
     }
     size_t w = std::fwrite(host.rgba_data, 1, host.rgba_size, f);
@@ -273,8 +278,8 @@ static void maybe_dump_producer_frame(const HostState& host, const ww_pool_direc
                   "%s/producer-%06llu-0x%08x-0x%016llx.json",
                   dir,
                   static_cast<unsigned long long>(seq),
-                  d.fourcc,
-                  static_cast<unsigned long long>(d.modifier));
+                  d.format.fourcc,
+                  static_cast<unsigned long long>(d.format.modifier));
     FILE* sf = std::fopen(sidecar, "w");
     if (! sf) return;
     // Note: the dump is always tightly-packed RGBA8 (`width*height*4`
@@ -299,8 +304,8 @@ static void maybe_dump_producer_frame(const HostState& host, const ww_pool_direc
                  "  \"dump_layout\": \"tightly_packed_rgba8\"\n"
                  "}\n",
                  static_cast<unsigned long long>(seq),
-                 d.fourcc,
-                 static_cast<unsigned long long>(d.modifier),
+                 d.format.fourcc,
+                 static_cast<unsigned long long>(d.format.modifier),
                  s.width,
                  s.height,
                  s.stride,
@@ -355,8 +360,11 @@ UploadStatus upload_to_slot(HostState& host, wavsen::video::Producer& producer,
     maybe_dump_producer_frame(
         host, directive, s, g_dump_seq.fetch_add(1, std::memory_order_relaxed));
 
-    auto upload_res = producer.upload_into(
-        reinterpret_cast<VkImage>(s.vk_image), s.width, s.height, host.rgba_data, host.rgba_size);
+    auto upload_res = producer.upload_into(reinterpret_cast<VkImage>(s.vk_image),
+                                           rstd::u32(s.width),
+                                           rstd::u32(s.height),
+                                           host.rgba_data,
+                                           rstd::usize(host.rgba_size));
     if (upload_res.is_err()) {
         ww_bridge_pool_abort_acquired_slot(host.pool, &acquired.identity);
         rstd_error("waywallen-image-renderer: upload_into failed: {}",
@@ -399,15 +407,17 @@ void set_scheme_color(HostState& host, const char* value, bool publish) {
 
 void apply_user_properties(HostState& host, const char* json) {
     if (! json || ! *json) return;
+    auto bytes = rstd::slice<rstd::u8>::from_raw_parts(reinterpret_cast<const rstd::byte*>(json),
+                                                       rstd::usize(std::strlen(json)));
     auto parsed_result =
-        rstd::json::from_str(json, rstd::json::ParseOptions { .allow_comments = true });
+        rstd::json::from_slice(bytes, rstd::json::ParseOptions { .allow_comments = true });
     if (parsed_result.is_err()) return;
     auto parsed = parsed_result.unwrap();
     if (! parsed.is_object()) {
         rstd_warn("waywallen-image-renderer: init.user_properties is not an object; ignored");
         return;
     }
-    auto value = parsed.get(kSchemeColorKey);
+    auto value = parsed.get("waywallen.scheme_color"_str);
     if (value.is_none()) return;
     if ((**value).is_string()) {
         const auto text = rstd::cppstd::to_string(*(**value).as_str());
@@ -442,9 +452,9 @@ void apply_negotiate_request(HostState& host, wavsen::video::Producer& producer,
     host.negotiated.store(true, std::memory_order_release);
     rstd_info("waywallen-image-renderer: NegotiateBuffers honored "
               "(path={} mem_source={} modifier=0x{:016x}) — bind+frame emitted",
-              d.category,
-              d.mem_source,
-              static_cast<unsigned long long>(d.modifier));
+              static_cast<uint32_t>(d.path),
+              static_cast<uint32_t>(d.memory_source),
+              static_cast<unsigned long long>(d.format.modifier));
 }
 
 void apply_control(HostState& host, ww_bridge_control_t& c) {
@@ -458,7 +468,6 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
         break;
     case WW_EVT_IN_PLAY:
     case WW_EVT_IN_PAUSE:
-    case WW_EVT_IN_SET_FPS:
     case WW_EVT_IN_POINTER_MOTION:
     case WW_EVT_IN_POINTER_BUTTON:
     case WW_EVT_IN_POINTER_AXIS:
@@ -467,11 +476,11 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
         // permissive in case a misconfigured daemon forwards anyway.
         break;
     case WW_EVT_IN_SETTING_CHANGED: {
-        ww_bridge_setting_changed_t as {};
-        if (ww_bridge_setting_changed_from_control(&c, &as) == 0) {
-            for (uint32_t i = 0; i < as.settings.count; ++i) {
-                const char* key = as.settings.data[i].key;
-                const char* val = as.settings.data[i].value;
+        const auto& settings = c.u.setting_changed.settings;
+        {
+            for (uint32_t i = 0; i < settings.count; ++i) {
+                const char* key = settings.data[i].key;
+                const char* val = settings.data[i].value;
                 if (! key || ! val) continue;
                 if (std::strcmp(key, kSchemeColorKey) == 0) {
                     set_scheme_color(host, val, true);
@@ -481,22 +490,12 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
                               static_cast<const char*>(key));
                 }
             }
-            ww_bridge_setting_changed_free(&as);
         }
         break;
     }
     case WW_EVT_IN_SHUTDOWN: signal_shutdown(host); break;
     case WW_EVT_IN_NEGOTIATE_BUFFERS: {
-        const auto&         nb = c.u.negotiate_buffers;
-        ww_pool_directive_t d {};
-        d.category    = nb.path;
-        d.mem_source  = nb.mem_source;
-        d.fourcc      = nb.fourcc;
-        d.modifier    = nb.modifier;
-        d.plane_count = nb.plane_count;
-        d.sync_mode   = nb.sync_mode;
-        d.color       = nb.color;
-        d.mem_hint    = nb.mem_hint;
+        ww_pool_directive_t d = c.u.negotiate_buffers.directive;
         /* Static image: one slot is enough. */
         d.count = 1;
         {
@@ -543,7 +542,8 @@ void reader_loop(HostState& host) {
 // a `socketpair(AF_UNIX)`, ask it to advertise, then drain the
 // `format_caps` message on the other end and decode it.
 static int print_caps_json(const Options& opt) {
-    auto producer_res = wavsen::video::Producer::create(opt.width, opt.height);
+    auto producer_res =
+        wavsen::video::Producer::create(rstd::u32(opt.width), rstd::u32(opt.height));
     if (producer_res.is_err()) {
         rstd_error("waywallen-image-renderer: vk_producer: {}",
                    std::move(producer_res).unwrap_err().message.as_str());
@@ -554,7 +554,7 @@ static int print_caps_json(const Options& opt) {
     int sv[2] = { -1, -1 };
     if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
         rstd_error("waywallen-image-renderer: socketpair: {}",
-                   static_cast<const char*>(::strerror(errno)));
+                   static_cast<const char*>(std::strerror(errno)));
         return 1;
     }
 
@@ -563,7 +563,7 @@ static int print_caps_json(const Options& opt) {
     pool_init.physical_device    = producer->physical_device();
     pool_init.device             = producer->device();
     pool_init.queue              = producer->queue();
-    pool_init.queue_family_index = producer->queue_family_index();
+    pool_init.queue_family_index = producer->queue_family_index().to_primitive();
     pool_init.get_instance_proc_addr =
         reinterpret_cast<void* (*)(void*, const char*)>(vkGetInstanceProcAddr);
     pool_init.device_uuid = producer->device_uuid();
@@ -643,6 +643,7 @@ static int print_caps_json(const Options& opt) {
         rstd_error("waywallen-image-renderer: did not observe FormatCaps");
         return 1;
     }
+    const auto& capabilities = caps.capabilities;
 
     auto put_uuid = [](const ww_array_u32_t& a) -> std::string {
         // device_uuid / driver_uuid are 16 bytes packed as 4×u32 LE on
@@ -668,29 +669,29 @@ static int print_caps_json(const Options& opt) {
     std::printf("{\n");
     std::printf("  \"by_fourcc\": {\n");
     size_t cursor = 0;
-    for (uint32_t i = 0; i < caps.fourccs.count; ++i) {
-        const uint32_t fc = caps.fourccs.data[i];
-        const uint32_t n  = caps.mod_counts.data[i];
+    for (uint32_t i = 0; i < capabilities.fourccs.count; ++i) {
+        const uint32_t fc = capabilities.fourccs.data[i];
+        const uint32_t n  = capabilities.mod_counts.data[i];
         std::printf("    \"0x%08x\": [", fc);
         for (uint32_t j = 0; j < n; ++j) {
             std::printf("%s\n      {\"modifier\": %llu, \"plane_count\": %u}",
                         j ? "," : "",
-                        static_cast<unsigned long long>(caps.modifiers.data[cursor + j]),
-                        caps.plane_counts.data[cursor + j]);
+                        static_cast<unsigned long long>(capabilities.modifiers.data[cursor + j]),
+                        capabilities.plane_counts.data[cursor + j]);
         }
         cursor += n;
-        std::printf("\n    ]%s\n", (i + 1 < caps.fourccs.count) ? "," : "");
+        std::printf("\n    ]%s\n", (i + 1 < capabilities.fourccs.count) ? "," : "");
     }
     std::printf("  },\n");
-    std::printf("  \"device_uuid\": %s,\n", put_uuid(caps.device_uuid).c_str());
-    std::printf("  \"driver_uuid\": %s,\n", put_uuid(caps.driver_uuid).c_str());
-    std::printf("  \"drm_render_major\": %u,\n", caps.drm_render_major);
-    std::printf("  \"drm_render_minor\": %u,\n", caps.drm_render_minor);
-    std::printf("  \"sync\": %u,\n", caps.sync_caps);
-    std::printf("  \"color\": %u,\n", caps.color_caps);
-    std::printf("  \"mem_hint\": %u,\n", caps.mem_hints);
-    std::printf("  \"extent_max_w\": %u,\n", caps.extent_max_w);
-    std::printf("  \"extent_max_h\": %u\n", caps.extent_max_h);
+    std::printf("  \"device_uuid\": %s,\n", put_uuid(capabilities.device_uuid).c_str());
+    std::printf("  \"driver_uuid\": %s,\n", put_uuid(capabilities.driver_uuid).c_str());
+    std::printf("  \"drm_render_major\": %u,\n", capabilities.drm_node.major);
+    std::printf("  \"drm_render_minor\": %u,\n", capabilities.drm_node.minor);
+    std::printf("  \"sync\": %u,\n", capabilities.sync_caps);
+    std::printf("  \"color\": %u,\n", capabilities.color_caps);
+    std::printf("  \"mem_hint\": %u,\n", capabilities.mem_hints);
+    std::printf("  \"extent_max_w\": %u,\n", capabilities.max_extent.width);
+    std::printf("  \"extent_max_h\": %u\n", capabilities.max_extent.height);
     std::printf("}\n");
     std::fflush(stdout);
     ww_evt_format_caps_free(&caps);
@@ -734,7 +735,8 @@ int run(int argc, char** argv) {
     }
 
     if (opt.vulkan_probe) {
-        auto prod_res = wavsen::video::Producer::create(opt.width, opt.height);
+        auto prod_res =
+            wavsen::video::Producer::create(rstd::u32(opt.width), rstd::u32(opt.height));
         if (prod_res.is_err()) {
             rstd_error("waywallen-image-renderer: vk_producer: {}",
                        std::move(prod_res).unwrap_err().message.as_str());
@@ -782,18 +784,24 @@ int run(int argc, char** argv) {
      * double-send but we ignore it here. */
     HostState host;
     host.sock = ww_bridge_connect(opt.ipc_path.c_str());
-    if (host.sock < 0) die("ww_bridge_connect: " + std::string(::strerror(-host.sock)));
+    if (host.sock < 0) die("ww_bridge_connect: " + std::string(std::strerror(-host.sock)));
 
-    ww_bridge_init_t init {};
+    waywallen_renderer_init_t init {};
     if (int rc = ww_bridge_recv_init(host.sock, &init); rc < 0) {
         // Surface the rejection structured-ly so the daemon's spawn()
         // gets a useful error string. `init.spawn_version` is filled
         // by recv_init even on -EPROTO (version mismatch).
         const char* reason = (rc == -EPROTO) ? "init: protocol error or unsupported spawn_version"
                                              : "init: recv failed";
-        ww_bridge_send_init_nack(
-            host.sock, init.spawn_version, WW_BRIDGE_SUPPORTED_SPAWN_VERSION, reason);
-        ww_bridge_init_free(&init);
+        waywallen_init_rejection_t rejection {
+            .received_protocol_version  = init.protocol_version,
+            .supported_protocol_version = WW_BRIDGE_SUPPORTED_PROTOCOL_VERSION,
+            .received_spawn_version     = init.spawn_version,
+            .supported_spawn_version    = WW_BRIDGE_SUPPORTED_SPAWN_VERSION,
+            .reason                     = const_cast<char*>(reason),
+        };
+        ww_bridge_send_init_nack(host.sock, &rejection);
+        waywallen_renderer_init_free(&init);
         die(std::string(reason) + " rc=" + std::to_string(rc));
     }
 
@@ -812,7 +820,7 @@ int run(int argc, char** argv) {
         }
     }
     apply_user_properties(host, init.user_properties);
-    ww_bridge_init_free(&init);
+    waywallen_renderer_init_free(&init);
 
     /* --- Decode + Vulkan setup --- */
     if (opt.image_path.empty()) die("--path <image-file> is required");
@@ -825,10 +833,11 @@ int run(int argc, char** argv) {
     opt.width  = rgba_buf.width;
     opt.height = rgba_buf.height;
 
-    auto producer_res = opt.render_node.empty()
-                            ? wavsen::video::Producer::create(opt.width, opt.height)
-                            : wavsen::video::Producer::create_with_render_node(
-                                  opt.width, opt.height, opt.render_node.c_str());
+    auto producer_res =
+        opt.render_node.empty()
+            ? wavsen::video::Producer::create(rstd::u32(opt.width), rstd::u32(opt.height))
+            : wavsen::video::Producer::create_with_render_node(
+                  rstd::u32(opt.width), rstd::u32(opt.height), as_rstd_str(opt.render_node));
     if (producer_res.is_err()) {
         die("vk_producer: " + to_std_string(std::move(producer_res).unwrap_err().message));
     }
@@ -848,7 +857,7 @@ int run(int argc, char** argv) {
     pool_init.physical_device    = producer->physical_device();
     pool_init.device             = producer->device();
     pool_init.queue              = producer->queue();
-    pool_init.queue_family_index = producer->queue_family_index();
+    pool_init.queue_family_index = producer->queue_family_index().to_primitive();
     pool_init.get_instance_proc_addr =
         reinterpret_cast<void* (*)(void*, const char*)>(vkGetInstanceProcAddr);
     pool_init.device_uuid = producer->device_uuid();

@@ -12,7 +12,7 @@ MD.Page {
     padding: 0
     showHeader: true
     showBackground: false
-    title: 'Settings'
+    title: qsTr('Settings')
     scrolling: !m_flick.atYBeginning
 
     actions: [
@@ -65,6 +65,17 @@ MD.Page {
         }
     }
 
+    function formatBytes(bytes) {
+        let value = Math.max(0, Number(bytes ?? 0));
+        const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+        let index = 0;
+        while (value >= 1024 && index < units.length - 1) {
+            value /= 1024;
+            ++index;
+        }
+        return value.toFixed(index === 0 ? 0 : 1) + " " + units[index];
+    }
+
     W.SettingsGetQuery {
         id: getQ
         onGlobalChanged: root._maybeClearSubmittedGlobal()
@@ -84,6 +95,7 @@ MD.Page {
 
     W.AutostartSetQuery {
         id: autostartSetQ
+        forwardError: false
         onStatusChanged: {
             if (status === 2) {
                 autostartGetQ.reload();
@@ -109,12 +121,15 @@ MD.Page {
     }
 
     Component.onCompleted: {
+        W.App.refreshNetworkCacheSize();
         if (W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready) {
             getQ.reload();
             if (W.Util.isFlatpak)
                 autostartGetQ.reload();
         }
     }
+
+    onVisibleChanged: if (visible) W.App.refreshNetworkCacheSize()
 
     // Same pattern as WallpaperPage._persistGlobalChange but routed
     // through a 200ms debounce — slider drags would otherwise flood
@@ -154,6 +169,7 @@ MD.Page {
     }
 
     property int autoReplayRevision: 0
+    property int pauseEffectRevision: 0
 
     readonly property var kAutoReplayRows: [
         { key: "anyWindow",       label: qsTr("Any window") },
@@ -174,6 +190,13 @@ MD.Page {
     function _listIndex(list, value) {
         for (let i = 0; i < list.length; ++i)
             if (list[i].value === value) return i;
+        return 0;
+    }
+
+    function _uiLanguageIndex() {
+        const languages = W.App.availableUiLanguages;
+        for (let i = 0; i < languages.length; ++i)
+            if (languages[i].code === W.App.uiLanguage) return i;
         return 0;
     }
 
@@ -199,9 +222,13 @@ MD.Page {
     function _defaultGlobalPageSettings() {
         return {
             autoReplay: root._defaultAutoReplay(),
+            pauseEffect: root._defaultPauseEffect(),
             queueMode: "sequential",
             rotationSecs: 0,
             audioFadeMs: 500,
+            muteWhenOtherAudio: false,
+            audioCaptureEnabled: true,
+            pointerForwardingEnabled: true,
             "renderer.enable_audio": true,
             "renderer.volume": 100,
             pluginUpdateNotifications: true,
@@ -219,7 +246,14 @@ MD.Page {
         m_pending.nextGlobal = null;
         m_pending.submittedGlobal = nextGlobal;
         W.Global.sidebarAutoExpand = true;
+        W.Global.networkCacheMaximumMiB = 1024;
+        W.Global.setThemeMode("system");
+        W.Global.accentColor = W.Global.defaultAccentColor;
+        W.Global.setAccentMode("system");
+        if (!W.App.setUiLanguage("system"))
+            W.Global.toastError(qsTr("Failed to change language"));
         root.autoReplayRevision += 1;
+        root.pauseEffectRevision += 1;
         setQ.global = nextGlobal;
         setQ.plugins = getQ.plugins;
         setQ.reload();
@@ -230,9 +264,13 @@ MD.Page {
             return "";
         return JSON.stringify({
             autoReplay: root._normalizedAutoReplay(g.autoReplay || ({})),
+            pauseEffect: root._normalizedPauseEffect(g.pauseEffect || ({})),
             queueMode: g.queueMode ?? "sequential",
             rotationSecs: Number(g.rotationSecs ?? 0),
             audioFadeMs: Number(g.audioFadeMs ?? 500),
+            muteWhenOtherAudio: Boolean(g.muteWhenOtherAudio ?? false),
+            audioCaptureEnabled: Boolean(g.audioCaptureEnabled),
+            pointerForwardingEnabled: Boolean(g.pointerForwardingEnabled ?? true),
             rendererEnableAudio: root._rendererAudioEnabled(g),
             rendererVolume: root._rendererVolume(g),
             pluginUpdateNotifications: Boolean(g.pluginUpdateNotifications ?? true),
@@ -243,6 +281,34 @@ MD.Page {
 
     function _normalizedAutoReplay(policy) {
         return Object.assign(root._defaultAutoReplay(), policy || ({}));
+    }
+
+    function _defaultPauseEffect() {
+        return {
+            kind: WC.PauseEffectKind.PAUSE_EFFECT_KIND_NONE,
+            blur: { radius: 30 }
+        };
+    }
+
+    function _normalizedPauseEffect(config) {
+        const normalized = Object.assign(root._defaultPauseEffect(), config || ({}));
+        normalized.blur = Object.assign({ radius: 30 }, config?.blur || ({}));
+        return normalized;
+    }
+
+    function _pauseEffect() {
+        root.pauseEffectRevision;
+        const g = root._currentGlobal();
+        return root._normalizedPauseEffect(g?.pauseEffect || ({}));
+    }
+
+    function _mutPauseEffect(fn) {
+        root._mut(g => {
+            const config = root._normalizedPauseEffect(g.pauseEffect || ({}));
+            fn(config);
+            g.pauseEffect = config;
+        });
+        root.pauseEffectRevision += 1;
     }
 
     function _rendererAudioEnabled(globalSettings) {
@@ -309,6 +375,124 @@ MD.Page {
 
             SettingItem {
                 first: true
+                last: false
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Theme")
+                    }
+
+                    MD.SegmentedButtonGroup {
+                        size: MD.Enum.XS
+
+                        MD.SegmentedButton {
+                            text: qsTr("Light")
+                            checked: W.Global.themeMode === "light"
+                            onClicked: W.Global.setThemeMode("light")
+                        }
+
+                        MD.SegmentedButton {
+                            text: qsTr("Dark")
+                            checked: W.Global.themeMode === "dark"
+                            onClicked: W.Global.setThemeMode("dark")
+                        }
+
+                        MD.SegmentedButton {
+                            text: qsTr("System")
+                            checked: W.Global.themeMode === "system"
+                            onClicked: W.Global.setThemeMode("system")
+                        }
+                    }
+                }
+            }
+
+            SettingItem {
+                first: false
+                last: false
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Accent color")
+                    }
+
+                    MD.SegmentedButtonGroup {
+                        size: MD.Enum.XS
+
+                        MD.SegmentedButton {
+                            text: qsTr("Custom")
+                            checked: W.Global.accentMode === "custom"
+                            onClicked: W.Global.setAccentMode("custom")
+                        }
+
+                        MD.SegmentedButton {
+                            text: qsTr("System")
+                            checked: W.Global.accentMode === "system"
+                            onClicked: W.Global.setAccentMode("system")
+                        }
+                    }
+                }
+
+                MD.ColorPickerButton {
+                    id: m_accent_color
+                    visible: W.Global.accentMode === "custom"
+                    Layout.alignment: Qt.AlignRight
+                    Layout.topMargin: 4
+                    Layout.preferredWidth: 96
+                    Layout.preferredHeight: 32
+                    showAlpha: false
+                    onAccepted: color => W.Global.accentColor = color
+                }
+
+                Binding {
+                    target: m_accent_color
+                    property: "color"
+                    value: W.Global.accentColor
+                }
+            }
+
+            SettingItem {
+                first: false
+                last: false
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Language")
+                    }
+
+                    MD.ComboBox {
+                        id: m_ui_language
+                        Layout.preferredWidth: 180
+                        model: W.App.availableUiLanguages.map(language => language.label)
+                        onActivated: index => {
+                            const languages = W.App.availableUiLanguages;
+                            if (index < 0 || index >= languages.length)
+                                return;
+                            if (!W.App.setUiLanguage(languages[index].code))
+                                W.Global.toastError(qsTr("Failed to change language"));
+                        }
+                    }
+                    Binding {
+                        target: m_ui_language
+                        property: "currentIndex"
+                        value: root._uiLanguageIndex()
+                    }
+                }
+            }
+
+            SettingItem {
+                first: false
                 last: false
 
                 RowLayout {
@@ -436,6 +620,33 @@ MD.Page {
 
             SettingItem {
                 first: false
+                last: false
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Mouse forwarding")
+                    }
+
+                    MD.Switch {
+                        id: m_pointer_forwarding
+                        onToggled: root._mut(g => {
+                            g.pointerForwardingEnabled = checked;
+                        })
+                    }
+                    Binding {
+                        target: m_pointer_forwarding
+                        property: "checked"
+                        value: Boolean(root._currentGlobal()?.pointerForwardingEnabled ?? true)
+                    }
+                }
+            }
+
+            SettingItem {
+                first: false
                 last: true
 
                 RowLayout {
@@ -501,6 +712,81 @@ MD.Page {
                 }
             }
 
+            SettingHeader { text: qsTr("Effect") }
+
+            SettingItem {
+                first: true
+                last: false
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Blur while paused")
+                    }
+
+                    MD.Switch {
+                        id: m_pause_effect_enabled
+                        onToggled: root._mutPauseEffect(config => {
+                            config.kind = checked
+                                ? WC.PauseEffectKind.PAUSE_EFFECT_KIND_BLUR
+                                : WC.PauseEffectKind.PAUSE_EFFECT_KIND_NONE;
+                        })
+                    }
+                    Binding {
+                        target: m_pause_effect_enabled
+                        property: "checked"
+                        value: root._pauseEffect().kind
+                            === WC.PauseEffectKind.PAUSE_EFFECT_KIND_BLUR
+                    }
+                }
+            }
+
+            SettingItem {
+                first: false
+                last: true
+                enabled: root._pauseEffect().kind
+                    === WC.PauseEffectKind.PAUSE_EFFECT_KIND_BLUR
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Blur radius")
+                    }
+
+                    W.ValueSlider {
+                        id: m_pause_effect_blur_radius
+                        Layout.preferredWidth: 220
+                        from: 1
+                        to: 64
+                        stepSize: 1
+                        snapMode: T.Slider.SnapAlways
+                        maxVisibleStops: 8
+                        valueText: Math.round(value).toString()
+                        valueMaxText: "64"
+                        onMoved: root._mutPauseEffect(config => {
+                            config.blur.radius = Math.round(value);
+                        })
+                    }
+                    Binding {
+                        target: m_pause_effect_blur_radius
+                        property: "value"
+                        value: root._pauseEffect().blur.radius
+                    }
+
+                    MD.Text {
+                        text: qsTr("px")
+                        typescale: MD.Token.typescale.body_medium
+                        color: MD.Token.color.on_surface_variant
+                    }
+                }
+            }
+
             SettingHeader { text: qsTr("Audio") }
 
             SettingItem {
@@ -526,6 +812,33 @@ MD.Page {
                         target: m_renderer_enable_audio
                         property: "checked"
                         value: root._rendererAudioEnabled(root._currentGlobal())
+                    }
+                }
+            }
+
+            SettingItem {
+                first: false
+                last: false
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Enable audio capture")
+                    }
+
+                    MD.Switch {
+                        id: m_audio_capture_enabled
+                        onToggled: root._mut(g => {
+                            g.audioCaptureEnabled = checked;
+                        })
+                    }
+                    Binding {
+                        target: m_audio_capture_enabled
+                        property: "checked"
+                        value: Boolean(root._currentGlobal()?.audioCaptureEnabled)
                     }
                 }
             }
@@ -567,6 +880,33 @@ MD.Page {
                         text: qsTr("%")
                         typescale: MD.Token.typescale.body_medium
                         color: MD.Token.color.on_surface_variant
+                    }
+                }
+            }
+
+            SettingItem {
+                first: false
+                last: false
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
+                        Layout.fillWidth: true
+                        text: qsTr("Mute for other active playback streams")
+                    }
+
+                    MD.Switch {
+                        id: m_mute_when_other_audio
+                        onToggled: root._mut(g => {
+                            g.muteWhenOtherAudio = checked;
+                        })
+                    }
+                    Binding {
+                        target: m_mute_when_other_audio
+                        property: "checked"
+                        value: Boolean(root._currentGlobal()?.muteWhenOtherAudio ?? false)
                     }
                 }
             }
@@ -678,6 +1018,69 @@ MD.Page {
                         text: qsTr("s")
                         typescale: MD.Token.typescale.body_medium
                         color: MD.Token.color.on_surface_variant
+                    }
+                }
+            }
+
+            SettingHeader { text: qsTr("Cache") }
+
+            MD.ListItem {
+                Layout.fillWidth: true
+                index: 0
+                model: null
+                count: 2
+                showDivider: false
+                text: qsTr("Network image cache")
+                supportText: qsTr("%1 of %2 used")
+                    .arg(root.formatBytes(W.App.networkCacheSize))
+                    .arg(root.formatBytes(W.App.networkCacheMaximumSize))
+                corners: MD.Util.listCorners(index, count, 16)
+                mdState.backgroundColor: MD.Token.color.surface_container
+
+                trailing: MD.Button {
+                    text: qsTr("Clear")
+                    mdState.type: MD.Enum.BtText
+                    enabled: W.App.networkCacheSize > 0
+                    onClicked: {
+                        W.App.clearNetworkCache();
+                        W.Action.toast(qsTr("Network image cache cleared"));
+                    }
+                }
+            }
+
+            MD.ListItem {
+                Layout.fillWidth: true
+                index: 1
+                model: null
+                count: 2
+                showDivider: false
+                text: qsTr("Maximum cache size")
+                corners: MD.Util.listCorners(index, count, 16)
+                mdState.backgroundColor: MD.Token.color.surface_container
+
+                below: W.ValueSlider {
+                    id: m_cache_maximum_slider
+                    width: parent.width
+                    from: 256
+                    to: 6144
+                    stepSize: 256
+                    snapMode: T.Slider.SnapAlways
+                    maxVisibleStops: 8
+                    valueText: root.formatBytes(Math.round(value) * 1024 * 1024)
+                    valueMaxText: root.formatBytes(to * 1024 * 1024)
+                    onMoved: {
+                        if (!pressed)
+                            W.Global.networkCacheMaximumMiB = Math.round(value);
+                    }
+                    onPressedChanged: {
+                        if (!pressed)
+                            W.Global.networkCacheMaximumMiB = Math.round(value);
+                    }
+
+                    Binding {
+                        target: m_cache_maximum_slider
+                        property: "value"
+                        value: W.Global.networkCacheMaximumMiB
                     }
                 }
             }

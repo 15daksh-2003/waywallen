@@ -109,6 +109,10 @@ pub enum Error {
     #[error("source_plugin '{plugin}'.remove() failed: {message}")]
     SourceItemRemoveFailed { plugin: String, message: String },
 
+    /// Scanned item does not map to a subscription owned by its source.
+    #[error("source plugin '{0}' does not support item unsubscribe")]
+    SourceItemUnsubscribeUnsupported(String),
+
     /// Installing a plugin `.zip` failed (bad path, unreadable archive,
     /// unsafe entry, or no `plugin.toml`).
     #[error("plugin install failed: {0}")]
@@ -132,11 +136,6 @@ pub enum Error {
     /// unclassifiable downloaded directory).
     #[error("source_plugin '{plugin}'.resolve() failed: {message}")]
     ResolveFailed { plugin: String, message: String },
-
-    /// A download provider (e.g. DepotDownloader) precondition failed or the
-    /// fetch itself failed.
-    #[error("workshop download failed: {0}")]
-    WorkshopFetch(String),
 
     /// Caller asked an apply path to handle an unsupported `wp_type`.
     /// For example, the portal fallback only accepts images.
@@ -221,6 +220,7 @@ impl Error {
             Self::SourceExtrasFailed { .. } => E::SourceExtrasFailed,
             Self::SourceItemRemoveUnsupported(_) => E::SourceItemRemoveUnsupported,
             Self::SourceItemRemoveFailed { .. } => E::SourceItemRemoveFailed,
+            Self::SourceItemUnsubscribeUnsupported(_) => E::SourceItemUnsubscribeUnsupported,
             Self::PluginInstallFailed(_) => E::PluginInstallFailed,
             Self::PluginDeleteFailed(_) => E::PluginDeleteFailed,
             // Discover types map onto generic codes; the discover request
@@ -228,7 +228,6 @@ impl Error {
             Self::DiscoverUnsupported(_) => E::FailedPrecondition,
             Self::DiscoverFailed { .. } => E::Internal,
             Self::ResolveFailed { .. } => E::Internal,
-            Self::WorkshopFetch(_) => E::FailedPrecondition,
             Self::WallpaperTypeNotSupported(_) => E::WallpaperTypeNotSupported,
             Self::PortalCallFailed(_) => E::PortalCallFailed,
             Self::SettingsValidationFailed(_) => E::SettingsValidationFailed,
@@ -254,9 +253,10 @@ impl Error {
             | E::SettingsValidationFailed
             | E::WallpaperTypeNotSupported
             | E::PlaylistInvalid => S::InvalidArgument,
-            E::FailedPrecondition | E::NoDisplayRegistered | E::SourceItemRemoveUnsupported => {
-                S::FailedPrecondition
-            }
+            E::FailedPrecondition
+            | E::NoDisplayRegistered
+            | E::SourceItemRemoveUnsupported
+            | E::SourceItemUnsubscribeUnsupported => S::FailedPrecondition,
             E::WallpaperNotFound
             | E::RendererNotFound
             | E::SourcePluginNotFound

@@ -1,0 +1,348 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  waywallen-ipc-v3
+
+  Internal wire protocol between the daemon and renderer subprocesses over a
+  SOCK_STREAM Unix-domain socket. The daemon is the server and owns lifecycle,
+  routing and negotiation. The renderer is the client and owns frame production.
+
+  Framing is u16 opcode + u16 total byte length, followed by positional,
+  little-endian, 4-byte-aligned fields. File descriptors use SCM_RIGHTS in the
+  order documented by each message.
+
+  Connection order:
+    - daemon sends init; renderer replies with ready or init_nack;
+    - renderer sends release_syncobj and format_caps;
+    - daemon sends negotiate_buffers; renderer sends bind_buffers;
+    - renderer sends frame_ready while the negotiated pool is active.
+
+  Buffer generations and frame sequence numbers are connection-local and
+  strictly increasing. Every frame_ready carries one acquire sync_file and names
+  a release point on the producer-owned timeline syncobj.
+-->
+<protocol name="waywallen_ipc" version="3">
+
+  <!-- Shared protocol values. Bit sets remain in protocol_bits.h. -->
+
+  <enum name="pointer_button_state">
+    <entry name="released" value="0"/>
+    <entry name="pressed" value="1"/>
+  </enum>
+
+  <enum name="pointer_axis_source">
+    <entry name="wheel" value="0"/>
+    <entry name="finger" value="1"/>
+    <entry name="continuous" value="2"/>
+  </enum>
+
+  <enum name="media_playback_state">
+    <entry name="stopped" value="0"/>
+    <entry name="playing" value="1"/>
+    <entry name="paused" value="2"/>
+  </enum>
+
+  <enum name="event_subscription_status">
+    <entry name="applied" value="0"/>
+    <entry name="invalid" value="1"/>
+    <entry name="stale_revision" value="2"/>
+    <entry name="revision_conflict" value="3"/>
+    <entry name="limit_exceeded" value="4"/>
+  </enum>
+
+  <enum name="buffer_path">
+    <entry name="optimized_same_device" value="0"/>
+    <entry name="optimized_same_vendor" value="1"/>
+    <entry name="compat_linear" value="2"/>
+    <entry name="compat_cpu_readback" value="3"/>
+  </enum>
+
+  <enum name="buffer_memory_source">
+    <entry name="gpu_native" value="0"/>
+    <entry name="gpu_linear" value="1"/>
+    <entry name="dmabuf_heap" value="2"/>
+  </enum>
+
+  <enum name="buffer_allocation_failure_kind">
+    <entry name="allocator_rejected" value="0"/>
+    <entry name="resource_exhausted" value="1"/>
+    <entry name="unsupported" value="2"/>
+    <entry name="other" value="3"/>
+  </enum>
+
+  <struct name="rgba_color">
+    <field name="r" type="f32"/>
+    <field name="g" type="f32"/>
+    <field name="b" type="f32"/>
+    <field name="a" type="f32"/>
+  </struct>
+
+  <struct name="renderer_init">
+    <field name="protocol_version" type="u32"/>
+    <field name="spawn_version" type="u32"/>
+    <!-- Fully resolved manifest settings. Plugin-defined keys stay as kv. -->
+    <field name="settings" type="kv_list"/>
+    <!-- Raw user_property_overrides JSON; empty when unavailable. -->
+    <field name="user_properties" type="string"/>
+  </struct>
+
+  <struct name="control_transition">
+    <field name="fade_ms" type="u32"/>
+  </struct>
+
+  <struct name="pointer_motion">
+    <field name="x" type="f32"/>
+    <field name="y" type="f32"/>
+    <field name="timestamp_us" type="u64"/>
+    <field name="modifiers" type="u32"/>
+  </struct>
+
+  <struct name="pointer_button">
+    <field name="x" type="f32"/>
+    <field name="y" type="f32"/>
+    <!-- Linux input BTN_* code. -->
+    <field name="button" type="u32"/>
+    <field name="state" type="pointer_button_state"/>
+    <field name="timestamp_us" type="u64"/>
+    <field name="modifiers" type="u32"/>
+  </struct>
+
+  <struct name="pointer_axis">
+    <field name="x" type="f32"/>
+    <field name="y" type="f32"/>
+    <field name="delta_x" type="f32"/>
+    <field name="delta_y" type="f32"/>
+    <field name="source" type="pointer_axis_source"/>
+    <field name="timestamp_us" type="u64"/>
+    <field name="modifiers" type="u32"/>
+  </struct>
+
+  <struct name="mpris_snapshot">
+    <field name="state" type="media_playback_state"/>
+    <field name="title" type="string"/>
+    <field name="artist" type="string"/>
+    <field name="album" type="string"/>
+    <field name="album_artist" type="string"/>
+    <field name="art_url" type="string"/>
+    <field name="previous_art_url" type="string"/>
+  </struct>
+
+  <struct name="event_subscription">
+    <field name="revision" type="u64"/>
+    <field name="kinds" type="array" element="string"/>
+  </struct>
+
+  <struct name="event_subscription_result">
+    <field name="revision" type="u64"/>
+    <field name="status" type="event_subscription_status"/>
+    <!-- Canonical applied set, including on rejection. -->
+    <field name="kinds" type="array" element="string"/>
+    <field name="reason" type="string"/>
+  </struct>
+
+  <struct name="audio_stream_format">
+    <field name="sample_rate_hz" type="u32"/>
+    <field name="channels" type="u32"/>
+  </struct>
+
+  <struct name="audio_window">
+    <field name="subscription_revision" type="u64"/>
+    <field name="generation" type="u64"/>
+    <field name="sequence" type="u64"/>
+    <field name="captured_at_ns" type="u64"/>
+    <field name="end_sample_frame" type="u64"/>
+    <field name="format" type="audio_stream_format"/>
+    <field name="frames" type="u32"/>
+    <!-- bit 0 marks end-of-stream; an end message has no samples. -->
+    <field name="flags" type="u32"/>
+    <field name="samples" type="array" element="f32"/>
+  </struct>
+
+  <struct name="drm_node">
+    <!-- (0, 0) means unknown and forces conservative cross-GPU handling. -->
+    <field name="major" type="u32"/>
+    <field name="minor" type="u32"/>
+  </struct>
+
+  <struct name="extent">
+    <field name="width" type="u32"/>
+    <field name="height" type="u32"/>
+  </struct>
+
+  <struct name="buffer_format">
+    <field name="fourcc" type="u32"/>
+    <field name="modifier" type="u64"/>
+    <field name="plane_count" type="u32"/>
+  </struct>
+
+  <!--
+    Flattened producer capabilities. mod_counts is indexed by fourccs;
+    modifiers and plane_counts contain sum(mod_counts) entries. UUID arrays
+    contain four LE u32 values each, or all zeros when unknown.
+  -->
+  <struct name="producer_capabilities">
+    <field name="fourccs" type="array" element="u32"/>
+    <field name="mod_counts" type="array" element="u32"/>
+    <field name="modifiers" type="array" element="u64"/>
+    <field name="plane_counts" type="array" element="u32"/>
+    <field name="device_uuid" type="array" element="u32"/>
+    <field name="driver_uuid" type="array" element="u32"/>
+    <field name="drm_node" type="drm_node"/>
+    <field name="mem_hints" type="u32"/>
+    <field name="sync_caps" type="u32"/>
+    <field name="color_caps" type="u32"/>
+    <field name="max_extent" type="extent"/>
+  </struct>
+
+  <!-- Complete daemon-owned allocation decision for one producer pool. -->
+  <struct name="buffer_directive">
+    <field name="format" type="buffer_format"/>
+    <field name="sync_mode" type="u32"/>
+    <field name="color" type="u32"/>
+    <field name="mem_hint" type="u32"/>
+    <field name="count" type="u32"/>
+    <field name="path" type="buffer_path"/>
+    <field name="memory_source" type="buffer_memory_source"/>
+  </struct>
+
+  <!--
+    One complete producer-owned pool snapshot. Per-plane arrays are
+    buffer-major and contain count * format.plane_count entries. Attached
+    DMA-BUF fds follow the same order.
+  -->
+  <struct name="buffer_pool">
+    <field name="generation" type="u64"/>
+    <field name="flags" type="u32"/>
+    <field name="count" type="u32"/>
+    <field name="format" type="buffer_format"/>
+    <field name="extent" type="extent"/>
+    <field name="stride" type="array" element="u32"/>
+    <field name="plane_offset" type="array" element="u32"/>
+    <field name="size" type="array" element="u64"/>
+  </struct>
+
+  <struct name="frame">
+    <field name="image_index" type="u32"/>
+    <field name="sequence" type="u64"/>
+    <field name="produced_at_ns" type="u64"/>
+    <field name="release_point" type="u64"/>
+  </struct>
+
+  <struct name="bind_failure">
+    <field name="format" type="buffer_format"/>
+    <field name="kind" type="buffer_allocation_failure_kind"/>
+    <field name="message" type="string"/>
+  </struct>
+
+  <struct name="init_rejection">
+    <field name="received_protocol_version" type="u32"/>
+    <field name="supported_protocol_version" type="u32"/>
+    <field name="received_spawn_version" type="u32"/>
+    <field name="supported_spawn_version" type="u32"/>
+    <field name="reason" type="string"/>
+  </struct>
+
+  <struct name="renderer_state">
+    <field name="clear_color" type="rgba_color"/>
+  </struct>
+
+  <!-- daemon -> renderer -->
+
+  <event_in name="init" opcode="1">
+    <arg name="config" type="renderer_init"/>
+  </event_in>
+
+  <event_in name="setting_changed" opcode="2">
+    <arg name="settings" type="kv_list"/>
+  </event_in>
+
+  <event_in name="play" opcode="3">
+    <arg name="transition" type="control_transition"/>
+  </event_in>
+
+  <event_in name="pause" opcode="4">
+    <arg name="transition" type="control_transition"/>
+  </event_in>
+
+  <event_in name="pointer_motion" opcode="5">
+    <arg name="event" type="pointer_motion"/>
+  </event_in>
+
+  <event_in name="shutdown" opcode="6"/>
+
+  <event_in name="negotiate_buffers" opcode="7">
+    <arg name="directive" type="buffer_directive"/>
+  </event_in>
+
+  <event_in name="pointer_button" opcode="8">
+    <arg name="event" type="pointer_button"/>
+  </event_in>
+
+  <event_in name="pointer_axis" opcode="9">
+    <arg name="event" type="pointer_axis"/>
+  </event_in>
+
+  <event_in name="mute" opcode="10">
+    <arg name="transition" type="control_transition"/>
+  </event_in>
+
+  <event_in name="unmute" opcode="11">
+    <arg name="transition" type="control_transition"/>
+  </event_in>
+
+  <event_in name="mpris" opcode="12">
+    <arg name="snapshot" type="mpris_snapshot"/>
+  </event_in>
+
+  <event_in name="event_subscriptions_applied" opcode="13">
+    <arg name="result" type="event_subscription_result"/>
+  </event_in>
+
+  <event_in name="audio_window" opcode="14">
+    <arg name="window" type="audio_window"/>
+  </event_in>
+
+  <!-- renderer -> daemon -->
+
+  <event name="ready" opcode="1">
+    <arg name="drm_node" type="drm_node"/>
+  </event>
+
+  <event name="bind_buffers" opcode="2">
+    <arg name="pool" type="buffer_pool"/>
+    <fds count_expr="pool.count * pool.format.plane_count"/>
+  </event>
+
+  <event name="frame_ready" opcode="3">
+    <arg name="frame" type="frame"/>
+    <fds count="1"/>
+  </event>
+
+  <event name="error" opcode="4">
+    <arg name="message" type="string"/>
+  </event>
+
+  <event name="release_syncobj" opcode="5">
+    <fds count="1"/>
+  </event>
+
+  <event name="format_caps" opcode="6">
+    <arg name="capabilities" type="producer_capabilities"/>
+  </event>
+
+  <event name="bind_failed" opcode="7">
+    <arg name="failure" type="bind_failure"/>
+  </event>
+
+  <event name="init_nack" opcode="8">
+    <arg name="rejection" type="init_rejection"/>
+  </event>
+
+  <event name="report_state" opcode="9">
+    <arg name="state" type="renderer_state"/>
+  </event>
+
+  <event name="set_event_subscriptions" opcode="10">
+    <arg name="subscription" type="event_subscription"/>
+  </event>
+
+</protocol>

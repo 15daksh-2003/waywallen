@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod autostart;
 pub mod control_proto;
 pub mod display;
@@ -14,7 +15,7 @@ pub mod renderer_manager;
 pub mod routing;
 pub mod scheduler;
 pub mod settings;
-pub mod steam_session;
 pub mod sync;
+pub mod system_info;
 pub mod tasks;
 pub mod wallpaper;

@@ -52,6 +52,8 @@ class Display : public QObject {
     Q_PROPERTY(quint32 drmRenderMinor READ drmRenderMinor CONSTANT FINAL)
     Q_PROPERTY(qint64 activePlaylistId READ activePlaylistId NOTIFY playlistStatusChanged FINAL)
     Q_PROPERTY(QVariantMap playlistStatus READ playlistStatus NOTIFY playlistStatusChanged FINAL)
+    Q_PROPERTY(
+        QVariantList runtimeConditions READ runtimeConditions NOTIFY runtimeConditionsChanged FINAL)
 
 public:
     explicit Display(const proto::DisplayInfo& info, QObject* parent = nullptr);
@@ -72,6 +74,7 @@ public:
     auto drmRenderMinor() const -> quint32 { return m_drm_render_minor; }
     auto activePlaylistId() const -> qint64 { return m_active_playlist_id; }
     auto playlistStatus() const -> const QVariantMap& { return m_playlist_status; }
+    auto runtimeConditions() const -> const QVariantList& { return m_runtime_conditions; }
 
     /// Diff-update from a freshly-received `DisplayInfo`. Only emits
     /// the signals for properties that actually changed.
@@ -86,6 +89,7 @@ public:
     Q_SIGNAL void linksChanged();
     Q_SIGNAL void layoutChanged();
     Q_SIGNAL void playlistStatusChanged();
+    Q_SIGNAL void runtimeConditionsChanged();
 
 private:
     static auto linksFromPb(const proto::DisplayInfo& info) -> QVariantList;
@@ -110,6 +114,7 @@ private:
     quint32      m_drm_render_minor;
     qint64       m_active_playlist_id { 0 };
     QVariantMap  m_playlist_status;
+    QVariantList m_runtime_conditions;
 };
 
 /// Singleton model for all currently-registered displays. Fed by:

@@ -56,8 +56,8 @@ ColumnLayout {
     // Wire enum value → display label. Kept in sync with
     // <waywallen-bridge/resolution.h> WW_RESOLUTION_*.
     readonly property var resolutionPresets: [
-        { value: "-1", label: "Custom" },
-        { value: "0", label: "Origin" },
+        { value: "-1", label: qsTr("Custom") },
+        { value: "0", label: qsTr("Origin") },
         { value: "1", label: "720p" },
         { value: "2", label: "1080p" },
         { value: "3", label: "1440p" },
@@ -144,10 +144,8 @@ ColumnLayout {
             HoverHandler {
                 id: hovered
             }
-            MD.ToolTip {
-                visible: hovered.hovered
-                text: "Requires renderer restart"
-            }
+            MD.ToolTip.visible: hovered.hovered
+            MD.ToolTip.text: qsTr("Requires renderer restart")
         }
     }
 
@@ -361,7 +359,7 @@ ColumnLayout {
 
             MD.FilterChip {
                 id: autoChip
-                text: "Auto"
+                text: qsTr("Auto")
                 checked: root.value === ""
                 onClicked: root._emit("")
                 Connections {

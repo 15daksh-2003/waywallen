@@ -6,7 +6,10 @@ use std::time::Duration;
 
 mod common;
 
-use waywallen::ipc::generated::{Event as EventMsg, EventIn as ControlMsg};
+use waywallen::ipc::generated::{
+    BufferDirective, BufferFormat, BufferMemorySource, BufferPath, Event as EventMsg,
+    EventIn as ControlMsg, RendererInit, PROTOCOL_VERSION,
+};
 use waywallen::ipc::uds::{recv_event, send_control};
 use waywallen::sync::DrmDevice;
 
@@ -80,9 +83,12 @@ fn release_syncobj_round_trip() {
     send_control(
         &stream,
         &ControlMsg::Init {
-            spawn_version: 4,
-            settings: Vec::new(),
-            user_properties: String::new(),
+            config: RendererInit {
+                protocol_version: PROTOCOL_VERSION,
+                spawn_version: waywallen::renderer_manager::SPAWN_VERSION,
+                settings: Vec::new(),
+                user_properties: String::new(),
+            },
         },
         &[],
     )
@@ -106,37 +112,26 @@ fn release_syncobj_round_trip() {
             EventMsg::Ready { .. } => {
                 saw_ready = true;
             }
-            EventMsg::FormatCaps {
-                fourccs,
-                mod_counts,
-                modifiers,
-                plane_counts,
-                device_uuid,
-                driver_uuid,
-                drm_render_major,
-                drm_render_minor,
-                mem_hints,
-                sync_caps,
-                color_caps,
-                extent_max_w,
-                extent_max_h,
-            } => {
+            EventMsg::FormatCaps { capabilities } => {
                 use waywallen::dma::negotiate as N;
                 let caps = N::unflatten_caps(
-                    &fourccs,
-                    &mod_counts,
-                    &modifiers,
-                    &plane_counts,
-                    &device_uuid,
-                    &driver_uuid,
+                    &capabilities.fourccs,
+                    &capabilities.mod_counts,
+                    &capabilities.modifiers,
+                    &capabilities.plane_counts,
+                    &capabilities.device_uuid,
+                    &capabilities.driver_uuid,
                     waywallen::renderer_manager::DrmNode {
-                        major: drm_render_major,
-                        minor: drm_render_minor,
+                        major: capabilities.drm_node.major,
+                        minor: capabilities.drm_node.minor,
                     },
-                    sync_caps,
-                    color_caps,
-                    mem_hints,
-                    (extent_max_w, extent_max_h),
+                    capabilities.sync_caps,
+                    capabilities.color_caps,
+                    capabilities.mem_hints,
+                    (
+                        capabilities.max_extent.width,
+                        capabilities.max_extent.height,
+                    ),
                 )
                 .expect("FormatCaps unflatten");
                 // Producer must advertise ABGR8888.
@@ -169,15 +164,19 @@ fn release_syncobj_round_trip() {
                 send_control(
                     &stream,
                     &ControlMsg::NegotiateBuffers {
-                        fourcc: N::DRM_FORMAT_ABGR8888,
-                        modifier: N::DRM_FORMAT_MOD_LINEAR,
-                        plane_count: 1,
-                        sync_mode: N::SYNC_SYNCOBJ_TIMELINE,
-                        color: N::DEFAULT_COLOR,
-                        mem_hint: N::MEM_HINT_HOST_VISIBLE,
-                        count: 1,
-                        path: N::PathCategory::CompatLinear.as_u32(),
-                        mem_source: N::MemSource::GpuLinear.as_u32(),
+                        directive: BufferDirective {
+                            format: BufferFormat {
+                                fourcc: N::DRM_FORMAT_ABGR8888,
+                                modifier: N::DRM_FORMAT_MOD_LINEAR,
+                                plane_count: 1,
+                            },
+                            sync_mode: N::SYNC_SYNCOBJ_TIMELINE,
+                            color: N::DEFAULT_COLOR,
+                            mem_hint: N::MEM_HINT_HOST_VISIBLE,
+                            count: 1,
+                            path: BufferPath::CompatLinear,
+                            memory_source: BufferMemorySource::GpuLinear,
+                        },
                     },
                     &[],
                 )
@@ -195,14 +194,14 @@ fn release_syncobj_round_trip() {
                 // Drop dma-buf fds; we're not actually binding.
                 drop(fds);
             }
-            EventMsg::FrameReady {
-                seq, release_point, ..
-            } => {
+            EventMsg::FrameReady { frame } => {
                 assert_eq!(fds.len(), 1, "FrameReady expected 1 acquire sync_fd");
                 drop(fds);
                 assert!(
-                    release_point > 0,
-                    "FrameReady seq={seq} release_point must be > 0 (got {release_point})"
+                    frame.release_point > 0,
+                    "FrameReady sequence={} release_point must be > 0 (got {})",
+                    frame.sequence,
+                    frame.release_point,
                 );
                 saw_frame_with_release_point = true;
                 break;

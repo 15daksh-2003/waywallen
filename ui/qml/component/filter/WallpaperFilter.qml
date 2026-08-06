@@ -9,6 +9,7 @@ MD.ItemDelegate {
     id: root
     required property var model
     required property int index
+    required property var popupWindow
     property var supportedTypes: []
     property var allTags: []
     property var allContentRatings: []
@@ -78,6 +79,7 @@ MD.ItemDelegate {
     }
     W.TagFilter {
         id: tagSpec
+        popupWindow: root.popupWindow
         filter: root.currentOption && root.currentOption.kind === "tag" ? root.model : null
         allTags: root.allTags
         availableWidth: chipFlow.width

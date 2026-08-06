@@ -8,7 +8,9 @@ use std::thread;
 use anyhow::{anyhow, Context, Result};
 use ash::{vk, Entry, Instance};
 
-use waywallen::ipc::proto::{ControlMsg, EventMsg};
+use waywallen::ipc::proto::{
+    BufferFormat, BufferPool, ControlMsg, EventMsg, Extent, Frame, WireDrmNode,
+};
 use waywallen::ipc::uds::{recv_control, send_event};
 use waywallen::renderer_manager::BUF_HOST_VISIBLE;
 
@@ -324,17 +326,20 @@ fn send_bind_buffers(stream: &UnixStream, pool: &Pool, width: u32, height: u32) 
     let stride0 = pool.exports[0].stride as u32;
     let plane_size = pool.exports[0].stride * height as u64;
     let bind = EventMsg::BindBuffers {
-        generation: pool.generation,
-        flags: pool.flags,
-        count: SLOT_COUNT as u32,
-        fourcc: FOURCC_AB24,
-        width,
-        height,
-        modifier: pool.exports[0].modifier,
-        planes_per_buffer: 1,
-        stride: vec![stride0; SLOT_COUNT],
-        plane_offset: vec![0u32; SLOT_COUNT],
-        size: vec![plane_size; SLOT_COUNT],
+        pool: BufferPool {
+            generation: pool.generation,
+            flags: pool.flags,
+            count: SLOT_COUNT as u32,
+            format: BufferFormat {
+                fourcc: FOURCC_AB24,
+                modifier: pool.exports[0].modifier,
+                plane_count: 1,
+            },
+            extent: Extent { width, height },
+            stride: vec![stride0; SLOT_COUNT],
+            plane_offset: vec![0u32; SLOT_COUNT],
+            size: vec![plane_size; SLOT_COUNT],
+        },
     };
     send_event(stream, &bind, &fds).map_err(|e| anyhow!("send BindBuffers: {e}"))?;
     log::info!(
@@ -403,8 +408,10 @@ fn run(instance: &Instance, args: &Args) -> Result<()> {
     send_event(
         &stream,
         &EventMsg::Ready {
-            drm_render_major: drm_major,
-            drm_render_minor: drm_minor,
+            drm_node: WireDrmNode {
+                major: drm_major,
+                minor: drm_minor,
+            },
         },
         &[],
     )
@@ -438,12 +445,12 @@ fn run(instance: &Instance, args: &Args) -> Result<()> {
                 s2.store(true, Ordering::SeqCst);
                 return;
             }
-            Ok((ControlMsg::NegotiateBuffers { mem_hint, .. }, _)) => {
-                // Modifier-negotiation v2 — map mem_hint → BUF_HOST_VISIBLE
+            Ok((ControlMsg::NegotiateBuffers { directive }, _)) => {
+                // Map the negotiated memory hint to the display buffer flag.
                 // (bit 0). The Rust test renderer doesn't yet honor
                 const BUF_HOST_VISIBLE: u32 = 1 << 0;
                 const MEM_HINT_HOST_VISIBLE: u32 = 1 << 1;
-                let flags = if mem_hint & MEM_HINT_HOST_VISIBLE != 0 {
+                let flags = if directive.mem_hint & MEM_HINT_HOST_VISIBLE != 0 {
                     BUF_HOST_VISIBLE
                 } else {
                     0
@@ -576,12 +583,14 @@ fn run(instance: &Instance, args: &Args) -> Result<()> {
         let send_result = send_event(
             &stream,
             &EventMsg::FrameReady {
-                image_index: slot as u32,
-                seq,
-                ts_ns,
-                // TODO(release-syncobj): when this demo gains a real
-                // release timeline, advance a per-slot point here.
-                release_point: 0,
+                frame: Frame {
+                    image_index: slot as u32,
+                    sequence: seq,
+                    produced_at_ns: ts_ns,
+                    // TODO(release-syncobj): when this demo gains a real
+                    // release timeline, advance a per-slot point here.
+                    release_point: 0,
+                },
             },
             &[sync_fd],
         );

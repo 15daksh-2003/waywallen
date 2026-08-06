@@ -7,12 +7,13 @@
 #     because configure picks up CC and CFLAGS / LDFLAGS from the activated
 #     conda env (which the clang_linux-64 activation populates with --sysroot).
 #
-# Idempotent: skips the build if libavcodec.pc is already present in
-# $CONDA_PREFIX/lib/pkgconfig/. Set FORCE=1 to rebuild.
+# Idempotent: skips the build if libavcodec.pc and the requested version stamp
+# are already present. Set FORCE=1 to rebuild.
 #
 # Tunables (env vars):
-#   FFMPEG_VERSION   git tag to check out, default n8.1
-#   FORCE            set to 1 to rebuild even if the pkg-config stamp exists
+#   FFMPEG_VERSION      git tag to check out, default n7.1.5
+#   FFMPEG_REPOSITORY   git repository, default the official GitHub mirror
+#   FORCE               set to 1 to rebuild even if the stamps match
 
 set -euo pipefail
 
@@ -22,22 +23,31 @@ set -euo pipefail
 }
 
 FFMPEG_VERSION="${FFMPEG_VERSION:-n7.1.5}"
+FFMPEG_REPOSITORY="${FFMPEG_REPOSITORY:-https://github.com/FFmpeg/FFmpeg.git}"
 FFMPEG_SRC="$CONDA_PREFIX/.ffmpeg-src"
 PKG_STAMP="$CONDA_PREFIX/lib/pkgconfig/libavcodec.pc"
+VERSION_STAMP="$CONDA_PREFIX/.waywallen-ffmpeg-version"
 
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
-if [[ -f "$PKG_STAMP" && -z "${FORCE:-}" ]]; then
-    step "FFmpeg already installed in \$CONDA_PREFIX (set FORCE=1 to rebuild)"
+if [[ -f "$PKG_STAMP" \
+    && -f "$VERSION_STAMP" \
+    && "$(<"$VERSION_STAMP")" == "$FFMPEG_VERSION" \
+    && -z "${FORCE:-}" ]]; then
+    step "FFmpeg $FFMPEG_VERSION already installed in \$CONDA_PREFIX (set FORCE=1 to rebuild)"
     exit 0
 fi
 
 step "Building FFmpeg $FFMPEG_VERSION into $CONDA_PREFIX"
 
-if [[ ! -d "$FFMPEG_SRC/.git" ]]; then
+if [[ -d "$FFMPEG_SRC/.git" ]]; then
+    git -C "$FFMPEG_SRC" remote set-url origin "$FFMPEG_REPOSITORY"
+    git -C "$FFMPEG_SRC" fetch --depth 1 origin "refs/tags/$FFMPEG_VERSION"
+    git -C "$FFMPEG_SRC" checkout --detach FETCH_HEAD
+else
     rm -rf "$FFMPEG_SRC"
     git clone --depth 1 --branch "$FFMPEG_VERSION" \
-        https://git.ffmpeg.org/ffmpeg.git "$FFMPEG_SRC"
+        "$FFMPEG_REPOSITORY" "$FFMPEG_SRC"
 fi
 
 # Curated minimal feature set. Tweak as the renderer plugins grow new format
@@ -134,5 +144,6 @@ for x in "${HWACCELS[@]}";  do CFG_ARGS+=( "--enable-hwaccel=$x"  ); done
     make -j"$(nproc)"
     make install
 )
+printf '%s\n' "$FFMPEG_VERSION" > "$VERSION_STAMP"
 
 step "FFmpeg installed; pkg-config stamp -> $PKG_STAMP"

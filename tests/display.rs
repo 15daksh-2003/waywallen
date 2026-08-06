@@ -1,6 +1,32 @@
 #[path = "common/mod.rs"]
 mod common;
 
+fn test_metrics(width: u32, height: u32) -> waywallen::display::proto::DisplayMetrics {
+    waywallen::display::proto::DisplayMetrics {
+        width,
+        height,
+        refresh_mhz: 60_000,
+    }
+}
+
+fn test_consumer_caps() -> waywallen::display::proto::ConsumerCapabilities {
+    waywallen::display::proto::ConsumerCapabilities {
+        fourccs: vec![0x3432_4241, 0x3432_4258],
+        mod_counts: vec![1, 1],
+        modifiers: vec![0, 0],
+        plane_counts: vec![1, 1],
+        device_uuid: vec![0; 4],
+        driver_uuid: vec![0; 4],
+        drm_render_major: 0,
+        drm_render_minor: 0,
+        mem_hints: (1 << 1) | (1 << 4),
+        sync_caps: (1 << 1) | (1 << 2),
+        color_caps: (1 << 0) | (1 << 6) | (1 << 7),
+        extent_max_w: 8192,
+        extent_max_h: 8192,
+    }
+}
+
 mod handshake {
     #[allow(unused_imports)]
     use super::common;
@@ -13,19 +39,27 @@ mod handshake {
 
     use waywallen::display::endpoint;
     use waywallen::display::proto::{
-        codec, error_code, Event, Request, PROTOCOL_NAME, PROTOCOL_VERSION,
+        codec, DisplayErrorCode, Event, PauseEffectKind, PresentationCapabilities, Request,
+        PROTOCOL_VERSION,
     };
+    use waywallen::events::GlobalEvent;
     use waywallen::renderer_manager::RendererManager;
     use waywallen::routing::Router;
 
-    async fn start_display_endpoint(sock_name: &str) -> (PathBuf, tokio::task::JoinHandle<()>) {
+    async fn start_display_endpoint(
+        sock_name: &str,
+    ) -> (
+        PathBuf,
+        tokio::task::JoinHandle<()>,
+        tokio::sync::broadcast::Receiver<GlobalEvent>,
+    ) {
         let sock = common::tmp_sock(sock_name);
         let _ = std::fs::remove_file(&sock);
 
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(Arc::clone(&mgr));
         let sock_for_task = sock.clone();
-        let (events_tx, _) = tokio::sync::broadcast::channel(8);
+        let (events_tx, events_rx) = tokio::sync::broadcast::channel(8);
         let server_task = tokio::spawn({
             let router = Arc::clone(&router);
             async move {
@@ -39,7 +73,7 @@ mod handshake {
             sock.display()
         );
 
-        (sock, server_task)
+        (sock, server_task, events_rx)
     }
 
     fn drive_display_registration(
@@ -52,10 +86,9 @@ mod handshake {
         codec::send_request(
             &stream,
             &Request::Hello {
-                protocol: PROTOCOL_NAME.to_string(),
                 client_name: "handshake-test".to_string(),
                 client_version: "0.0.1".to_string(),
-                client_protocol_version,
+                protocol_version: client_protocol_version,
             },
             &[],
         )
@@ -64,17 +97,10 @@ mod handshake {
         let (welcome, _fds) =
             codec::recv_event(&stream).map_err(|e| anyhow::anyhow!("recv welcome: {e}"))?;
         match welcome {
-            Event::Welcome {
-                server_version,
-                features,
-            } => {
+            Event::Welcome { server_version } => {
                 assert!(
                     server_version.starts_with("waywallen "),
                     "server_version={server_version}"
-                );
-                assert!(
-                    features.iter().any(|s| s == "explicit_sync_fd"),
-                    "explicit_sync_fd not in features={features:?}"
                 );
             }
             other => panic!("expected welcome, got opcode {}", other.opcode()),
@@ -85,12 +111,10 @@ mod handshake {
             &Request::RegisterDisplay {
                 name: "DP-test".to_string(),
                 instance_id: String::new(),
-                width: 1920,
-                height: 1080,
-                refresh_mhz: 60_000,
-                drm_render_major: 0,
-                drm_render_minor: 0,
-                properties: Vec::new(),
+                metrics: super::test_metrics(1920, 1080),
+                consumer_caps: super::test_consumer_caps(),
+                presentation_caps: PresentationCapabilities { flags: 0 },
+                window_state_flags: 0,
             },
             &[],
         )
@@ -99,7 +123,15 @@ mod handshake {
         let (accepted, _fds) = codec::recv_event(&stream)
             .map_err(|e| anyhow::anyhow!("recv display_accepted: {e}"))?;
         match accepted {
-            Event::DisplayAccepted { display_id } => Ok(display_id),
+            Event::DisplayAccepted {
+                display_id,
+                presentation,
+            } => {
+                assert_eq!(presentation.config.generation, 1);
+                assert_eq!(presentation.config.pause_effect.kind, PauseEffectKind::None);
+                assert!(!presentation.state.pause_effect.active);
+                Ok(display_id)
+            }
             other => panic!("expected display_accepted, got opcode {}", other.opcode()),
         }
     }
@@ -111,10 +143,9 @@ mod handshake {
         codec::send_request(
             &stream,
             &Request::Hello {
-                protocol: PROTOCOL_NAME.to_string(),
                 client_name: "version-probe".to_string(),
                 client_version: "0.0.1".to_string(),
-                client_protocol_version: probe,
+                protocol_version: probe,
             },
             &[],
         )
@@ -122,9 +153,8 @@ mod handshake {
 
         match codec::recv_event(&stream) {
             Ok((Event::Error { code, message }, _)) => anyhow::ensure!(
-                code == error_code::VERSION_UNSUPPORTED,
-                "expected VERSION_UNSUPPORTED ({}), got code={code} msg={message:?}",
-                error_code::VERSION_UNSUPPORTED,
+                code == DisplayErrorCode::VersionUnsupported,
+                "expected VERSION_UNSUPPORTED, got code={code:?} msg={message:?}",
             ),
             Ok((other, _)) => {
                 panic!("expected Error event, got opcode {}", other.opcode())
@@ -135,9 +165,54 @@ mod handshake {
         Ok(())
     }
 
+    fn expect_registration_reject(
+        sock: &Path,
+        consumer_caps: waywallen::display::proto::ConsumerCapabilities,
+        presentation_flags: u32,
+    ) -> anyhow::Result<()> {
+        use std::os::unix::net::UnixStream;
+
+        let stream = UnixStream::connect(sock)?;
+        codec::send_request(
+            &stream,
+            &Request::Hello {
+                client_name: "bad-registration".to_string(),
+                client_version: "0".to_string(),
+                protocol_version: PROTOCOL_VERSION,
+            },
+            &[],
+        )?;
+        let (welcome, _) = codec::recv_event(&stream)?;
+        anyhow::ensure!(matches!(welcome, Event::Welcome { .. }));
+        codec::send_request(
+            &stream,
+            &Request::RegisterDisplay {
+                name: "bad-registration".to_string(),
+                instance_id: String::new(),
+                metrics: super::test_metrics(640, 480),
+                consumer_caps,
+                presentation_caps: PresentationCapabilities {
+                    flags: presentation_flags,
+                },
+                window_state_flags: 0,
+            },
+            &[],
+        )?;
+        match codec::recv_event(&stream)? {
+            (
+                Event::Error {
+                    code: DisplayErrorCode::ProtocolViolation,
+                    ..
+                },
+                _,
+            ) => Ok(()),
+            (other, _) => anyhow::bail!("unexpected event {:?}", other.opcode()),
+        }
+    }
+
     #[tokio::test]
     async fn handshake_up_to_display_accepted() {
-        let (sock, server_task) = start_display_endpoint("display-handshake").await;
+        let (sock, server_task, _events_rx) = start_display_endpoint("display-handshake").await;
 
         let sock_for_client = sock.clone();
         let client_handle = tokio::task::spawn_blocking(move || {
@@ -156,51 +231,97 @@ mod handshake {
         let _ = std::fs::remove_file(&sock);
     }
 
+    #[test]
+    fn supports_only_current_protocol_version() {
+        assert_eq!(endpoint::MIN_SUPPORTED_CLIENT_VERSION, PROTOCOL_VERSION);
+        assert_eq!(endpoint::MAX_SUPPORTED_CLIENT_VERSION, PROTOCOL_VERSION);
+    }
+
     #[tokio::test]
-    async fn rejects_wrong_protocol_string() {
-        let (sock, server_task) = start_display_endpoint("display-bad-proto").await;
+    async fn rejects_invalid_registration() {
+        let (sock, server_task, _events_rx) = start_display_endpoint("display-bad-proto").await;
 
         let sock_for_client = sock.clone();
-        let got_error = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
-            use std::os::unix::net::UnixStream;
-            let stream = UnixStream::connect(&sock_for_client)?;
-            codec::send_request(
-                &stream,
-                &Request::Hello {
-                    protocol: "nope-v0".to_string(),
-                    client_name: "bad".to_string(),
-                    client_version: "0".to_string(),
-                    client_protocol_version: PROTOCOL_VERSION,
-                },
-                &[],
-            )
-            .map_err(|e| anyhow::anyhow!("send: {e}"))?;
-            // Expect either an Error event or EOF.
-            match codec::recv_event(&stream) {
-                Ok((Event::Error { .. }, _)) => Ok(true),
-                Ok((other, _)) => panic!("unexpected event {:?}", other.opcode()),
-                Err(_) => Ok(true), // PeerClosed also acceptable
-            }
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let mut caps = super::test_consumer_caps();
+            caps.mod_counts.clear();
+            expect_registration_reject(&sock_for_client, caps, 0)?;
+            expect_registration_reject(&sock_for_client, super::test_consumer_caps(), 1 << 8)
         })
         .await
         .expect("client join")
         .expect("client flow");
-
-        assert!(got_error, "server must reject bad protocol string");
         server_task.abort();
         let _ = std::fs::remove_file(&sock);
     }
 
-    /// `client_protocol_version` outside the daemon's supported range
+    #[tokio::test]
+    async fn rejects_unexpected_handshake_requests() {
+        let (sock, server_task, _events_rx) = start_display_endpoint("display-bad-order").await;
+        let sock_for_client = sock.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            use std::os::unix::net::UnixStream;
+
+            let stream = UnixStream::connect(&sock_for_client)?;
+            codec::send_request(&stream, &Request::SetWindowState { flags: 0 }, &[])?;
+            anyhow::ensure!(matches!(
+                codec::recv_event(&stream)?,
+                (
+                    Event::Error {
+                        code: DisplayErrorCode::ProtocolViolation,
+                        ..
+                    },
+                    _
+                )
+            ));
+
+            let stream = UnixStream::connect(&sock_for_client)?;
+            codec::send_request(
+                &stream,
+                &Request::Hello {
+                    client_name: "bad-order".to_string(),
+                    client_version: "0".to_string(),
+                    protocol_version: PROTOCOL_VERSION,
+                },
+                &[],
+            )?;
+            anyhow::ensure!(matches!(
+                codec::recv_event(&stream)?.0,
+                Event::Welcome { .. }
+            ));
+            codec::send_request(&stream, &Request::SetWindowState { flags: 0 }, &[])?;
+            anyhow::ensure!(matches!(
+                codec::recv_event(&stream)?,
+                (
+                    Event::Error {
+                        code: DisplayErrorCode::ProtocolViolation,
+                        ..
+                    },
+                    _
+                )
+            ));
+            Ok(())
+        })
+        .await
+        .expect("client join")
+        .expect("client flow");
+        server_task.abort();
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// `protocol_version` outside the daemon's supported range
     /// must produce `error{code = VERSION_UNSUPPORTED}` followed by close.
     #[tokio::test]
     async fn rejects_unsupported_client_protocol_version() {
-        let (sock, server_task) = start_display_endpoint("display-bad-version").await;
+        let (sock, server_task, mut events_rx) =
+            start_display_endpoint("display-bad-version").await;
 
-        let mut probes = vec![PROTOCOL_VERSION.saturating_add(99)];
+        let mut probes = vec![6, 7, PROTOCOL_VERSION.saturating_add(99)];
         if let Some(low_probe) = endpoint::MIN_SUPPORTED_CLIENT_VERSION.checked_sub(1) {
             probes.push(low_probe);
         }
+        probes.sort_unstable();
+        probes.dedup();
 
         for probe in probes {
             let sock_for_client = sock.clone();
@@ -208,6 +329,25 @@ mod handshake {
                 .await
                 .expect("client join")
                 .expect("client flow");
+
+            let event = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
+                .await
+                .expect("display failure event timeout")
+                .expect("display failure event channel closed");
+            match event {
+                GlobalEvent::DisplayConnectionFailed {
+                    client_name,
+                    client_protocol_version,
+                    error_code: code,
+                    reason,
+                } => {
+                    assert_eq!(client_name, "version-probe");
+                    assert_eq!(client_protocol_version, probe);
+                    assert_eq!(code, DisplayErrorCode::VersionUnsupported as u32);
+                    assert!(reason.contains("not supported"), "reason={reason:?}");
+                }
+                other => panic!("unexpected global event: {other:?}"),
+            }
         }
 
         server_task.abort();
@@ -228,7 +368,9 @@ mod sync_fd_fanout {
     use std::time::Duration;
 
     use waywallen::display::endpoint;
-    use waywallen::display::proto::{codec, Event, Request, PROTOCOL_NAME, PROTOCOL_VERSION};
+    use waywallen::display::proto::{
+        codec, Event, PresentationCapabilities, Request, PROTOCOL_VERSION,
+    };
     use waywallen::renderer_manager::{RendererManager, SpawnRequest};
     use waywallen::routing::Router;
 
@@ -242,10 +384,9 @@ mod sync_fd_fanout {
         codec::send_request(
             &stream,
             &Request::Hello {
-                protocol: PROTOCOL_NAME.to_string(),
                 client_name: name.to_string(),
                 client_version: "0.0.1".to_string(),
-                client_protocol_version: PROTOCOL_VERSION,
+                protocol_version: PROTOCOL_VERSION,
             },
             &[],
         )?;
@@ -258,12 +399,10 @@ mod sync_fd_fanout {
             &Request::RegisterDisplay {
                 name: name.to_string(),
                 instance_id: String::new(),
-                width: 640,
-                height: 480,
-                refresh_mhz: 60_000,
-                drm_render_major: 0,
-                drm_render_minor: 0,
-                properties: Vec::new(),
+                metrics: super::test_metrics(640, 480),
+                consumer_caps: super::test_consumer_caps(),
+                presentation_caps: PresentationCapabilities { flags: 0 },
+                window_state_flags: 0,
             },
             &[],
         )?;
@@ -280,10 +419,6 @@ mod sync_fd_fanout {
             _ => anyhow::bail!("{name}: expected bind_buffers"),
         };
         drop(bind_fds);
-
-        // set_config
-        let (cfg, _) = codec::recv_event(&stream)?;
-        anyhow::ensure!(matches!(cfg, Event::SetConfig { .. }));
 
         // drain frames
         let mut real_count = 0usize;
@@ -307,7 +442,7 @@ mod sync_fd_fanout {
                     let _ = (g, buffer_index, seq);
                     frames += 1;
                 }
-                // Unbind/Bind/SetConfig may happen mid-stream when the
+                // Unbind/Bind/SetCompositionConfig may happen mid-stream when the
                 // daemon promotes the renderer to HOST_VISIBLE.
                 Event::BindBuffers {
                     buffer_generation: g,
@@ -315,11 +450,10 @@ mod sync_fd_fanout {
                 } => {
                     buffer_generation = g;
                 }
-                Event::SetConfig { .. } | Event::Unbind { .. } => {}
+                Event::SetCompositionConfig { .. } | Event::Unbind { .. } => {}
                 other => anyhow::bail!("{name}: unexpected {other:?}"),
             }
         }
-        codec::send_request(&stream, &Request::Bye, &[])?;
         Ok(real_count)
     }
 
@@ -415,7 +549,9 @@ mod sync_fd_single {
     use std::time::Duration;
 
     use waywallen::display::endpoint;
-    use waywallen::display::proto::{codec, Event, Request, PROTOCOL_NAME, PROTOCOL_VERSION};
+    use waywallen::display::proto::{
+        codec, Event, PresentationCapabilities, Request, PROTOCOL_VERSION,
+    };
     use waywallen::renderer_manager::{RendererManager, SpawnRequest};
     use waywallen::routing::Router;
 
@@ -490,10 +626,9 @@ mod sync_fd_single {
             codec::send_request(
                 &stream,
                 &Request::Hello {
-                    protocol: PROTOCOL_NAME.to_string(),
                     client_name: "phase3b-e2e".to_string(),
                     client_version: "0.0.1".to_string(),
-                    client_protocol_version: PROTOCOL_VERSION,
+                    protocol_version: PROTOCOL_VERSION,
                 },
                 &[],
             )?;
@@ -509,12 +644,10 @@ mod sync_fd_single {
                 &Request::RegisterDisplay {
                     name: "e2e-display".to_string(),
                     instance_id: String::new(),
-                    width: 640,
-                    height: 480,
-                    refresh_mhz: 60_000,
-                    drm_render_major: 0,
-                    drm_render_minor: 0,
-                    properties: Vec::new(),
+                    metrics: super::test_metrics(640, 480),
+                    consumer_caps: super::test_consumer_caps(),
+                    presentation_caps: PresentationCapabilities { flags: 0 },
+                    window_state_flags: 0,
                 },
                 &[],
             )?;
@@ -549,13 +682,6 @@ mod sync_fd_single {
                 anyhow::ensure!(fd.as_raw_fd() >= 0, "invalid dma-buf fd #{i}");
             }
             drop(bind_fds);
-
-            // set_config
-            let (cfg, _) = codec::recv_event(&stream)?;
-            anyhow::ensure!(
-                matches!(cfg, Event::SetConfig { .. }),
-                "expected set_config"
-            );
 
             // Drain at least 3 frames and verify each carries a live sync fd.
             let mut real_fence_count = 0usize;
@@ -612,15 +738,13 @@ mod sync_fd_single {
                         // for cross-GPU; track the new generation.
                         buffer_generation = g;
                     }
-                    Event::SetConfig { .. } | Event::Unbind { .. } => {
+                    Event::SetCompositionConfig { .. } | Event::Unbind { .. } => {
                         // config update / pre-rebind retire of old gen — fine, drop
                     }
                     other => anyhow::bail!("unexpected event: {other:?}"),
                 }
             }
 
-            // Send bye to let the server clean up cleanly.
-            codec::send_request(&stream, &Request::Bye, &[])?;
             Ok(real_fence_count)
         });
 

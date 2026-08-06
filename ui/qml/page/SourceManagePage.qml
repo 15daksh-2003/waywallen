@@ -50,7 +50,7 @@ MD.Page {
                 text: fullPath
                 wrapMode: Text.Wrap
                 maximumLineCount: 3
-                supportText: "Plugin: " + modelData.pluginName
+                supportText: qsTr("Plugin: %1").arg(modelData.pluginName)
 
                 leader: MD.Icon {
                     name: MD.Token.icon.folder

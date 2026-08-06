@@ -24,6 +24,23 @@ MD.ApplicationWindow {
     width: 948
     title: "waywallen"
 
+    readonly property alias popupPresenter: m_popup_presenter
+
+    function presentPopup(source, properties) {
+        const presentation = m_popup_presenter.present(source, properties || {});
+        presentation.failed.connect(presentation, function (error) {
+            W.Global.toastError(error);
+        });
+        if (presentation.status === MD.PopupPresentation.Error)
+            W.Global.toastError(presentation.errorString);
+        return presentation;
+    }
+
+    MD.PopupPresenter {
+        id: m_popup_presenter
+        host: win.contentItem
+    }
+
     // Persist the window size across runs. Wayland doesn't let clients
     // restore their own position, so only width/height are stored.
     Settings {
@@ -34,6 +51,18 @@ MD.ApplicationWindow {
 
     W.HealthQuery {
         id: healthQuery
+    }
+
+    W.GlobalPauseToggleQuery {
+        id: globalPauseToggleQuery
+        onToggled: paused => W.Action.toast(paused ? qsTr("Paused") : qsTr("Resumed"))
+    }
+
+    Shortcut {
+        sequence: "Ctrl+P"
+        context: Qt.ApplicationShortcut
+        enabled: W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready && !globalPauseToggleQuery.querying
+        onActivated: globalPauseToggleQuery.reload()
     }
 
     Connections {
@@ -48,12 +77,23 @@ MD.ApplicationWindow {
     readonly property bool isCompact: MD.MProp.size.isCompact
 
     readonly property var pageModel: [
-        { icon: MD.Token.icon.wallpaper, name: "Wallpapers" },
-        { icon: MD.Token.icon.explore, name: "Discover" },
-        { icon: MD.Token.icon.monitor, name: "Displays" },
-        { icon: MD.Token.icon.monitor_heart, name: "Status" }
+        {
+            icon: MD.Token.icon.wallpaper,
+            name: qsTr("Wallpapers")
+        },
+        {
+            icon: MD.Token.icon.explore,
+            name: qsTr("Discover")
+        },
+        {
+            icon: MD.Token.icon.monitor,
+            name: qsTr("Displays")
+        },
+        {
+            icon: MD.Token.icon.monitor_heart,
+            name: qsTr("Status")
+        }
     ]
-
 
     readonly property var pageComponents: ["qrc:/waywallen/ui/qml/page/WallpaperPage.qml", "qrc:/waywallen/ui/qml/page/DiscoverPage.qml", "qrc:/waywallen/ui/qml/page/DisplaysPage.qml", "qrc:/waywallen/ui/qml/page/StatusPage.qml"]
 
@@ -64,7 +104,6 @@ MD.ApplicationWindow {
     }
 
     Component.onCompleted: {
-        MD.Token.color.useSysAccentColor = true;
         currentPageChanged();
         // Level-check for the case where the daemon is already Ready
         // before this window finishes constructing (UI launched
@@ -88,6 +127,13 @@ MD.ApplicationWindow {
         }
     }
 
+    Connections {
+        target: W.App
+        function onErrorOccurred(error) {
+            W.Global.toastError(error);
+        }
+    }
+
     // Global daemon-event toasts. Notify mirrors `GlobalEvent` from the
     // daemon; library additions surface here so the toast fires no
     // matter which page triggered the add (manual vs auto-detect).
@@ -95,12 +141,11 @@ MD.ApplicationWindow {
         target: W.Notify
         function onLibrariesAdded(paths) {
             const n = paths.length;
-            W.Action.toast(n === 1 ? "Library added" : (n + " libraries added"));
+            W.Action.toast(qsTr("%n library(s) added", "", n));
         }
         function onDisplayConnectionFailed(clientName, clientProtocolVersion, errorCode, reason) {
             const who = clientName.length > 0 ? clientName : qsTr("Display client");
-            // flag=1 → close button; 6s gives the user time to read.
-            W.Action.toast(qsTr("%1 connection failed: %2").arg(who).arg(reason), 6000, 1, null);
+            W.Global.toastError(qsTr("%1 connection failed: %2").arg(who).arg(reason));
         }
         function onPluginRestartFailed(pluginId, error) {
             const who = pluginId.length > 0 ? pluginId : qsTr("Plugin");
@@ -109,7 +154,7 @@ MD.ApplicationWindow {
     }
 
     W.DaemonNotRunDialog {}
-    W.SteamLoginDialog {}
+    W.QrLoginDialog {}
 
     ColumnLayout {
         anchors.fill: parent
@@ -136,7 +181,8 @@ MD.ApplicationWindow {
                     autoExpand: W.Global.sidebarAutoExpand
                     // The rail only re-syncs `expanded` on window-class
                     // changes; apply a runtime toggle of the setting at once.
-                    onAutoExpandChanged: if (autoExpand) expanded = useEmbed
+                    onAutoExpandChanged: if (autoExpand)
+                        expanded = useEmbed
 
                     onClicked: function (model) {
                         win.currentPage = model.index;
@@ -198,16 +244,23 @@ MD.ApplicationWindow {
                         Column {
                             id: m_rail_footer
                             width: parent.width
+                            spacing: m_rail.useLarge ? 0 : 12
 
                             MD.RailItem {
                                 width: parent.width
                                 expand: m_rail.useLarge
                                 checked: false
                                 icon.name: MD.Token.icon.extension
-                                text: "Plugins"
-                                onClicked: MD.Util.showPopup('waywallen.ui/PagePopup', {
-                                    source: 'waywallen.ui/PluginManagePage'
-                                }, win)
+                                iconStyle: m_rail.useLarge ? MD.Enum.IconAndText : MD.Enum.IconOnly
+                                text: qsTr("Plugins")
+                                property var presentation: null
+                                onClicked: {
+                                    if (presentation?.active)
+                                        return;
+                                    presentation = win.presentPopup('waywallen.ui/PagePopup', {
+                                        source: 'waywallen.ui/PluginManagePage'
+                                    });
+                                }
                             }
 
                             MD.RailItem {
@@ -215,10 +268,16 @@ MD.ApplicationWindow {
                                 expand: m_rail.useLarge
                                 checked: false
                                 icon.name: MD.Token.icon.settings
-                                text: "Settings"
-                                onClicked: MD.Util.showPopup('waywallen.ui/PagePopup', {
-                                    source: 'waywallen.ui/SettingsPage'
-                                }, win)
+                                iconStyle: m_rail.useLarge ? MD.Enum.IconAndText : MD.Enum.IconOnly
+                                text: qsTr("Settings")
+                                property var presentation: null
+                                onClicked: {
+                                    if (presentation?.active)
+                                        return;
+                                    presentation = win.presentPopup('waywallen.ui/PagePopup', {
+                                        source: 'waywallen.ui/SettingsPage'
+                                    });
+                                }
                             }
 
                             MD.RailItem {
@@ -227,10 +286,15 @@ MD.ApplicationWindow {
                                 expand: true
                                 checked: false
                                 icon.name: MD.Token.icon.info
-                                text: "About"
-                                onClicked: MD.Util.showPopup('waywallen.ui/PagePopup', {
-                                    source: 'waywallen.ui/AboutPage'
-                                }, win)
+                                text: qsTr("About")
+                                property var presentation: null
+                                onClicked: {
+                                    if (presentation?.active)
+                                        return;
+                                    presentation = win.presentPopup('waywallen.ui/PagePopup', {
+                                        source: 'waywallen.ui/AboutPage'
+                                    });
+                                }
                             }
                         }
                     }

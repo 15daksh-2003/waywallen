@@ -24,6 +24,8 @@ Action::~Action() = default;
 
 auto Action::wallpaperSelectStorage() const -> QObject* { return m_wallpaper_select_storage; }
 
+void Action::copyToClipboard(const QString& text) { QGuiApplication::clipboard()->setText(text); }
+
 void Action::enterWallpaperSelect(QObject* storage) {
     if (m_wallpaper_select_storage != storage) {
         m_wallpaper_select_storage = storage;

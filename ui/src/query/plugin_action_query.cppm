@@ -11,9 +11,6 @@ export import :query.query;
 namespace waywallen
 {
 
-// Fire-and-forget trigger for a plugin-declared action. Set pluginId/actionId,
-// then reload(). The daemon routes it (e.g. workshop Steam sign-in/out) and any
-// progress arrives via its own events (e.g. Notify::steamLoginProgress).
 export class PluginActionQuery : public Query,
                                  public QueryExtra<control::v1::Response, PluginActionQuery> {
     Q_OBJECT
@@ -25,14 +22,16 @@ export class PluginActionQuery : public Query,
 public:
     PluginActionQuery(QObject* parent = nullptr);
 
-    QString pluginId() const;
-    void    setPluginId(const QString& v);
-    QString actionId() const;
-    void    setActionId(const QString& v);
-    void    reload() override;
+    QString          pluginId() const;
+    void             setPluginId(const QString& v);
+    QString          actionId() const;
+    void             setActionId(const QString& v);
+    void             reload() override;
+    Q_INVOKABLE void invoke(const QVariantMap& values);
 
     Q_SIGNAL void pluginIdChanged();
     Q_SIGNAL void actionIdChanged();
+    Q_SIGNAL void completed(bool accepted, const QString& error, const QString& sessionId);
 
 private:
     QString m_plugin_id;

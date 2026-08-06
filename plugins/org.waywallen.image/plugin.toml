@@ -3,7 +3,7 @@
 [plugin]
 id = "org.waywallen.image"
 name = "Image"
-version = "0.2.5"
+version = "0.3.1"
 entry = "main.lua"
 entry_version = 2
 
@@ -11,7 +11,8 @@ entry_version = 2
 bin = "../../../../bin/waywallen-image-renderer"
 types = ["image"]
 priority = 100
-spawn_version = 8
+activity = "on_demand"
+spawn_version = 9
 
 [renderers.waywallen-image.settings]
 fps = { type = "u32", default = 30, min = 1, max = 240, step = 1, identity = true, label_key = "settings.image.fps", group = "render", order = 10 }

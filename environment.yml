@@ -16,22 +16,17 @@ dependencies:
 
   # Toolchain: clang / clang++ / lld all 22.x (BUILD.md requires >=22)
   # clang-tools provides clang-scan-deps (required by C++20 module compilation)
-  # The _linux-64 packages are activation wrappers — they pull in the sysroot
-  # and arrange for CC/CXX to use a clang wrapper that injects --sysroot.
-  # sysroot_linux-64=2.28 -> manylinux_2_28 baseline, covers most active distros.
+  # build_appimage.sh adds the native activation wrappers, glibc 2.28 sysroot,
+  # and Mesa GBM development package for the host architecture.
   - clang=22
   - clangxx=22
   - clang-tools=22
   - lld=22
   - llvm-tools=22
-  - clang_linux-64=22
-  - clangxx_linux-64=22
-  - sysroot_linux-64=2.28
 
   - libvulkan-headers
   - libvulkan-loader
   - libgles-devel
-  - mesa-libgbm-devel-conda-x86_64
   - lz4-c
   - libva-utils
   - dav1d-dev

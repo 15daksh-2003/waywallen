@@ -1,32 +1,470 @@
 use crate::error::{Error, Result, ResultExt};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock as StdRwLock, Weak as StdWeak};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
-use tokio::sync::{broadcast, Mutex as TokioMutex};
+use tokio::sync::{broadcast, watch, Mutex as TokioMutex};
 use uuid::Uuid;
 
-use crate::ipc::proto::{ControlMsg, EventMsg};
-use crate::ipc::uds::{recv_event, send_control, CodecError};
+use crate::ipc::proto::{
+    AudioWindow, BufferDirective, BufferFormat, BufferMemorySource, BufferPath, ControlMsg,
+    EventMsg, EventSubscriptionResult, EventSubscriptionStatus, MediaPlaybackState, PointerAxis,
+    PointerButton, PointerMotion, RendererInit, WireMprisSnapshot,
+};
+use crate::ipc::uds::{recv_event, send_control};
 
 /// Renderer IPC compatibility version the daemon currently emits. Bump
 /// this when the daemon/renderer wire contract changes.
-pub const SPAWN_VERSION: u32 = 8;
-use crate::plugin::renderer_registry::{
-    RendererDef, RendererRegistry, EVENT_KIND_MPRIS, EVENT_KIND_POINTER,
-};
+pub const SPAWN_VERSION: u32 = 9;
+use crate::plugin::renderer_registry::{RendererActivityMode, RendererDef, RendererRegistry};
 use crate::routing::Router;
+use crate::settings::SettingsStore;
 use crate::wallpaper::types::WallpaperType;
 
 // ---------------------------------------------------------------------------
 // Public types
 
 pub type RendererId = String;
+
+const MAX_EVENT_SUBSCRIPTIONS: usize = 16;
+const MAX_EVENT_KIND_BYTES: usize = 64;
+const MAX_EVENT_KIND_TOTAL_BYTES: usize = 512;
+const WRITER_QUEUE_CAPACITY: usize = 64;
+const RENDERER_FAILED_EXIT_GRACE: Duration = Duration::from_millis(250);
+
+async fn failed_renderer_process_status(child: &mut Child) -> String {
+    match tokio::time::timeout(RENDERER_FAILED_EXIT_GRACE, child.wait()).await {
+        Ok(Ok(status)) => format!("process_status={status}"),
+        Ok(Err(error)) => {
+            let kill = child.start_kill().map_or_else(
+                |kill_error| format!("kill failed: {kill_error}"),
+                |()| "kill requested".to_string(),
+            );
+            format!("process_status=wait failed: {error}; {kill}")
+        }
+        Err(_) => {
+            let kill = child.start_kill().map_or_else(
+                |error| format!("kill failed: {error}"),
+                |()| "killed after grace timeout".to_string(),
+            );
+            let status = match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
+                Ok(Ok(status)) => status.to_string(),
+                Ok(Err(error)) => format!("wait failed: {error}"),
+                Err(_) => "wait timed out after 2s".to_string(),
+            };
+            format!("process_status={status}; {kill}")
+        }
+    }
+}
+
+fn renderer_spawn_error_reason(error: Error) -> String {
+    match error {
+        Error::RendererSpawnFailed(reason) => reason,
+        other => other.to_string(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RendererEventKind {
+    Pointer,
+    Mpris,
+    Audio,
+}
+
+impl RendererEventKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pointer => "pointer",
+            Self::Mpris => "mpris",
+            Self::Audio => "audio",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "pointer" => Some(Self::Pointer),
+            "mpris" => Some(Self::Mpris),
+            "audio" => Some(Self::Audio),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RendererSubscription {
+    pub revision: u64,
+    pub kinds: BTreeSet<RendererEventKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RendererSubscriptionSnapshot {
+    entries: Arc<BTreeMap<RendererId, RendererSubscription>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RendererProcessOwnershipSnapshot {
+    pub generation: u64,
+    process_groups: Arc<BTreeSet<i32>>,
+}
+
+impl RendererProcessOwnershipSnapshot {
+    pub fn owns_process_group(&self, process_group: i32) -> bool {
+        self.process_groups.contains(&process_group)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_process_groups(process_groups: impl IntoIterator<Item = i32>) -> Self {
+        Self {
+            generation: 0,
+            process_groups: Arc::new(process_groups.into_iter().collect()),
+        }
+    }
+}
+
+impl RendererSubscriptionSnapshot {
+    pub fn revision_for(&self, id: &str, kind: RendererEventKind) -> Option<u64> {
+        self.entries
+            .get(id)
+            .filter(|entry| entry.kinds.contains(&kind))
+            .map(|entry| entry.revision)
+    }
+
+    pub fn subscribers(&self, kind: RendererEventKind) -> Vec<(RendererId, u64)> {
+        self.entries
+            .iter()
+            .filter_map(|(id, entry)| {
+                entry
+                    .kinds
+                    .contains(&kind)
+                    .then(|| (id.clone(), entry.revision))
+            })
+            .collect()
+    }
+}
+
+struct SubscriptionApply {
+    revision: u64,
+    status: EventSubscriptionStatus,
+    kinds: Vec<String>,
+    reason: String,
+    commit: Option<RendererSubscription>,
+}
+
+struct RendererSubscriptionRegistry {
+    committed: StdMutex<BTreeMap<RendererId, RendererSubscription>>,
+    published: watch::Sender<RendererSubscriptionSnapshot>,
+}
+
+impl RendererSubscriptionRegistry {
+    fn new() -> Self {
+        let (published, _) = watch::channel(RendererSubscriptionSnapshot::default());
+        Self {
+            committed: StdMutex::new(BTreeMap::new()),
+            published,
+        }
+    }
+
+    fn register(&self, id: RendererId) {
+        if let Ok(mut committed) = self.committed.lock() {
+            committed.insert(id, RendererSubscription::default());
+            self.publish_locked(&committed);
+        }
+    }
+
+    fn remove(&self, id: &str) {
+        if let Ok(mut committed) = self.committed.lock() {
+            committed.remove(id);
+            self.publish_locked(&committed);
+        }
+    }
+
+    fn prepare(&self, id: &str, revision: u64, raw_kinds: &[String]) -> SubscriptionApply {
+        let committed = match self.committed.lock() {
+            Ok(committed) => committed,
+            Err(_) => {
+                return SubscriptionApply {
+                    revision,
+                    status: EventSubscriptionStatus::Invalid,
+                    kinds: Vec::new(),
+                    reason: "subscription registry unavailable".to_string(),
+                    commit: None,
+                };
+            }
+        };
+        let Some(current) = committed.get(id) else {
+            return SubscriptionApply {
+                revision,
+                status: EventSubscriptionStatus::Invalid,
+                kinds: Vec::new(),
+                reason: "renderer is not registered".to_string(),
+                commit: None,
+            };
+        };
+        let current_kinds = || {
+            current
+                .kinds
+                .iter()
+                .map(|kind| kind.as_str().to_string())
+                .collect()
+        };
+        if raw_kinds.len() > MAX_EVENT_SUBSCRIPTIONS {
+            return SubscriptionApply {
+                revision,
+                status: EventSubscriptionStatus::LimitExceeded,
+                kinds: current_kinds(),
+                reason: format!("at most {MAX_EVENT_SUBSCRIPTIONS} event kinds are allowed"),
+                commit: None,
+            };
+        }
+        if revision == 0 {
+            return SubscriptionApply {
+                revision,
+                status: EventSubscriptionStatus::Invalid,
+                kinds: current_kinds(),
+                reason: "revision must start at 1".to_string(),
+                commit: None,
+            };
+        }
+        let total_kind_bytes = raw_kinds
+            .iter()
+            .try_fold(0usize, |total, kind| total.checked_add(kind.len()));
+        if total_kind_bytes.is_none_or(|total| total > MAX_EVENT_KIND_TOTAL_BYTES)
+            || raw_kinds
+                .iter()
+                .any(|kind| kind.len() > MAX_EVENT_KIND_BYTES)
+        {
+            return SubscriptionApply {
+                revision,
+                status: EventSubscriptionStatus::LimitExceeded,
+                kinds: current_kinds(),
+                reason: format!(
+                    "event kind names are limited to {MAX_EVENT_KIND_BYTES} bytes each and \
+                     {MAX_EVENT_KIND_TOTAL_BYTES} bytes total"
+                ),
+                commit: None,
+            };
+        }
+
+        let mut kinds = BTreeSet::new();
+        for raw in raw_kinds {
+            let Some(kind) = RendererEventKind::parse(raw) else {
+                return SubscriptionApply {
+                    revision,
+                    status: EventSubscriptionStatus::Invalid,
+                    kinds: current_kinds(),
+                    reason: format!("unknown event kind {raw:?}"),
+                    commit: None,
+                };
+            };
+            kinds.insert(kind);
+        }
+        let canonical: Vec<String> = kinds.iter().map(|kind| kind.as_str().to_string()).collect();
+
+        if revision < current.revision {
+            return SubscriptionApply {
+                revision,
+                status: EventSubscriptionStatus::StaleRevision,
+                kinds: current_kinds(),
+                reason: format!("current revision is {}", current.revision),
+                commit: None,
+            };
+        }
+        if revision == current.revision {
+            let same = kinds == current.kinds;
+            return SubscriptionApply {
+                revision,
+                status: if same {
+                    EventSubscriptionStatus::Applied
+                } else {
+                    EventSubscriptionStatus::RevisionConflict
+                },
+                kinds: current_kinds(),
+                reason: if same {
+                    String::new()
+                } else {
+                    "revision already names a different event set".to_string()
+                },
+                commit: None,
+            };
+        }
+
+        SubscriptionApply {
+            revision,
+            status: EventSubscriptionStatus::Applied,
+            kinds: canonical,
+            reason: String::new(),
+            commit: Some(RendererSubscription { revision, kinds }),
+        }
+    }
+
+    fn commit(&self, id: RendererId, subscription: RendererSubscription) {
+        if let Ok(mut committed) = self.committed.lock() {
+            if committed.contains_key(&id) {
+                committed.insert(id, subscription);
+                self.publish_locked(&committed);
+            }
+        }
+    }
+
+    fn snapshot(&self) -> RendererSubscriptionSnapshot {
+        self.published.borrow().clone()
+    }
+
+    fn subscribe(&self) -> watch::Receiver<RendererSubscriptionSnapshot> {
+        self.published.subscribe()
+    }
+
+    fn publish_locked(&self, committed: &BTreeMap<RendererId, RendererSubscription>) {
+        self.published.send_replace(RendererSubscriptionSnapshot {
+            entries: Arc::new(committed.clone()),
+        });
+    }
+}
+
+type WriterCompletion = std::sync::mpsc::SyncSender<std::result::Result<(), String>>;
+
+enum WriterCommand {
+    Reliable {
+        msg: ControlMsg,
+        commit: Option<RendererSubscription>,
+        done: WriterCompletion,
+    },
+    WakeAudio,
+}
+
+#[derive(Clone)]
+struct RendererWriter {
+    tx: std::sync::mpsc::SyncSender<WriterCommand>,
+    audio: Arc<StdMutex<Option<(u64, ControlMsg)>>>,
+    audio_wake_pending: Arc<AtomicBool>,
+}
+
+impl RendererWriter {
+    fn spawn(
+        id: RendererId,
+        stream: StdUnixStream,
+        subscriptions: Arc<RendererSubscriptionRegistry>,
+        reap_tx: tokio::sync::mpsc::UnboundedSender<RendererId>,
+    ) -> Self {
+        let (tx, rx) = std::sync::mpsc::sync_channel(WRITER_QUEUE_CAPACITY);
+        let audio = Arc::new(StdMutex::new(None));
+        let writer_audio = Arc::clone(&audio);
+        let audio_wake_pending = Arc::new(AtomicBool::new(false));
+        let writer_audio_wake_pending = Arc::clone(&audio_wake_pending);
+        thread::spawn(move || {
+            'writer: loop {
+                let first = match rx.recv() {
+                    Ok(command) => command,
+                    Err(_) => break,
+                };
+                let mut commands = std::collections::VecDeque::from([first]);
+                while commands.len() < WRITER_QUEUE_CAPACITY {
+                    match rx.try_recv() {
+                        Ok(command) => commands.push_back(command),
+                        Err(_) => break,
+                    }
+                }
+
+                while let Some(command) = commands.pop_front() {
+                    let WriterCommand::Reliable { msg, commit, done } = command else {
+                        continue;
+                    };
+                    match send_control(&stream, &msg, &[]) {
+                        Ok(()) => {
+                            if let Some(subscription) = commit {
+                                if let Ok(mut audio) = writer_audio.lock() {
+                                    *audio = None;
+                                }
+                                subscriptions.commit(id.clone(), subscription);
+                            }
+                            let _ = done.send(Ok(()));
+                        }
+                        Err(error) => {
+                            let reason = error.to_string();
+                            let _ = done.send(Err(reason.clone()));
+                            for pending in commands.drain(..).chain(rx.try_iter()) {
+                                if let WriterCommand::Reliable { done, .. } = pending {
+                                    let _ = done.send(Err(reason.clone()));
+                                }
+                            }
+                            log::warn!("renderer {id}: writer exit: {reason}");
+                            let _ = reap_tx.send(id.clone());
+                            break 'writer;
+                        }
+                    }
+                }
+
+                writer_audio_wake_pending.store(false, Ordering::Release);
+                let latest = writer_audio.lock().ok().and_then(|mut audio| audio.take());
+                if let Some((revision, msg)) = latest {
+                    if subscriptions
+                        .snapshot()
+                        .revision_for(&id, RendererEventKind::Audio)
+                        == Some(revision)
+                    {
+                        if let Err(error) = send_control(&stream, &msg, &[]) {
+                            log::warn!("renderer {id}: audio writer exit: {error}");
+                            let _ = reap_tx.send(id.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+
+            for command in rx.try_iter() {
+                if let WriterCommand::Reliable { done, .. } = command {
+                    let _ = done.send(Err("renderer writer stopped".to_string()));
+                }
+            }
+        });
+        Self {
+            tx,
+            audio,
+            audio_wake_pending,
+        }
+    }
+
+    fn send_blocking(
+        &self,
+        msg: ControlMsg,
+        commit: Option<RendererSubscription>,
+    ) -> std::result::Result<(), String> {
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        self.tx
+            .send(WriterCommand::Reliable {
+                msg,
+                commit,
+                done: done_tx,
+            })
+            .map_err(|_| "renderer writer stopped".to_string())?;
+        done_rx
+            .recv()
+            .map_err(|_| "renderer writer stopped".to_string())?
+    }
+
+    fn replace_audio(&self, revision: u64, msg: ControlMsg) -> std::result::Result<(), String> {
+        *self
+            .audio
+            .lock()
+            .map_err(|_| "audio slot mutex poisoned".to_string())? = Some((revision, msg));
+        if self.audio_wake_pending.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        match self.tx.try_send(WriterCommand::WakeAudio) {
+            Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => Ok(()),
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                self.audio_wake_pending.store(false, Ordering::Release);
+                Err("renderer writer stopped".to_string())
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MprisSnapshot {
@@ -74,9 +512,10 @@ pub struct SpawnRequest {
     pub user_properties_json: Option<String>,
 }
 
-/// Snapshot of the most recent `BindBuffers` event, plus the DMA-BUF FDs
-/// attached to it. Owned here and copied out to display endpoints.
-pub struct BindSnapshot {
+/// Immutable renderer publication created from one `BindBuffers` event.
+/// References held by display events keep its DMA-BUF FDs alive even after
+/// the renderer publishes a newer pool.
+pub struct PublishedPool {
     /// Monotonically increasing per-renderer pool generation. Sourced
     /// from the renderer's `bind_buffers.generation` field.
     pub generation: u64,
@@ -109,7 +548,55 @@ pub struct FrameSnapshot {
     pub release_point: u64,
 }
 
-/// Bit 0 of `BindSnapshot::flags` / `ControlMsg::ConfigureBuffers.flags`:
+#[derive(Debug, Clone, Copy)]
+pub struct RendererProgressSnapshot {
+    pub registered_at: Instant,
+    pub bind_at: Option<Instant>,
+    pub buffer_generation: Option<u64>,
+    pub first_frame_at: Option<Instant>,
+    pub last_frame_at: Option<Instant>,
+}
+
+struct RendererProgress {
+    registered_at: Instant,
+    bind_at: Option<Instant>,
+    buffer_generation: Option<u64>,
+    first_frame_at: Option<Instant>,
+    last_frame_at: Option<Instant>,
+}
+
+impl RendererProgress {
+    fn new() -> Self {
+        Self {
+            registered_at: Instant::now(),
+            bind_at: None,
+            buffer_generation: None,
+            first_frame_at: None,
+            last_frame_at: None,
+        }
+    }
+
+    fn snapshot(&self) -> RendererProgressSnapshot {
+        RendererProgressSnapshot {
+            registered_at: self.registered_at,
+            bind_at: self.bind_at,
+            buffer_generation: self.buffer_generation,
+            first_frame_at: self.first_frame_at,
+            last_frame_at: self.last_frame_at,
+        }
+    }
+}
+
+/// Renderer event plus the pool generation that owned it when it was received.
+/// `frame_ready` carries this relationship implicitly through event order, so
+/// consumers must not reconstruct it from the latest published pool later.
+#[derive(Clone, Debug)]
+pub struct RendererEvent {
+    pub message: EventMsg,
+    pub pool_generation: Option<u64>,
+}
+
+/// Bit 0 of `PublishedPool::flags` / `ControlMsg::ConfigureBuffers.flags`:
 /// the renderer must back the dmabuf with HOST_VISIBLE memory.
 pub const BUF_HOST_VISIBLE: u32 = 1 << 0;
 
@@ -145,23 +632,33 @@ pub struct RendererHandle {
     pub name: String,
     /// Domain id of the installable plugin that supplied this renderer.
     pub plugin_id: String,
+    pub activity_mode: RendererActivityMode,
     /// OS pid of the renderer child captured right after `spawn()`.
     /// `None` only if Tokio could not return a child pid.
     pub pid: Option<u32>,
+    /// Process group created for this renderer and inherited by normal
+    /// helper processes. Audio ownership uses this boundary rather than
+    /// renderer-controlled application names.
+    pub process_group: Option<i32>,
     /// DRM render-node id of the GPU the renderer's Vulkan instance
     /// picked. Reported in Ready and used by DMA-BUF negotiation.
     pub gpu: DrmNode,
+    spawn_request: SpawnRequest,
 
-    /// Blocking std UnixStream. Guarded by a std Mutex so HTTP handlers
-    /// hold the lock only while a `sendmsg` is in flight.
-    sock: Arc<StdMutex<StdUnixStream>>,
+    /// Sole owner-facing path for daemon-to-renderer writes. A dedicated
+    /// thread serializes reliable control traffic and latest-only audio.
+    writer: RendererWriter,
 
     /// Broadcast of every event the host emits (besides the FDs on the
-    /// initial BindBuffers, whose fds are stored in `bind_snapshot`).
-    events: broadcast::Sender<EventMsg>,
+    /// initial BindBuffers, whose fds are stored in `published_pool`).
+    events: broadcast::Sender<RendererEvent>,
+    _release_events_tx: tokio::sync::mpsc::UnboundedSender<crate::sync::ReleaseEvent>,
+    release_events_rx:
+        StdMutex<Option<tokio::sync::mpsc::UnboundedReceiver<crate::sync::ReleaseEvent>>>,
+    progress: Arc<StdMutex<RendererProgress>>,
 
-    /// Populated when the host sends its first `BindBuffers` event.
-    bind_snapshot: Arc<StdMutex<Option<BindSnapshot>>>,
+    /// Latest immutable pool published by the renderer.
+    published_pool: Arc<StdMutex<Option<Arc<PublishedPool>>>>,
 
     /// In-flight `ConfigureBuffers` request. `Some(flags)` while the
     /// router has asked for a re-export not yet answered by BindBuffers.
@@ -192,18 +689,40 @@ pub struct RendererHandle {
     /// The child process. Kept alive so dropping the manager reaps it.
     child: Arc<TokioMutex<Option<Child>>>,
 
-    /// Inbound-event family subscriptions copied from the renderer's
-    /// manifest at spawn time. Pointer senders consult this before dispatch.
-    events_subscribed: Arc<Vec<String>>,
-
     /// Renderer-published clear color (RGBA, 0..=1, sRGB straight
     /// alpha). Sole source for outbound display clear color.
     clear_rgba: Arc<StdMutex<[f32; 4]>>,
 }
 
 impl RendererHandle {
-    pub fn events(&self) -> broadcast::Receiver<EventMsg> {
+    pub fn events(&self) -> broadcast::Receiver<RendererEvent> {
         self.events.subscribe()
+    }
+
+    pub fn take_release_events(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<crate::sync::ReleaseEvent>> {
+        self.release_events_rx
+            .lock()
+            .ok()
+            .and_then(|mut receiver| receiver.take())
+    }
+
+    pub fn progress(&self) -> RendererProgressSnapshot {
+        self.progress
+            .lock()
+            .map(|progress| progress.snapshot())
+            .unwrap_or(RendererProgressSnapshot {
+                registered_at: Instant::now(),
+                bind_at: None,
+                buffer_generation: None,
+                first_frame_at: None,
+                last_frame_at: None,
+            })
+    }
+
+    pub fn spawn_request(&self) -> SpawnRequest {
+        self.spawn_request.clone()
     }
 
     pub fn frame_ready_seen(&self) -> bool {
@@ -219,31 +738,24 @@ impl RendererHandle {
             .then_some(frame)
     }
 
-    /// Borrow the cached bind snapshot. Returns `None` until the host's
-    /// first frame has been rendered and the fds arrived.
-    pub fn bind_snapshot(&self) -> Arc<StdMutex<Option<BindSnapshot>>> {
-        Arc::clone(&self.bind_snapshot)
+    /// Return the current immutable publication. Callers retain the exact
+    /// pool and its FDs independently of later renderer publications.
+    pub fn published_pool(&self) -> Option<Arc<PublishedPool>> {
+        self.published_pool.lock().ok().and_then(|g| g.clone())
     }
 
     /// Actual texture dimensions reported by the renderer's most recent
     /// `BindBuffers`. Returns `(0, 0)` before the first BindBuffers.
     pub fn texture_size(&self) -> (u32, u32) {
-        if let Ok(g) = self.bind_snapshot.lock() {
-            if let Some(snap) = g.as_ref() {
-                return (snap.width, snap.height);
-            }
-        }
-        (0, 0)
+        self.published_pool()
+            .map(|pool| (pool.width, pool.height))
+            .unwrap_or((0, 0))
     }
 
     /// Current placement flags from the latest `BindBuffers`, or 0 if
     /// no snapshot has arrived yet.
     pub fn current_flags(&self) -> u32 {
-        self.bind_snapshot
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|s| s.flags))
-            .unwrap_or(0)
+        self.published_pool().map(|pool| pool.flags).unwrap_or(0)
     }
 
     /// Whether a `ConfigureBuffers` request is currently in flight (sent
@@ -297,31 +809,28 @@ impl RendererHandle {
         self.last_dispatched_scheme.lock().ok().and_then(|g| *g)
     }
 
-    /// True iff the renderer's most recent `BindBuffers` snapshot
-    /// matches the most recently dispatched [`crate::dma::negotiate::NegotiatedScheme`]
-    pub fn scheme_satisfied(&self) -> bool {
+    /// True iff `pool` matches the most recently dispatched scheme.
+    pub fn scheme_satisfied_by(&self, pool: &PublishedPool) -> bool {
         let Some(scheme) = self.current_scheme() else {
             return false;
         };
-        let snap = self.bind_snapshot();
-        let Ok(guard) = snap.lock() else {
-            return false;
-        };
-        match guard.as_ref() {
-            Some(s) => s.fourcc == scheme.fourcc && s.modifier == scheme.modifier,
-            None => false,
-        }
+        pool.fourcc == scheme.fourcc && pool.modifier == scheme.modifier
+    }
+
+    #[cfg(test)]
+    pub fn test_publish_pool(&self, pool: PublishedPool) {
+        *self.published_pool.lock().unwrap() = Some(Arc::new(pool));
     }
 
     pub fn register_frame_consumers(
         &self,
         identity: crate::sync::FrameIdentity,
-        expected_members: u32,
+        consumers: Vec<crate::sync::FrameConsumerIdentity>,
     ) -> std::result::Result<Vec<crate::sync::FrameConsumerMember>, &'static str> {
         let Some(tx) = self.frame_record_tx.as_ref() else {
             return Err("no reaper wired (test stub or unconfigured renderer)");
         };
-        crate::sync::register_frame(tx, identity, expected_members)
+        crate::sync::register_frame(tx, identity, consumers)
     }
 
     /// Renderer-published clear color (RGBA, 0..=1). Defaults to
@@ -347,19 +856,47 @@ pub struct RendererManager {
     /// Cached `/dev/dri` enumeration from startup. Used at spawn time to
     /// translate `gpu_drm_dev` settings into render-node paths.
     gpus: OnceLock<Arc<Vec<crate::gpu::GpuInfo>>>,
+    settings: OnceLock<Arc<SettingsStore>>,
     /// Dead-renderer signals queue here (from reader-thread exit or
     /// a send_control hitting EPIPE). One background task drains it.
     reap_tx: tokio::sync::mpsc::UnboundedSender<RendererId>,
     reap_rx: StdMutex<Option<tokio::sync::mpsc::UnboundedReceiver<RendererId>>>,
+    subscriptions: Arc<RendererSubscriptionRegistry>,
+    process_ownership: watch::Sender<RendererProcessOwnershipSnapshot>,
+    process_ownership_state: StdMutex<RendererProcessOwnershipState>,
 }
 
 struct Inner {
     renderers: HashMap<RendererId, Arc<RendererHandle>>,
 }
 
+#[derive(Default)]
+struct RendererProcessOwnershipState {
+    generation: u64,
+    process_groups: BTreeSet<i32>,
+}
+
+struct RendererProcessGroupRegistration<'a> {
+    manager: &'a RendererManager,
+    process_group: Option<i32>,
+}
+
+impl RendererProcessGroupRegistration<'_> {
+    fn commit(mut self) {
+        self.process_group = None;
+    }
+}
+
+impl Drop for RendererProcessGroupRegistration<'_> {
+    fn drop(&mut self) {
+        self.manager.unregister_process_group(self.process_group);
+    }
+}
+
 impl RendererManager {
     pub fn new(registry: RendererRegistry) -> Self {
         let (reap_tx, reap_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (process_ownership, _) = watch::channel(RendererProcessOwnershipSnapshot::default());
         Self {
             inner: TokioMutex::new(Inner {
                 renderers: HashMap::new(),
@@ -367,8 +904,12 @@ impl RendererManager {
             registry: StdRwLock::new(registry),
             router: OnceLock::new(),
             gpus: OnceLock::new(),
+            settings: OnceLock::new(),
             reap_tx,
             reap_rx: StdMutex::new(Some(reap_rx)),
+            subscriptions: Arc::new(RendererSubscriptionRegistry::new()),
+            process_ownership,
+            process_ownership_state: StdMutex::new(RendererProcessOwnershipState::default()),
         }
     }
 
@@ -376,6 +917,11 @@ impl RendererManager {
     /// resolve `gpu_drm_dev` selections into `render_node` paths.
     pub fn attach_gpus(&self, gpus: Arc<Vec<crate::gpu::GpuInfo>>) {
         let _ = self.gpus.set(gpus);
+    }
+
+    /// Wire the live settings store used by outbound renderer policy gates.
+    pub fn attach_settings(&self, settings: Arc<SettingsStore>) {
+        let _ = self.settings.set(settings);
     }
 
     /// Wire the manager to the router. Must be called once after both
@@ -413,10 +959,11 @@ impl RendererManager {
                 bin: PathBuf::from(bin),
                 types: vec!["scene".to_string()],
                 priority: 100,
+                activity: RendererActivityMode::Continuous,
                 spawn_version: None,
                 extras: Vec::new(),
                 settings: Default::default(),
-                events: Vec::new(),
+                legacy_events: None,
             });
         }
         Self::new(registry)
@@ -489,9 +1036,10 @@ impl RendererManager {
         let init_msg = build_init_msg(&req, &renderer_def);
 
         let mut cmd = Command::new(&renderer_def.bin);
+        cmd.process_group(0);
         cmd.arg("--ipc").arg(&sock_path);
         // SPAWN_VERSION 3: extras (canonical `path` + plugin-specific
-        // keys like `assets`/`workshop_id`) ride as `--<key> <value>`
+        // keys like `assets`/`external_id`) ride as `--<key> <value>`
         let mut extra_keys: Vec<&String> = req.extras.keys().collect();
         extra_keys.sort();
         for k in extra_keys {
@@ -508,6 +1056,8 @@ impl RendererManager {
             .spawn()
             .with_context(|| format!("spawn {}", renderer_def.bin.display()))?;
         let child_pid = child.id();
+        let process_group = child_pid.and_then(|pid| i32::try_from(pid).ok());
+        let process_group_registration = self.register_process_group(process_group);
 
         // Accept, with a bound to avoid hanging forever on a broken host.
         let accept = listener.accept();
@@ -533,14 +1083,23 @@ impl RendererManager {
         let handshake_stream = std_stream
             .try_clone()
             .context("try_clone for Init handshake")?;
-        let gpu =
+        let handshake =
             tokio::task::spawn_blocking(move || run_init_handshake(&handshake_stream, &init_msg))
                 .await
-                .context("init handshake join")?
-                .map_err(|e| {
-                    let _ = child.start_kill();
-                    e
-                })?;
+                .context("init handshake join")?;
+        let gpu = match handshake {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                let reason = renderer_spawn_error_reason(error);
+                drop(std_stream);
+                let process_status = failed_renderer_process_status(&mut child).await;
+                return Err(Error::RendererSpawnFailed(format!(
+                    "{reason}; renderer={} pid={}; {process_status}",
+                    renderer_def.name,
+                    child_pid.map_or_else(|| "unknown".to_string(), |pid| pid.to_string()),
+                )));
+            }
+        };
         log::info!(
             "renderer {id}: Ready (drm_render={}:{})",
             gpu.major,
@@ -548,8 +1107,11 @@ impl RendererManager {
         );
 
         // Now wire up the permanent reader thread and store the handle.
-        let (events_tx, _events_rx) = broadcast::channel::<EventMsg>(256);
-        let bind_snapshot: Arc<StdMutex<Option<BindSnapshot>>> = Arc::new(StdMutex::new(None));
+        let (events_tx, _events_rx) = broadcast::channel::<RendererEvent>(256);
+        let (release_events_tx, release_events_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::sync::ReleaseEvent>();
+        let published_pool: Arc<StdMutex<Option<Arc<PublishedPool>>>> =
+            Arc::new(StdMutex::new(None));
         let sync_fds: Arc<StdMutex<std::collections::VecDeque<(u64, OwnedFd)>>> =
             Arc::new(StdMutex::new(std::collections::VecDeque::new()));
         let latest_frame: Arc<StdMutex<Option<FrameSnapshot>>> = Arc::new(StdMutex::new(None));
@@ -558,34 +1120,31 @@ impl RendererManager {
             Arc::new(StdMutex::new(None));
         let pending_configure: Arc<StdMutex<Option<u32>>> = Arc::new(StdMutex::new(None));
         let clear_rgba: Arc<StdMutex<[f32; 4]>> = Arc::new(StdMutex::new([0.0, 0.0, 0.0, 1.0]));
+        let progress = Arc::new(StdMutex::new(RendererProgress::new()));
 
-        let sock = Arc::new(StdMutex::new(std_stream));
-        let reader_sock = sock.clone();
+        let reader_stream = std_stream
+            .try_clone()
+            .context("try_clone for renderer reader")?;
+        self.subscriptions.register(id.clone());
+        let writer = RendererWriter::spawn(
+            id.clone(),
+            std_stream,
+            Arc::clone(&self.subscriptions),
+            self.reap_tx.clone(),
+        );
+        let reader_writer = writer.clone();
+        let reader_subscriptions = Arc::clone(&self.subscriptions);
         let reader_events = events_tx.clone();
-        let reader_snapshot = bind_snapshot.clone();
+        let reader_pool = published_pool.clone();
         let reader_sync_fds = sync_fds.clone();
         let reader_latest_frame = latest_frame.clone();
         let reader_release_syncobj = release_syncobj.clone();
         let reader_format_caps = format_caps.clone();
         let reader_pending = pending_configure.clone();
         let reader_clear_rgba = clear_rgba.clone();
+        let reader_progress = Arc::clone(&progress);
         let reader_id = id.clone();
         let reader_reap_tx = self.reap_tx.clone();
-        thread::spawn(move || {
-            run_reader(
-                reader_id,
-                reader_sock,
-                reader_events,
-                reader_snapshot,
-                reader_sync_fds,
-                reader_latest_frame,
-                reader_release_syncobj,
-                reader_format_caps,
-                reader_pending,
-                reader_clear_rgba,
-                reader_reap_tx,
-            );
-        });
 
         // Per-renderer reaper drains FrameRecords and transfers consumer
         // release fences onto the producer timeline.
@@ -607,11 +1166,17 @@ impl RendererManager {
             extras: req.extras.clone(),
             name: renderer_def.name.clone(),
             plugin_id: renderer_def.plugin_id.clone(),
+            activity_mode: renderer_def.activity,
             pid: child_pid,
+            process_group,
             gpu,
-            sock,
+            spawn_request: req.clone(),
+            writer,
             events: events_tx,
-            bind_snapshot,
+            _release_events_tx: release_events_tx.clone(),
+            release_events_rx: StdMutex::new(Some(release_events_rx)),
+            progress,
+            published_pool,
             sync_fds,
             latest_frame,
             release_syncobj,
@@ -620,7 +1185,6 @@ impl RendererManager {
             frame_record_tx,
             pending_configure,
             child: Arc::new(TokioMutex::new(Some(child))),
-            events_subscribed: Arc::new(renderer_def.events.clone()),
             clear_rgba,
         });
 
@@ -634,6 +1198,7 @@ impl RendererManager {
                 id.clone(),
                 Arc::clone(&handle.release_syncobj),
                 frame_rx,
+                release_events_tx,
             );
         }
 
@@ -641,6 +1206,25 @@ impl RendererManager {
             let mut inner = self.inner.lock().await;
             inner.renderers.insert(id.clone(), handle);
         }
+        process_group_registration.commit();
+        thread::spawn(move || {
+            run_reader(
+                reader_id,
+                reader_stream,
+                reader_writer,
+                reader_subscriptions,
+                reader_events,
+                reader_pool,
+                reader_sync_fds,
+                reader_latest_frame,
+                reader_release_syncobj,
+                reader_format_caps,
+                reader_pending,
+                reader_clear_rgba,
+                reader_progress,
+                reader_reap_tx,
+            );
+        });
         log::info!("spawned renderer {id} ({})", req.wp_type);
         Ok(id)
     }
@@ -756,7 +1340,9 @@ impl RendererManager {
                 }
                 recv = events.recv() => {
                     match recv {
-                        Ok(EventMsg::FrameReady { .. }) => return Ok(()),
+                        Ok(event) if matches!(event.message, EventMsg::FrameReady { .. }) => {
+                            return Ok(())
+                        }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(_)) => {
                             if handle.frame_ready_seen() {
@@ -781,30 +1367,17 @@ impl RendererManager {
             .get(id)
             .await
             .ok_or_else(|| Error::RendererNotFound(id.to_string()))?;
-        let sock = handle.sock.clone();
-        let codec_res: Result<std::result::Result<(), CodecError>> =
-            tokio::task::spawn_blocking(move || {
-                let guard = sock.lock().map_err(|e| {
-                    Error::RendererControlFailed(format!("sock mutex poisoned: {e}"))
-                })?;
-                Ok(send_control(&*guard, &msg, &[]))
-            })
+        let writer = handle.writer.clone();
+        let write = tokio::task::spawn_blocking(move || writer.send_blocking(msg, None))
             .await
             .context("send_control join")?;
-        match codec_res? {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                if is_peer_gone(&e) {
-                    log::warn!("renderer {id}: peer gone on send_control ({e}), evicting");
-                    self.mark_dead(id);
-                }
-                Err(Error::RendererControlFailed(format!("send_control: {e}")))
-            }
-        }
+        write.map_err(|error| {
+            self.mark_dead(id);
+            Error::RendererControlFailed(format!("send_control: {error}"))
+        })
     }
 
-    /// Modifier-negotiation v2 dispatch — replaces the deleted
-    /// `send_configure_buffers`.
+    /// Dispatch the complete buffer allocation decision.
     pub async fn send_negotiate_buffers(
         &self,
         id: &str,
@@ -835,15 +1408,34 @@ impl RendererManager {
             scheme.mem_source,
         );
         let msg = ControlMsg::NegotiateBuffers {
-            fourcc: scheme.fourcc,
-            modifier: scheme.modifier,
-            plane_count: scheme.plane_count,
-            sync_mode: scheme.sync_mode,
-            color: scheme.color,
-            mem_hint: scheme.mem_hint,
-            count: scheme.count,
-            path: scheme.path.as_u32(),
-            mem_source: scheme.mem_source.as_u32(),
+            directive: BufferDirective {
+                format: BufferFormat {
+                    fourcc: scheme.fourcc,
+                    modifier: scheme.modifier,
+                    plane_count: scheme.plane_count,
+                },
+                sync_mode: scheme.sync_mode,
+                color: scheme.color,
+                mem_hint: scheme.mem_hint,
+                count: scheme.count,
+                path: match scheme.path {
+                    crate::dma::negotiate::PathCategory::OptimizedSameDevice => {
+                        BufferPath::OptimizedSameDevice
+                    }
+                    crate::dma::negotiate::PathCategory::OptimizedSameVendor => {
+                        BufferPath::OptimizedSameVendor
+                    }
+                    crate::dma::negotiate::PathCategory::CompatLinear => BufferPath::CompatLinear,
+                    crate::dma::negotiate::PathCategory::CompatCpuReadback => {
+                        BufferPath::CompatCpuReadback
+                    }
+                },
+                memory_source: match scheme.mem_source {
+                    crate::dma::negotiate::MemSource::GpuNative => BufferMemorySource::GpuNative,
+                    crate::dma::negotiate::MemSource::GpuLinear => BufferMemorySource::GpuLinear,
+                    crate::dma::negotiate::MemSource::DmabufHeap => BufferMemorySource::DmabufHeap,
+                },
+            },
         };
         self.send_control(id, msg).await?;
         if let Ok(mut guard) = handle.last_dispatched_scheme.lock() {
@@ -887,105 +1479,58 @@ impl RendererManager {
 
     /// Forward a pointer-motion event to a live renderer. Silently
     /// drops when the renderer did not subscribe to pointer events.
-    pub async fn send_pointer_motion(
-        &self,
-        id: &str,
-        x: f32,
-        y: f32,
-        timestamp_us: u64,
-        modifiers: u32,
-    ) -> Result<()> {
-        if !self.subscribed_to(id, EVENT_KIND_POINTER).await {
+    pub async fn send_pointer_motion(&self, id: &str, event: PointerMotion) -> Result<()> {
+        if !self.pointer_forwarding_enabled() {
             return Ok(());
         }
-        self.send_control(
-            id,
-            ControlMsg::PointerMotion {
-                x,
-                y,
-                timestamp_us,
-                modifiers,
-            },
-        )
-        .await
+        if !self.subscribed_to(id, RendererEventKind::Pointer) {
+            return Ok(());
+        }
+        self.send_control(id, ControlMsg::PointerMotion { event })
+            .await
     }
 
     /// Forward a pointer-button event. Same gating as
     /// [`Self::send_pointer_motion`].
-    pub async fn send_pointer_button(
-        &self,
-        id: &str,
-        x: f32,
-        y: f32,
-        button: u32,
-        state: u32,
-        timestamp_us: u64,
-        modifiers: u32,
-    ) -> Result<()> {
-        if !self.subscribed_to(id, EVENT_KIND_POINTER).await {
+    pub async fn send_pointer_button(&self, id: &str, event: PointerButton) -> Result<()> {
+        if !self.pointer_forwarding_enabled() {
             return Ok(());
         }
-        self.send_control(
-            id,
-            ControlMsg::PointerButton {
-                x,
-                y,
-                button,
-                state,
-                timestamp_us,
-                modifiers,
-            },
-        )
-        .await
+        if !self.subscribed_to(id, RendererEventKind::Pointer) {
+            return Ok(());
+        }
+        self.send_control(id, ControlMsg::PointerButton { event })
+            .await
     }
 
     /// Forward a pointer-axis (scroll) event. Same gating as
     /// [`Self::send_pointer_motion`].
-    pub async fn send_pointer_axis(
-        &self,
-        id: &str,
-        x: f32,
-        y: f32,
-        delta_x: f32,
-        delta_y: f32,
-        source: u32,
-        timestamp_us: u64,
-        modifiers: u32,
-    ) -> Result<()> {
-        if !self.subscribed_to(id, EVENT_KIND_POINTER).await {
+    pub async fn send_pointer_axis(&self, id: &str, event: PointerAxis) -> Result<()> {
+        if !self.pointer_forwarding_enabled() {
             return Ok(());
         }
-        self.send_control(
-            id,
-            ControlMsg::PointerAxis {
-                x,
-                y,
-                delta_x,
-                delta_y,
-                source,
-                timestamp_us,
-                modifiers,
-            },
-        )
-        .await
+        if !self.subscribed_to(id, RendererEventKind::Pointer) {
+            return Ok(());
+        }
+        self.send_control(id, ControlMsg::PointerAxis { event })
+            .await
+    }
+
+    fn pointer_forwarding_enabled(&self) -> bool {
+        self.settings
+            .get()
+            .is_none_or(|settings| settings.pointer_forwarding_enabled())
     }
 
     /// Forward an MPRIS media snapshot to a live renderer. Silently
     /// drops when the renderer did not subscribe to MPRIS events.
     pub async fn send_mpris(&self, id: &str, snapshot: MprisSnapshot) -> Result<()> {
-        let Some(handle) = self.get(id).await else {
+        if self.get(id).await.is_none() {
             log::debug!("renderer {id}: drop mpris snapshot; renderer not found");
             return Ok(());
-        };
-        if !handle
-            .events_subscribed
-            .iter()
-            .any(|e| e == EVENT_KIND_MPRIS)
-        {
-            log::debug!(
-                "renderer {id}: drop mpris snapshot; not subscribed to mpris events={:?}",
-                handle.events_subscribed
-            );
+        }
+        if !self.subscribed_to(id, RendererEventKind::Mpris) {
+            log::debug!("renderer {id}: drop mpris snapshot; not subscribed");
             return Ok(());
         }
         log::debug!(
@@ -998,25 +1543,101 @@ impl RendererManager {
         self.send_control(
             id,
             ControlMsg::Mpris {
-                state: snapshot.state,
-                title: snapshot.title,
-                artist: snapshot.artist,
-                album: snapshot.album,
-                album_artist: snapshot.album_artist,
-                art_url: snapshot.art_url,
-                previous_art_url: snapshot.previous_art_url,
+                snapshot: WireMprisSnapshot {
+                    state: match snapshot.state {
+                        1 => MediaPlaybackState::Playing,
+                        2 => MediaPlaybackState::Paused,
+                        _ => MediaPlaybackState::Stopped,
+                    },
+                    title: snapshot.title,
+                    artist: snapshot.artist,
+                    album: snapshot.album,
+                    album_artist: snapshot.album_artist,
+                    art_url: snapshot.art_url,
+                    previous_art_url: snapshot.previous_art_url,
+                },
             },
         )
         .await
     }
 
-    /// Returns `true` when the renderer is alive and its manifest
-    /// declared `events = [..., kind, ...]`. Unknown id ⇒ `false`
-    async fn subscribed_to(&self, id: &str, kind: &str) -> bool {
-        match self.get(id).await {
-            Some(h) => h.events_subscribed.iter().any(|e| e == kind),
-            None => false,
+    pub fn subscription_snapshot(&self) -> RendererSubscriptionSnapshot {
+        self.subscriptions.snapshot()
+    }
+
+    pub fn subscribe_subscriptions(&self) -> watch::Receiver<RendererSubscriptionSnapshot> {
+        self.subscriptions.subscribe()
+    }
+
+    pub fn subscribe_process_ownership(&self) -> watch::Receiver<RendererProcessOwnershipSnapshot> {
+        self.process_ownership.subscribe()
+    }
+
+    fn register_process_group(
+        &self,
+        process_group: Option<i32>,
+    ) -> RendererProcessGroupRegistration<'_> {
+        if let Some(process_group) = process_group {
+            self.update_process_group(process_group, true);
         }
+        RendererProcessGroupRegistration {
+            manager: self,
+            process_group,
+        }
+    }
+
+    fn unregister_process_group(&self, process_group: Option<i32>) {
+        if let Some(process_group) = process_group {
+            self.update_process_group(process_group, false);
+        }
+    }
+
+    fn update_process_group(&self, process_group: i32, present: bool) {
+        let mut state = self
+            .process_ownership_state
+            .lock()
+            .expect("renderer process ownership poisoned");
+        let changed = if present {
+            state.process_groups.insert(process_group)
+        } else {
+            state.process_groups.remove(&process_group)
+        };
+        if !changed {
+            return;
+        }
+        state.generation = state.generation.wrapping_add(1);
+        self.process_ownership
+            .send_replace(RendererProcessOwnershipSnapshot {
+                generation: state.generation,
+                process_groups: Arc::new(state.process_groups.clone()),
+            });
+    }
+
+    fn subscribed_to(&self, id: &str, kind: RendererEventKind) -> bool {
+        self.subscription_snapshot()
+            .revision_for(id, kind)
+            .is_some()
+    }
+
+    pub async fn send_audio_window_latest(&self, id: &str, window: AudioWindow) -> Result<()> {
+        let handle = self
+            .get(id)
+            .await
+            .ok_or_else(|| Error::RendererNotFound(id.to_string()))?;
+        if self
+            .subscription_snapshot()
+            .revision_for(id, RendererEventKind::Audio)
+            != Some(window.subscription_revision)
+        {
+            return Ok(());
+        }
+        handle
+            .writer
+            .replace_audio(
+                window.subscription_revision,
+                ControlMsg::AudioWindow { window },
+            )
+            .map_err(|error| Error::RendererControlFailed(format!("send audio: {error}")))
     }
 
     /// Enqueue a renderer for eviction. Synchronous (cheap channel
@@ -1035,6 +1656,8 @@ impl RendererManager {
             inner.renderers.remove(id)
         };
         let Some(handle) = handle else { return };
+        self.unregister_process_group(handle.process_group);
+        self.subscriptions.remove(id);
         log::warn!("renderer {id}: evicting");
 
         if let Some(router) = self.router.get().and_then(|w| w.upgrade()) {
@@ -1056,15 +1679,13 @@ impl RendererManager {
             inner.renderers.remove(id)
         }
         .ok_or_else(|| Error::RendererNotFound(id.to_string()))?;
+        self.unregister_process_group(handle.process_group);
+        self.subscriptions.remove(id);
 
-        // Send Shutdown over the bridge socket.
-        let sock = handle.sock.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            if let Ok(guard) = sock.lock() {
-                let _ = send_control(&*guard, &ControlMsg::Shutdown, &[]);
-            }
-        })
-        .await;
+        let writer = handle.writer.clone();
+        let _ =
+            tokio::task::spawn_blocking(move || writer.send_blocking(ControlMsg::Shutdown, None))
+                .await;
 
         let mut child_guard = handle.child.lock().await;
         if let Some(mut child) = child_guard.take() {
@@ -1090,15 +1711,18 @@ impl RendererManager {
 
 fn run_reader(
     id: RendererId,
-    sock: Arc<StdMutex<StdUnixStream>>,
-    events: broadcast::Sender<EventMsg>,
-    bind_snapshot: Arc<StdMutex<Option<BindSnapshot>>>,
+    read_stream: StdUnixStream,
+    writer: RendererWriter,
+    subscriptions: Arc<RendererSubscriptionRegistry>,
+    events: broadcast::Sender<RendererEvent>,
+    published_pool: Arc<StdMutex<Option<Arc<PublishedPool>>>>,
     sync_fds: Arc<StdMutex<std::collections::VecDeque<(u64, OwnedFd)>>>,
     latest_frame: Arc<StdMutex<Option<FrameSnapshot>>>,
     release_syncobj: Arc<StdMutex<Option<OwnedFd>>>,
     format_caps: Arc<StdMutex<Option<crate::dma::negotiate::PeerCaps>>>,
     pending_configure: Arc<StdMutex<Option<u32>>>,
     clear_rgba: Arc<StdMutex<[f32; 4]>>,
+    progress: Arc<StdMutex<RendererProgress>>,
     reap_tx: tokio::sync::mpsc::UnboundedSender<RendererId>,
 ) {
     // Any reader exit enqueues renderer eviction so stale ids do not remain
@@ -1106,25 +1730,6 @@ fn run_reader(
     let _reap = ReaperOnDrop {
         id: id.clone(),
         tx: reap_tx,
-    };
-
-    // Hold the stream by dup'ing the raw fd so the blocking recv is not
-    // contending with sends on the same mutex.
-    let read_stream = {
-        let guard = match sock.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                log::error!("renderer {id}: sock mutex poisoned, reader exiting");
-                return;
-            }
-        };
-        match guard.try_clone() {
-            Ok(s) => s,
-            Err(e) => {
-                log::error!("renderer {id}: try_clone failed: {e}");
-                return;
-            }
-        }
     };
 
     loop {
@@ -1136,23 +1741,38 @@ fn run_reader(
             }
         };
         let (msg, fds) = received;
+        let mut event_pool_generation = None;
+
+        if let EventMsg::SetEventSubscriptions { ref subscription } = msg {
+            let applied = subscriptions.prepare(&id, subscription.revision, &subscription.kinds);
+            let ack = ControlMsg::EventSubscriptionsApplied {
+                result: EventSubscriptionResult {
+                    revision: applied.revision,
+                    status: applied.status,
+                    kinds: applied.kinds,
+                    reason: applied.reason,
+                },
+            };
+            if let Err(error) = writer.send_blocking(ack, applied.commit) {
+                log::warn!("renderer {id}: subscription acknowledgement failed: {error}");
+                return;
+            }
+        }
 
         // Cache each BindBuffers snapshot with its fds; later generations
         // replace earlier ones.
-        if let EventMsg::BindBuffers {
-            generation,
-            flags,
-            count,
-            fourcc,
-            width,
-            height,
-            modifier,
-            planes_per_buffer,
-            ref stride,
-            ref plane_offset,
-            ref size,
-        } = msg
-        {
+        if let EventMsg::BindBuffers { ref pool } = msg {
+            let generation = pool.generation;
+            let flags = pool.flags;
+            let count = pool.count;
+            let fourcc = pool.format.fourcc;
+            let modifier = pool.format.modifier;
+            let planes_per_buffer = pool.format.plane_count;
+            let width = pool.extent.width;
+            let height = pool.extent.height;
+            let stride = &pool.stride;
+            let plane_offset = &pool.plane_offset;
+            let size = &pool.size;
             // Validate parallel arrays up front so all per-plane fields
             // stay index-aligned.
             let expected = (count as usize) * (planes_per_buffer as usize);
@@ -1173,7 +1793,7 @@ fn run_reader(
             } else if fds.is_empty() {
                 log::warn!("renderer {id}: BindBuffers arrived without fds");
             } else {
-                let prev_gen = bind_snapshot
+                let prev_gen = published_pool
                     .lock()
                     .ok()
                     .and_then(|g| g.as_ref().map(|s| s.generation));
@@ -1185,7 +1805,7 @@ fn run_reader(
                         );
                     }
                 }
-                let snap = BindSnapshot {
+                let pool = Arc::new(PublishedPool {
                     generation,
                     flags,
                     count,
@@ -1198,12 +1818,19 @@ fn run_reader(
                     plane_offset: plane_offset.clone(),
                     size: size.clone(),
                     fds,
-                };
-                if let Ok(mut guard) = bind_snapshot.lock() {
-                    *guard = Some(snap);
+                });
+                if let Ok(mut guard) = published_pool.lock() {
+                    *guard = Some(pool);
+                    event_pool_generation = Some(generation);
                     log::info!(
                         "renderer {id}: BindBuffers cached (gen={generation}, flags=0x{flags:x})"
                     );
+                }
+                if let Ok(mut state) = progress.lock() {
+                    state.bind_at = Some(Instant::now());
+                    state.buffer_generation = Some(generation);
+                    state.first_frame_at = None;
+                    state.last_frame_at = None;
                 }
                 // A rebind retires acquire fences from the previous
                 // buffer_generation.
@@ -1227,13 +1854,7 @@ fn run_reader(
                     }
                 }
             }
-        } else if let EventMsg::FrameReady {
-            image_index,
-            seq,
-            release_point,
-            ..
-        } = msg
-        {
+        } else if let EventMsg::FrameReady { ref frame } = msg {
             // frame_ready always carries exactly one sync_fd: the codec
             // enforced expected_fds() == 1 before handing us `fds`.
             let mut taken = fds;
@@ -1242,19 +1863,27 @@ fn run_reader(
                 while guard.len() >= SYNC_FD_RETENTION {
                     guard.pop_front();
                 }
-                guard.push_back((seq, fd));
+                guard.push_back((frame.sequence, fd));
             }
-            let gen = bind_snapshot
+            let gen = published_pool
                 .lock()
                 .ok()
                 .and_then(|g| g.as_ref().map(|s| s.generation));
             if let Some(buffer_generation) = gen {
+                event_pool_generation = Some(buffer_generation);
+                if let Ok(mut state) = progress.lock() {
+                    let now = Instant::now();
+                    if state.buffer_generation == Some(buffer_generation) {
+                        state.first_frame_at.get_or_insert(now);
+                        state.last_frame_at = Some(now);
+                    }
+                }
                 if let Ok(mut guard) = latest_frame.lock() {
                     *guard = Some(FrameSnapshot {
                         buffer_generation,
-                        buffer_index: image_index,
-                        seq,
-                        release_point,
+                        buffer_index: frame.image_index,
+                        seq: frame.sequence,
+                        release_point: frame.release_point,
                     });
                 }
             }
@@ -1273,38 +1902,26 @@ fn run_reader(
                 *guard = Some(fd);
                 log::info!("renderer {id}: ReleaseSyncobj imported");
             }
-        } else if let EventMsg::FormatCaps {
-            ref fourccs,
-            ref mod_counts,
-            ref modifiers,
-            ref plane_counts,
-            ref device_uuid,
-            ref driver_uuid,
-            drm_render_major,
-            drm_render_minor,
-            mem_hints,
-            sync_caps,
-            color_caps,
-            extent_max_w,
-            extent_max_h,
-        } = msg
-        {
+        } else if let EventMsg::FormatCaps { ref capabilities } = msg {
             let drm = DrmNode {
-                major: drm_render_major,
-                minor: drm_render_minor,
+                major: capabilities.drm_node.major,
+                minor: capabilities.drm_node.minor,
             };
             match crate::dma::negotiate::unflatten_caps(
-                fourccs,
-                mod_counts,
-                modifiers,
-                plane_counts,
-                device_uuid,
-                driver_uuid,
+                &capabilities.fourccs,
+                &capabilities.mod_counts,
+                &capabilities.modifiers,
+                &capabilities.plane_counts,
+                &capabilities.device_uuid,
+                &capabilities.driver_uuid,
                 drm,
-                sync_caps,
-                color_caps,
-                mem_hints,
-                (extent_max_w, extent_max_h),
+                capabilities.sync_caps,
+                capabilities.color_caps,
+                capabilities.mem_hints,
+                (
+                    capabilities.max_extent.width,
+                    capabilities.max_extent.height,
+                ),
             ) {
                 Ok(caps) => {
                     if let Ok(mut guard) = format_caps.lock() {
@@ -1332,34 +1949,26 @@ fn run_reader(
                     log::warn!("renderer {id}: FormatCaps malformed: {e:?}");
                 }
             }
-        } else if let EventMsg::BindFailed {
-            fourcc,
-            modifier,
-            reason,
-            ref message,
-        } = msg
-        {
+        } else if let EventMsg::BindFailed { ref failure } = msg {
             // Renderer-side bind failure is surfaced for debugging; router
             // retry paths handle consumer-side failures.
             log::warn!(
-                "renderer {id}: BindFailed fourcc=0x{fourcc:08x} \
-                 modifier=0x{modifier:x} reason={reason} msg={message:?}"
+                "renderer {id}: BindFailed fourcc=0x{:08x} \
+                 modifier=0x{:x} kind={:?} msg={:?}",
+                failure.format.fourcc,
+                failure.format.modifier,
+                failure.kind,
+                failure.message,
             );
         } else if let EventMsg::ReportState { ref state } = msg {
-            // Recognised keys are stashed on the handle; unknown keys
-            // are ignored. Currently only `clear_color` is consumed.
-            for (k, v) in state.iter() {
-                if k == "clear_color" {
-                    if let Some(rgba) = parse_clear_color(v) {
-                        if let Ok(mut g) = clear_rgba.lock() {
-                            *g = rgba;
-                        }
-                    } else {
-                        log::warn!(
-                            "renderer {id}: ReportState clear_color={v:?} unparseable, ignored"
-                        );
-                    }
+            let color = state.clear_color;
+            let rgba = [color.r, color.g, color.b, color.a];
+            if rgba.iter().all(|component| component.is_finite()) {
+                if let Ok(mut stored) = clear_rgba.lock() {
+                    *stored = rgba.map(|component| component.clamp(0.0, 1.0));
                 }
+            } else {
+                log::warn!("renderer {id}: ReportState clear_color contains a non-finite value");
             }
         } else if !fds.is_empty() {
             log::warn!("renderer {id}: unexpected fds on event {msg:?}, dropping");
@@ -1367,23 +1976,15 @@ fn run_reader(
 
         // Broadcast to any subscribers. No subscribers means no error:
         // SendError is only returned when receivers drop, which is fine.
-        let _ = events.send(msg);
+        let _ = events.send(RendererEvent {
+            message: msg,
+            pool_generation: event_pool_generation,
+        });
     }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
-
-/// True when a `send_control` / `recv_event` error indicates the peer
-/// is gone, so callers can evict the renderer.
-fn is_peer_gone(err: &CodecError) -> bool {
-    use nix::errno::Errno;
-    matches!(
-        err,
-        CodecError::PeerClosed
-            | CodecError::Nix(Errno::EPIPE | Errno::ECONNRESET | Errno::ENOTCONN)
-    )
-}
 
 /// RAII guard that enqueues the renderer for eviction when the reader
 /// thread drops on any exit path.
@@ -1430,10 +2031,12 @@ pub(crate) fn build_init_msg(req: &SpawnRequest, def: &RendererDef) -> ControlMs
     settings.sort_by(|a, b| a.0.cmp(&b.0));
 
     ControlMsg::Init {
-        protocol_version: crate::ipc::proto::PROTOCOL_VERSION,
-        spawn_version,
-        settings,
-        user_properties: req.user_properties_json.clone().unwrap_or_default(),
+        config: RendererInit {
+            protocol_version: crate::ipc::proto::PROTOCOL_VERSION,
+            spawn_version,
+            settings,
+            user_properties: req.user_properties_json.clone().unwrap_or_default(),
+        },
     }
 }
 
@@ -1445,25 +2048,22 @@ pub(crate) fn run_init_handshake(sock: &StdUnixStream, init: &ControlMsg) -> Res
     let (evt, fds) =
         recv_event(sock).map_err(|e| Error::RendererSpawnFailed(format!("recv Ready: {e}")))?;
     match evt {
-        EventMsg::Ready {
-            drm_render_major,
-            drm_render_minor,
-        } => {
+        EventMsg::Ready { drm_node } => {
             if !fds.is_empty() {
                 log::warn!("Ready unexpectedly carried {} fds; dropping", fds.len());
             }
             Ok(DrmNode {
-                major: drm_render_major,
-                minor: drm_render_minor,
+                major: drm_node.major,
+                minor: drm_node.minor,
             })
         }
-        EventMsg::InitNack {
-            received_spawn_version,
-            supported_spawn_version,
-            reason,
-        } => Err(Error::RendererSpawnFailed(format!(
-            "renderer rejected Init: {reason} (received spawn_version={received_spawn_version}, \
-             supported={supported_spawn_version})"
+        EventMsg::InitNack { rejection } => Err(Error::RendererSpawnFailed(format!(
+            "renderer rejected Init: {} (protocol {} supported {}; spawn {} supported {})",
+            rejection.reason,
+            rejection.received_protocol_version,
+            rejection.supported_protocol_version,
+            rejection.received_spawn_version,
+            rejection.supported_spawn_version,
         ))),
         other => Err(Error::RendererSpawnFailed(format!(
             "host emitted {other:?} before Ready; aborting spawn"
@@ -1473,24 +2073,6 @@ pub(crate) fn run_init_handshake(sock: &StdUnixStream, init: &ControlMsg) -> Res
 
 #[allow(dead_code)]
 fn _assert_path_ok<P: AsRef<std::path::Path>>(_p: P) {} // compile-time shim
-
-/// Parse a `"r,g,b,a"` clear-color value. Components clamped to
-/// `[0, 1]`; malformed strings return `None`.
-fn parse_clear_color(s: &str) -> Option<[f32; 4]> {
-    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
-    if parts.len() != 4 {
-        return None;
-    }
-    let mut out = [0.0f32; 4];
-    for (i, p) in parts.iter().enumerate() {
-        let v: f32 = p.parse().ok()?;
-        if !v.is_finite() {
-            return None;
-        }
-        out[i] = v.clamp(0.0, 1.0);
-    }
-    Some(out)
-}
 
 // ---------------------------------------------------------------------------
 // Test stubs
@@ -1531,41 +2113,76 @@ impl RendererHandle {
 }
 
 impl RendererHandle {
+    fn test_writer(id: &str, stream: StdUnixStream) -> RendererWriter {
+        let subscriptions = Arc::new(RendererSubscriptionRegistry::new());
+        subscriptions.register(id.to_string());
+        let (reap_tx, _reap_rx) = tokio::sync::mpsc::unbounded_channel();
+        RendererWriter::spawn(id.to_string(), stream, subscriptions, reap_tx)
+    }
+
     /// Construct a `RendererHandle` with no running child process.
     /// Used by routing-table unit tests.
     pub fn test_stub(id: &str, wp_type: &str) -> Arc<Self> {
-        let (handle, _peer) = Self::test_stub_with_peer_inner(id, wp_type);
+        let (handle, _peer) = Self::test_stub_with_peer_inner(id, wp_type, None);
         handle
     }
 
     #[cfg(test)]
     pub fn test_stub_with_peer(id: &str, wp_type: &str) -> (Arc<Self>, StdUnixStream) {
-        Self::test_stub_with_peer_inner(id, wp_type)
+        Self::test_stub_with_peer_inner(id, wp_type, None)
     }
 
-    fn test_stub_with_peer_inner(id: &str, wp_type: &str) -> (Arc<Self>, StdUnixStream) {
+    #[cfg(test)]
+    pub(crate) fn test_stub_with_frame_records(
+        id: &str,
+        wp_type: &str,
+    ) -> (
+        Arc<Self>,
+        tokio::sync::mpsc::UnboundedReceiver<crate::sync::FrameRecord>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (handle, _peer) = Self::test_stub_with_peer_inner(id, wp_type, Some(tx));
+        (handle, rx)
+    }
+
+    fn test_stub_with_peer_inner(
+        id: &str,
+        wp_type: &str,
+        frame_record_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::sync::FrameRecord>>,
+    ) -> (Arc<Self>, StdUnixStream) {
         let (a, b) = StdUnixStream::pair().expect("UnixStream pair");
-        let (events_tx, _) = broadcast::channel::<EventMsg>(8);
+        let (events_tx, _) = broadcast::channel::<RendererEvent>(8);
+        let (release_events_tx, release_events_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::sync::ReleaseEvent>();
         let handle = Arc::new(Self {
             id: id.into(),
             wp_type: wp_type.into(),
             extras: HashMap::new(),
             name: "test-stub".into(),
             plugin_id: "test.plugin".into(),
+            activity_mode: RendererActivityMode::OnDemand,
             pid: None,
+            process_group: None,
             gpu: DrmNode::UNKNOWN,
-            sock: Arc::new(StdMutex::new(a)),
+            spawn_request: SpawnRequest {
+                wp_type: wp_type.into(),
+                renderer_name: Some("test-stub".into()),
+                ..Default::default()
+            },
+            writer: Self::test_writer(id, a),
             events: events_tx,
-            bind_snapshot: Arc::new(StdMutex::new(None)),
+            _release_events_tx: release_events_tx,
+            release_events_rx: StdMutex::new(Some(release_events_rx)),
+            progress: Arc::new(StdMutex::new(RendererProgress::new())),
+            published_pool: Arc::new(StdMutex::new(None)),
             sync_fds: Arc::new(StdMutex::new(std::collections::VecDeque::new())),
             latest_frame: Arc::new(StdMutex::new(None)),
             release_syncobj: Arc::new(StdMutex::new(None)),
             format_caps: Arc::new(StdMutex::new(None)),
             last_dispatched_scheme: Arc::new(StdMutex::new(None)),
-            frame_record_tx: None,
+            frame_record_tx,
             pending_configure: Arc::new(StdMutex::new(None)),
             child: Arc::new(TokioMutex::new(None)),
-            events_subscribed: Arc::new(Vec::new()),
             clear_rgba: Arc::new(StdMutex::new([0.0, 0.0, 0.0, 1.0])),
         });
         (handle, b)
@@ -1576,14 +2193,266 @@ impl RendererManager {
     /// Insert a pre-built handle into the manager's map without
     /// spawning a child process. Used by routing-table unit tests.
     pub async fn register_test_handle(&self, handle: Arc<RendererHandle>) {
+        self.subscriptions.register(handle.id.clone());
+        let process_group = handle.process_group;
         let mut inner = self.inner.lock().await;
         inner.renderers.insert(handle.id.clone(), handle);
+        drop(inner);
+        if let Some(process_group) = process_group {
+            self.update_process_group(process_group, true);
+        }
+    }
+}
+
+#[cfg(test)]
+mod subscription_tests {
+    use super::*;
+    use crate::ipc::proto::AudioStreamFormat;
+    use crate::ipc::uds::{recv_control, CodecError};
+
+    #[tokio::test]
+    async fn failed_renderer_process_status_includes_exit_code() {
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 23")
+            .spawn()
+            .unwrap();
+
+        let status = failed_renderer_process_status(&mut child).await;
+        assert_eq!(status, "process_status=exit status: 23");
+    }
+
+    #[tokio::test]
+    async fn pointer_forwarding_setting_gates_renderer_control() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = SettingsStore::load_or_default(temp.path().join("settings.toml")).await;
+        let manager = RendererManager::new_default();
+        manager.attach_settings(settings.clone());
+
+        let (handle, peer) = RendererHandle::test_stub_with_peer("renderer", "scene");
+        manager.register_test_handle(handle).await;
+        let applied = manager
+            .subscriptions
+            .prepare("renderer", 1, &["pointer".to_string()]);
+        manager
+            .subscriptions
+            .commit("renderer".to_string(), applied.commit.unwrap());
+
+        settings.update(|state| state.global.pointer_forwarding_enabled = false);
+        peer.set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        manager
+            .send_pointer_motion(
+                "renderer",
+                PointerMotion {
+                    x: 1.0,
+                    y: 2.0,
+                    timestamp_us: 3,
+                    modifiers: 0,
+                },
+            )
+            .await
+            .unwrap();
+        let error = recv_control(&peer).unwrap_err();
+        match error {
+            CodecError::Nix(nix::errno::Errno::EAGAIN) => {}
+            CodecError::Io(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            other => panic!("expected a read timeout, got {other:?}"),
+        }
+
+        settings.update(|state| state.global.pointer_forwarding_enabled = true);
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        manager
+            .send_pointer_motion(
+                "renderer",
+                PointerMotion {
+                    x: 4.0,
+                    y: 5.0,
+                    timestamp_us: 6,
+                    modifiers: 0,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            recv_control(&peer).unwrap().0,
+            ControlMsg::PointerMotion {
+                event: PointerMotion {
+                    x: 4.0,
+                    y: 5.0,
+                    timestamp_us: 6,
+                    modifiers: 0,
+                },
+            }
+        ));
+    }
+
+    #[test]
+    fn process_group_registration_publishes_generation_and_rolls_back() {
+        let manager = RendererManager::new_default();
+        let ownership = manager.subscribe_process_ownership();
+
+        {
+            let _registration = manager.register_process_group(Some(42));
+            let snapshot = ownership.borrow().clone();
+            assert_eq!(snapshot.generation, 1);
+            assert!(snapshot.owns_process_group(42));
+        }
+
+        let snapshot = ownership.borrow().clone();
+        assert_eq!(snapshot.generation, 2);
+        assert!(!snapshot.owns_process_group(42));
+    }
+
+    #[test]
+    fn subscription_registry_applies_complete_sets_atomically() {
+        let registry = RendererSubscriptionRegistry::new();
+        registry.register("renderer".to_string());
+        assert!(registry
+            .snapshot()
+            .subscribers(RendererEventKind::Audio)
+            .is_empty());
+
+        let applied = registry.prepare(
+            "renderer",
+            1,
+            &[
+                "audio".to_string(),
+                "pointer".to_string(),
+                "audio".to_string(),
+            ],
+        );
+        assert_eq!(applied.status, EventSubscriptionStatus::Applied);
+        assert_eq!(applied.kinds, vec!["pointer", "audio"]);
+        assert!(registry
+            .snapshot()
+            .subscribers(RendererEventKind::Audio)
+            .is_empty());
+        registry.commit("renderer".to_string(), applied.commit.unwrap());
+        assert_eq!(
+            registry
+                .snapshot()
+                .revision_for("renderer", RendererEventKind::Audio),
+            Some(1)
+        );
+
+        let replay = registry.prepare("renderer", 1, &["pointer".to_string(), "audio".to_string()]);
+        assert_eq!(replay.status, EventSubscriptionStatus::Applied);
+        assert!(replay.commit.is_none());
+
+        let conflict = registry.prepare("renderer", 1, &["mpris".to_string()]);
+        assert_eq!(conflict.status, EventSubscriptionStatus::RevisionConflict);
+        let next = registry.prepare("renderer", 2, &["audio".to_string()]);
+        registry.commit("renderer".to_string(), next.commit.unwrap());
+        let stale = registry.prepare("renderer", 1, &[]);
+        assert_eq!(stale.status, EventSubscriptionStatus::StaleRevision);
+        assert_eq!(
+            registry
+                .snapshot()
+                .revision_for("renderer", RendererEventKind::Audio),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn subscription_registry_rejects_unknown_and_oversized_sets() {
+        let registry = RendererSubscriptionRegistry::new();
+        registry.register("renderer".to_string());
+
+        let unknown = registry.prepare("renderer", 1, &["video".to_string()]);
+        assert_eq!(unknown.status, EventSubscriptionStatus::Invalid);
+        let oversized = registry.prepare("renderer", 1, &["x".repeat(MAX_EVENT_KIND_BYTES + 1)]);
+        assert_eq!(oversized.status, EventSubscriptionStatus::LimitExceeded);
+        let too_many = registry.prepare(
+            "renderer",
+            1,
+            &vec!["audio".to_string(); MAX_EVENT_SUBSCRIPTIONS + 1],
+        );
+        assert_eq!(too_many.status, EventSubscriptionStatus::LimitExceeded);
+        assert!(registry
+            .snapshot()
+            .subscribers(RendererEventKind::Audio)
+            .is_empty());
+    }
+
+    #[test]
+    fn writer_sends_subscription_ack_before_audio_for_its_revision() {
+        let (daemon, renderer) = StdUnixStream::pair().unwrap();
+        let subscriptions = Arc::new(RendererSubscriptionRegistry::new());
+        subscriptions.register("renderer".to_string());
+        let (reap_tx, _reap_rx) = tokio::sync::mpsc::unbounded_channel();
+        let writer = RendererWriter::spawn(
+            "renderer".to_string(),
+            daemon,
+            Arc::clone(&subscriptions),
+            reap_tx,
+        );
+        let applied = subscriptions.prepare("renderer", 1, &["audio".to_string()]);
+        writer
+            .send_blocking(
+                ControlMsg::EventSubscriptionsApplied {
+                    result: EventSubscriptionResult {
+                        revision: 1,
+                        status: applied.status,
+                        kinds: applied.kinds,
+                        reason: applied.reason,
+                    },
+                },
+                applied.commit,
+            )
+            .unwrap();
+        writer
+            .replace_audio(
+                1,
+                ControlMsg::AudioWindow {
+                    window: AudioWindow {
+                        subscription_revision: 1,
+                        generation: 2,
+                        sequence: 3,
+                        captured_at_ns: 4,
+                        end_sample_frame: 4096,
+                        format: AudioStreamFormat {
+                            sample_rate_hz: 48_000,
+                            channels: 2,
+                        },
+                        frames: 4096,
+                        flags: 0,
+                        samples: vec![0.0; 8192],
+                    },
+                },
+            )
+            .unwrap();
+
+        let (first, _) = recv_control(&renderer).unwrap();
+        let (second, _) = recv_control(&renderer).unwrap();
+        assert!(matches!(
+            first,
+            ControlMsg::EventSubscriptionsApplied {
+                result: EventSubscriptionResult { revision: 1, .. }
+            }
+        ));
+        assert!(matches!(
+            second,
+            ControlMsg::AudioWindow {
+                window: AudioWindow {
+                    subscription_revision: 1,
+                    generation: 2,
+                    sequence: 3,
+                    ..
+                }
+            }
+        ));
     }
 }
 
 #[cfg(test)]
 mod init_handshake_tests {
     use super::*;
+    use crate::ipc::proto::{InitRejection, PROTOCOL_VERSION};
     use crate::ipc::uds::send_event;
     use crate::plugin::renderer_registry::{SettingDef, SettingType};
     use std::path::PathBuf;
@@ -1600,10 +2469,11 @@ mod init_handshake_tests {
             bin: PathBuf::from("/dev/null"),
             types: vec!["scene".to_string()],
             priority: 100,
+            activity: RendererActivityMode::OnDemand,
             spawn_version: None,
             extras: Vec::new(),
             settings: Default::default(),
-            events: Vec::new(),
+            legacy_events: None,
         }
     }
 
@@ -1616,10 +2486,11 @@ mod init_handshake_tests {
             bin: PathBuf::from("/dev/null"),
             types: vec!["scene".into()],
             priority: 100,
+            activity: RendererActivityMode::Continuous,
             spawn_version: Some(1),
-            extras: vec!["assets".into(), "workshop_id".into()],
+            extras: vec!["assets".into(), "external_id".into()],
             settings: Default::default(),
-            events: Vec::new(),
+            legacy_events: None,
         }
     }
 
@@ -1641,10 +2512,11 @@ mod init_handshake_tests {
             bin: PathBuf::from("/dev/null"),
             types: vec!["video".into()],
             priority: 100,
+            activity: RendererActivityMode::Continuous,
             spawn_version: Some(1),
             extras: Vec::new(),
             settings: ps,
-            events: Vec::new(),
+            legacy_events: None,
         }
     }
 
@@ -1667,16 +2539,14 @@ mod init_handshake_tests {
         };
         let msg = build_init_msg(&req, &def_mpv_schema());
         match msg {
-            ControlMsg::Init {
-                protocol_version,
-                spawn_version,
-                settings,
-                user_properties,
-            } => {
-                assert_eq!(protocol_version, crate::ipc::proto::PROTOCOL_VERSION);
-                assert_eq!(spawn_version, 1); // pulled from def_mpv_schema
-                assert_eq!(settings, vec![("loop_file".to_string(), "inf".to_string())]);
-                assert_eq!(user_properties, "");
+            ControlMsg::Init { config } => {
+                assert_eq!(config.protocol_version, crate::ipc::proto::PROTOCOL_VERSION);
+                assert_eq!(config.spawn_version, 1); // pulled from def_mpv_schema
+                assert_eq!(
+                    config.settings,
+                    vec![("loop_file".to_string(), "inf".to_string())]
+                );
+                assert_eq!(config.user_properties, "");
             }
             other => panic!("expected ControlMsg::Init, got {other:?}"),
         }
@@ -1701,9 +2571,13 @@ mod init_handshake_tests {
             send_event(
                 &renderer,
                 &EventMsg::InitNack {
-                    received_spawn_version: 999,
-                    supported_spawn_version: SPAWN_VERSION,
-                    reason: "unsupported spawn_version".into(),
+                    rejection: InitRejection {
+                        received_protocol_version: PROTOCOL_VERSION,
+                        supported_protocol_version: PROTOCOL_VERSION,
+                        received_spawn_version: 999,
+                        supported_spawn_version: SPAWN_VERSION,
+                        reason: "unsupported spawn_version".into(),
+                    },
                 },
                 &[],
             )
@@ -1771,10 +2645,11 @@ mod reuse_tests {
             bin: PathBuf::from("/dev/null"),
             types: vec!["video".into()],
             priority: 100,
+            activity: RendererActivityMode::Continuous,
             spawn_version: Some(1),
             extras: Vec::new(),
             settings: ps,
-            events: Vec::new(),
+            legacy_events: None,
         }
     }
 
@@ -1782,18 +2657,26 @@ mod reuse_tests {
     /// Mirrors `RendererHandle::test_stub` but lets tests pin extras.
     fn live_mpv_handle(id: &str, extras: HashMap<String, String>) -> Arc<RendererHandle> {
         let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
-        let (events_tx, _) = tokio::sync::broadcast::channel::<EventMsg>(8);
+        let (events_tx, _) = tokio::sync::broadcast::channel::<RendererEvent>(8);
+        let (release_events_tx, release_events_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::sync::ReleaseEvent>();
         Arc::new(RendererHandle {
             id: id.into(),
             wp_type: "video".into(),
-            extras,
+            extras: extras.clone(),
             name: "waywallen-mpv".into(),
             plugin_id: "test.plugin".into(),
+            activity_mode: RendererActivityMode::Continuous,
             pid: None,
+            process_group: None,
             gpu: DrmNode::UNKNOWN,
-            sock: Arc::new(StdMutex::new(a)),
+            spawn_request: req_with_extras(extras.clone()),
+            writer: RendererHandle::test_writer(id, a),
             events: events_tx,
-            bind_snapshot: Arc::new(StdMutex::new(None)),
+            _release_events_tx: release_events_tx,
+            release_events_rx: StdMutex::new(Some(release_events_rx)),
+            progress: Arc::new(StdMutex::new(RendererProgress::new())),
+            published_pool: Arc::new(StdMutex::new(None)),
             sync_fds: Arc::new(StdMutex::new(std::collections::VecDeque::new())),
             latest_frame: Arc::new(StdMutex::new(None)),
             release_syncobj: Arc::new(StdMutex::new(None)),
@@ -1802,7 +2685,6 @@ mod reuse_tests {
             frame_record_tx: None,
             pending_configure: Arc::new(StdMutex::new(None)),
             child: Arc::new(TokioMutex::new(None)),
-            events_subscribed: Arc::new(Vec::new()),
             clear_rgba: Arc::new(StdMutex::new([0.0, 0.0, 0.0, 1.0])),
         })
     }
@@ -1883,18 +2765,30 @@ mod reuse_tests {
         daemon_side.set_nonblocking(false).unwrap();
         renderer_side.set_nonblocking(false).unwrap();
 
-        let (events_tx, _) = tokio::sync::broadcast::channel::<EventMsg>(8);
+        let (events_tx, _) = tokio::sync::broadcast::channel::<RendererEvent>(8);
+        let (release_events_tx, release_events_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::sync::ReleaseEvent>();
         let h = Arc::new(RendererHandle {
             id: "h1".into(),
             wp_type: "video".into(),
             extras: HashMap::new(),
             name: "waywallen-mpv".into(),
             plugin_id: "test.plugin".into(),
+            activity_mode: RendererActivityMode::Continuous,
             pid: None,
+            process_group: None,
             gpu: DrmNode::UNKNOWN,
-            sock: Arc::new(StdMutex::new(daemon_side)),
+            spawn_request: SpawnRequest {
+                wp_type: "video".into(),
+                renderer_name: Some("waywallen-mpv".into()),
+                ..Default::default()
+            },
+            writer: RendererHandle::test_writer("h1", daemon_side),
             events: events_tx,
-            bind_snapshot: Arc::new(StdMutex::new(None)),
+            _release_events_tx: release_events_tx,
+            release_events_rx: StdMutex::new(Some(release_events_rx)),
+            progress: Arc::new(StdMutex::new(RendererProgress::new())),
+            published_pool: Arc::new(StdMutex::new(None)),
             sync_fds: Arc::new(StdMutex::new(std::collections::VecDeque::new())),
             latest_frame: Arc::new(StdMutex::new(None)),
             release_syncobj: Arc::new(StdMutex::new(None)),
@@ -1903,7 +2797,6 @@ mod reuse_tests {
             frame_record_tx: None,
             pending_configure: Arc::new(StdMutex::new(None)),
             child: Arc::new(TokioMutex::new(None)),
-            events_subscribed: Arc::new(Vec::new()),
             clear_rgba: Arc::new(StdMutex::new([0.0, 0.0, 0.0, 1.0])),
         });
         mgr.register_test_handle(Arc::clone(&h)).await;

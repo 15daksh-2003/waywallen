@@ -1,5 +1,4 @@
 module;
-#include <QHash>
 #include "QExtra/macro_qt.hpp"
 
 #ifdef Q_MOC_RUN
@@ -62,6 +61,8 @@ public:
     Q_PROPERTY(DaemonPhase daemonPhase READ daemonPhase NOTIFY statusChanged FINAL)
     Q_PROPERTY(waywallen::control::v1::DisplayBackendStatus displayBackend READ displayBackend
                    NOTIFY statusChanged FINAL)
+    Q_PROPERTY(bool globalPaused READ globalPaused NOTIFY statusChanged FINAL)
+    Q_PROPERTY(bool globalMuted READ globalMuted NOTIFY statusChanged FINAL)
 
     Notify(QObject* parent);
     ~Notify() override;
@@ -78,6 +79,8 @@ public:
     auto displayBackend() const -> const control::v1::DisplayBackendStatus& {
         return m_display_backend;
     }
+    auto globalPaused() const -> bool { return m_global_paused; }
+    auto globalMuted() const -> bool { return m_global_muted; }
     auto taskProgressSnapshot(const QString& queryId, TaskProgressSnapshot& out) const -> bool;
     auto taskProgressSequence() const -> quint64 { return m_task_progress_sequence; }
 
@@ -105,7 +108,7 @@ Q_SIGNALS:
     /// is already ready.
     void daemonReady();
     /// Daemon broadcast a `SettingsChanged` event after a successful
-    /// `SettingsSet` (or schema-driven startup reconciliation). UI
+    /// settings mutation (or schema-driven startup reconciliation). UI
     /// settings forms should re-fetch via `SettingsGetQuery` to pick
     /// up writes from peer clients. The payload itself is intentionally
     /// not relayed here — receivers re-query so they go through the
@@ -118,8 +121,10 @@ Q_SIGNALS:
                                  quint32 errorCode, const QString& reason);
     void remoteDownloadProgress(const QString& sourceId, const QString& id, int state,
                                 const QString& error);
-    void steamLoginProgress(int state, const QString& qrImage, const QString& accountName,
-                            const QString& error);
+    void qrLoginProgress(const QString& sessionId, const QString& pluginId, const QString& actionId,
+                         int state, const QString& qrImage, const QString& displayValue,
+                         const QString& error, const QString& title, const QString& instruction);
+    void pluginStateChanged();
     void playlistChanged();
     void pluginChanged();
     void pluginUpdateChanged();
@@ -132,6 +137,8 @@ private:
     quint32                              m_active_task_count { 0 };
     DaemonPhase                          m_daemon_phase { DaemonPhase::Starting };
     control::v1::DisplayBackendStatus    m_display_backend;
+    bool                                 m_global_paused { false };
+    bool                                 m_global_muted { false };
     QHash<QString, TaskProgressSnapshot> m_task_progress;
     quint64                              m_task_progress_sequence { 0 };
 };

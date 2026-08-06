@@ -1,12 +1,12 @@
 /* waywallen-bridge — protocol bit constants shared by every renderer
- * subprocess that participates in modifier negotiation v2.
+ * subprocess that participates in buffer negotiation.
  *
  * These values mirror waywallen/src/negotiate.rs (and the daemon's
  * `ConfigureBuffers` flag set). Producers OR them into the
- * `mem_hints` / `sync_caps` / `color_caps` scalars on
- * `ww_evt_format_caps_t` and check them on incoming
- * `ww_evt_in_negotiate_buffers_t`. The daemon takes the intersection
- * with each consumer's caps to pick a scheme.
+ * `mem_hints` / `sync_caps` / `color_caps` fields of
+ * `waywallen_producer_capabilities_t` and check them on incoming
+ * `waywallen_buffer_directive_t`. The daemon takes the intersection with
+ * each consumer's caps to pick a scheme.
  *
  * Keep in sync with negotiate.rs — all bits are part of the wire
  * contract.
@@ -20,14 +20,11 @@ extern "C" {
 
 /* `mem_hints`: where the dmabuf is backed. Topology-first picker:
  * cross-device emits 0 (bridge picks any dma-buf-exportable type);
- * same-device prefers DEVICE_LOCAL when both peers have it.
- * LINEAR_ONLY is reserved/legacy — bridges may stop setting it,
- * daemon ignores. Bit value preserved for wire compatibility. */
+ * same-device prefers DEVICE_LOCAL when both peers have it. */
 #define WW_MEM_HINT_DEVICE_LOCAL (1u << 0)
 #define WW_MEM_HINT_HOST_VISIBLE (1u << 1)
 #define WW_MEM_HINT_SCANOUT      (1u << 2)
 #define WW_MEM_HINT_PROTECTED    (1u << 3)
-#define WW_MEM_HINT_LINEAR_ONLY  (1u << 4) /* legacy; not consumed */
 
 /* `sync_caps`: which fence flavours the peer supports. The picker
  * lands on the highest tier both sides advertise. */
@@ -44,7 +41,7 @@ extern "C" {
 #define WW_COLOR_ALPHA_PREMUL   (1u << 7)
 #define WW_COLOR_ALPHA_STRAIGHT (1u << 8)
 
-/* `flags` on `ww_evt_bind_buffers_t` / `ConfigureBuffers`. Bit 0
+/* `flags` on `waywallen_buffer_pool_t`. Bit 0
  * tells the consumer the dmabuf is backed by HOST_VISIBLE memory
  * (GTT) so a foreign GPU can PRIME-import it. */
 #define WW_BUF_HOST_VISIBLE (1u << 0)

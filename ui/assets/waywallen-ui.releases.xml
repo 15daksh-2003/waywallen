@@ -1,3 +1,66 @@
+<release version="0.3.1" date="2026-08-05">
+  <description>
+    <ul>
+      <li>Bump up spawn version.</li>
+      <li>Notify incompatible or malformed display protocol handshakes.</li>
+    </ul>
+  </description>
+</release>
+<release version="0.3.0" date="2026-08-04">
+  <description>
+    <p>Added:</p>
+    <ul>
+      <li>Global mute and pause status controls.</li>
+      <li>Daemon-controlled pause effects and pointer forwarding controls.</li>
+      <li>Runtime UI language switching and Chinese translations.</li>
+      <li>Russian UI translations. #175 by @wehrwolfmann</li>
+      <li>Russian desktop entry and AppStream translations. #176 by @wehrwolfmann</li>
+      <li>Custom accent color support.</li>
+      <li>Wallhaven wallpaper titles now include the uploader. #171 by @wehrwolfmann</li>
+    </ul>
+    <p>Fixes:</p>
+    <ul>
+      <li>Display frame release handling and protocol v8 contracts.</li>
+      <li>PulseAudio error buffers compile on aarch64.</li>
+      <li>Popup creation, parenting, and deferred opening.</li>
+    </ul>
+    <p>Improved:</p>
+    <ul>
+      <li>Audio capture sends PCM windows over renderer IPC.</li>
+      <li>Display protocol connection errors and runtime health are reported in the UI.</li>
+      <li>Tooltips, layouts, and navigation icons.</li>
+      <li>Desktop integration documentation for niri and Wayfire. #165 by @wehrwolfmann</li>
+      <li>Russian documentation. #177 by @CatSema</li>
+    </ul>
+  </description>
+</release>
+<release version="0.2.6" date="2026-07-25">
+  <description>
+    <p>Added:</p>
+    <ul>
+      <li>Remote source account sessions with QR sign-in, subscription controls, and discovery filters. #142 by @WorkingRobot</li>
+      <li>Global renderer audio controls, including capture toggles.</li>
+      <li>Automatic muting while other audio is playing.</li>
+      <li>Theme preference.</li>
+      <li>Persistent network image cache.</li>
+    </ul>
+    <p>Fixes:</p>
+    <ul>
+      <li>source: surface scan failures instead of reporting success. #153 by @ales-drnz</li>
+      <li>Renderer random freeze due to wrong mpmc channel.</li>
+      <li>Renderer buffers are no longer reused before every display releases them.</li>
+      <li>Displays remain bound to the exact buffer publication during wallpaper switches.</li>
+      <li>Pointer coordinates are mapped correctly on rotated displays.</li>
+      <li>Renderer resume retries now use backoff.</li>
+    </ul>
+    <p>Improved:</p>
+    <ul>
+      <li>Discover views preserve their state, avoid redundant reloads, and show clearer item details.</li>
+      <li>Renderer startup failures provide more useful diagnostics.</li>
+      <li>Audio capture and device lifetime management are more reliable.</li>
+    </ul>
+  </description>
+</release>
 <release version="0.2.5" date="2026-07-12">
   <description>
     <p>Added:</p>

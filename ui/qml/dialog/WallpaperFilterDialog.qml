@@ -9,6 +9,7 @@ import Qcm.Material as MD
 MD.Dialog {
     id: root
     title: qsTr("Filters")
+    required property var popupWindow
     property var model
     property var supportedTypes: []
     // Quick type toggles (applied immediately, independent of the rule
@@ -28,8 +29,7 @@ MD.Dialog {
     horizontalPadding: 16
     implicitWidth: Math.min(440, parent ? parent.width - 48 : 440)
     standardButtons: T.Dialog.Close
-    property var filterTagDialog: null
-    readonly property var popupParent: root.Window.window ? root.Window.window : root.parent
+    property var filterTagPresentation: null
 
     // Tag names for the tag-filter picker; refreshed each time the
     // dialog opens so newly-scanned tags show up.
@@ -44,15 +44,10 @@ MD.Dialog {
         id: filterTagDialogComponent
 
         W.TagPickerDialog {
-            id: dynamicFilterTagDialog
             allTags: tagListQuery.tags
             selected: root.filterTags
             onCommit: function (tags) {
                 root.applyFilterTags(tags);
-            }
-            onClosed: {
-                if (root.filterTagDialog === dynamicFilterTagDialog)
-                    root.filterTagDialog = null;
             }
         }
     }
@@ -63,10 +58,13 @@ MD.Dialog {
     }
 
     function openFilterTagDialog() {
-        if (filterTagDialog && (filterTagDialog.opened || filterTagDialog.entering || filterTagDialog.closing))
+        if (root.filterTagPresentation?.active)
             return;
-        filterTagDialog = MD.Util.showPopup(filterTagDialogComponent, {}, root.popupParent);
+        root.filterTagPresentation = root.popupWindow.presentPopup(filterTagDialogComponent);
     }
+
+    onClosed: root.filterTagPresentation?.close()
+    Component.onDestruction: root.filterTagPresentation?.cancel()
 
     contentItem: MD.VerticalListView {
         id: rulesView
@@ -139,7 +137,6 @@ MD.Dialog {
                         }
                     }
                 }
-
             }
 
             ColumnLayout {
@@ -206,54 +203,55 @@ MD.Dialog {
 
         delegate: W.WallpaperFilter {
             width: ListView.view.width
+            popupWindow: root.popupWindow
             supportedTypes: root.supportedTypes
             allTags: tagListQuery.tags
             allContentRatings: ratingListQuery.ratings
         }
 
         section.property: "group"
-            section.criteria: ViewSection.FullString
-            section.delegate: RowLayout {
-                id: sectionRow
-                width: ListView.view.contentWidth
-                spacing: 8
-                required property string section
-                readonly property int groupId: parseInt(section, 10)
-                readonly property int sectionIndex: root.model ? root.model.sectionIndexForGroup(groupId) : -1
-                readonly property int currentOp: root.model && sectionIndex > 0 ? root.model.logicOpAt(sectionIndex) : -1
+        section.criteria: ViewSection.FullString
+        section.delegate: RowLayout {
+            id: sectionRow
+            width: ListView.view.contentWidth
+            spacing: 8
+            required property string section
+            readonly property int groupId: parseInt(section, 10)
+            readonly property int sectionIndex: root.model ? root.model.sectionIndexForGroup(groupId) : -1
+            readonly property int currentOp: root.model && sectionIndex > 0 ? root.model.logicOpAt(sectionIndex) : -1
 
-                MD.Label {
-                    Layout.fillWidth: true
-                    text: qsTr("Group %1").arg(sectionRow.sectionIndex + 1)
-                    typescale: MD.Token.typescale.label_medium
+            MD.Label {
+                Layout.fillWidth: true
+                text: qsTr("Group %1").arg(sectionRow.sectionIndex + 1)
+                typescale: MD.Token.typescale.label_medium
+            }
+
+            MD.SegmentedButtonGroup {
+                visible: sectionRow.sectionIndex > 0
+
+                MD.SegmentedButton {
+                    mdState.size: MD.Enum.XS
+                    text: qsTr("AND")
+                    checked: sectionRow.currentOp !== WC.LogicOp.LOGIC_OP_OR
+                    onClicked: root.model.setLogicOpAt(sectionRow.sectionIndex, WC.LogicOp.LOGIC_OP_AND)
                 }
 
-                MD.SegmentedButtonGroup {
-                    visible: sectionRow.sectionIndex > 0
-
-                    MD.SegmentedButton {
-                        mdState.size: MD.Enum.XS
-                        text: qsTr("AND")
-                        checked: sectionRow.currentOp !== WC.LogicOp.LOGIC_OP_OR
-                        onClicked: root.model.setLogicOpAt(sectionRow.sectionIndex, WC.LogicOp.LOGIC_OP_AND)
-                    }
-
-                    MD.SegmentedButton {
-                        mdState.size: MD.Enum.XS
-                        text: qsTr("OR")
-                        checked: sectionRow.currentOp === WC.LogicOp.LOGIC_OP_OR
-                        onClicked: root.model.setLogicOpAt(sectionRow.sectionIndex, WC.LogicOp.LOGIC_OP_OR)
-                    }
-                }
-
-                MD.SmallIconButton {
-                    icon.name: MD.Token.icon.add
-                    onClicked: root.model.appendRuleInGroup(sectionRow.groupId)
-                }
-                MD.SmallIconButton {
-                    icon.name: MD.Token.icon.delete
-                    onClicked: root.model.deleteGroup(sectionRow.groupId)
+                MD.SegmentedButton {
+                    mdState.size: MD.Enum.XS
+                    text: qsTr("OR")
+                    checked: sectionRow.currentOp === WC.LogicOp.LOGIC_OP_OR
+                    onClicked: root.model.setLogicOpAt(sectionRow.sectionIndex, WC.LogicOp.LOGIC_OP_OR)
                 }
             }
+
+            MD.SmallIconButton {
+                icon.name: MD.Token.icon.add
+                onClicked: root.model.appendRuleInGroup(sectionRow.groupId)
+            }
+            MD.SmallIconButton {
+                icon.name: MD.Token.icon.delete
+                onClicked: root.model.deleteGroup(sectionRow.groupId)
+            }
+        }
     }
 }

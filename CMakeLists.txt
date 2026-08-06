@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 project(waywallen
-    VERSION 0.2.5
+    VERSION 0.3.1
     LANGUAGES C CXX
     DESCRIPTION "waywallen: Rust daemon + Qt/QML UI + renderer subprocess plugins"
 )
@@ -22,6 +22,7 @@ set(WAYWALLEN_CXX_COMPILE_OPTIONS
     -Wpedantic
     -Wno-missing-field-initializers
     -fno-direct-access-external-data
+    -fPIC
     -pthread
     -D_REENTRANT)
 add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:${WAYWALLEN_CXX_COMPILE_OPTIONS}>")

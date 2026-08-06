@@ -28,7 +28,9 @@ void    PluginActionQuery::setActionId(const QString& v) {
     Q_EMIT actionIdChanged();
 }
 
-void PluginActionQuery::reload() {
+void PluginActionQuery::reload() { invoke({}); }
+
+void PluginActionQuery::invoke(const QVariantMap& values) {
     setStatus(Status::Querying);
     auto backend = App::instance()->backend();
 
@@ -36,14 +38,28 @@ void PluginActionQuery::reload() {
     auto inner = proto::PluginActionRequest {};
     inner.setPluginId(m_plugin_id);
     inner.setActionId(m_action_id);
+    proto::PluginActionRequest::ValuesEntry wire_values;
+    for (auto it = values.cbegin(); it != values.cend(); ++it) {
+        wire_values.insert(it.key(), it.value().toString());
+    }
+    inner.setValues(wire_values);
     req.setPluginAction(std::move(inner));
 
     auto self = QWatcher { this };
     spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
         auto result = co_await backend->send(std::move(req));
-        co_await asio::post(asio::bind_executor(QAsyncResult::get_executor(), use_task));
+        if (! co_await QAsyncResult::qexecutor()) co_return;
         if (! self) co_return;
-        self->inspect_set(result, [](const proto::Response&) {});
+        if (! result) {
+            self->inspect_set(result, [](const proto::Response&) {
+            });
+            Q_EMIT self->completed(false, self->error(), QString {});
+            co_return;
+        }
+        self->inspect_set(result, [self](const proto::Response& rsp) {
+            const auto& action = rsp.pluginAction();
+            Q_EMIT self->completed(action.accepted(), action.error(), action.sessionId());
+        });
         co_return;
     });
 }

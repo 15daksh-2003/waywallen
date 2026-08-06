@@ -11,3 +11,4 @@ build
 *.AppImage
 CMakeUserPresets.json
 /waywallen-test*.md
+/.cargo

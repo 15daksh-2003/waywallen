@@ -1,6 +1,5 @@
 module;
 #include "QExtra/macro_qt.hpp"
-#include <QtCore/QVariant>
 
 #ifdef Q_MOC_RUN
 #    include "waywallen/query/remote_query.moc"
@@ -46,6 +45,8 @@ export class RemoteSearchQuery : public QueryList,
     Q_PROPERTY(QString query READ query WRITE setQuery NOTIFY queryChanged FINAL)
     Q_PROPERTY(QString sortKey READ sortKey WRITE setSortKey NOTIFY sortKeyChanged FINAL)
     Q_PROPERTY(QStringList tags READ tags WRITE setTags NOTIFY tagsChanged FINAL)
+    Q_PROPERTY(bool browsingEnabled READ browsingEnabled WRITE setBrowsingEnabled NOTIFY
+                   browsingEnabledChanged FINAL)
     Q_PROPERTY(waywallen::model::RemoteListModel* model READ model CONSTANT FINAL)
     Q_PROPERTY(bool hasMore READ hasMore NOTIFY stateChanged FINAL)
     Q_PROPERTY(QString errorText READ errorText NOTIFY stateChanged FINAL)
@@ -65,6 +66,9 @@ public:
     auto tags() const -> const QStringList&;
     void setTags(const QStringList&);
 
+    auto browsingEnabled() const -> bool;
+    void setBrowsingEnabled(bool);
+
     auto model() const -> model::RemoteListModel*;
     auto hasMore() const -> bool;
     auto errorText() const -> const QString&;
@@ -77,9 +81,11 @@ public:
     Q_SIGNAL void queryChanged();
     Q_SIGNAL void sortKeyChanged();
     Q_SIGNAL void tagsChanged();
+    Q_SIGNAL void browsingEnabledChanged();
     Q_SIGNAL void stateChanged();
 
 private:
+    void clearResults();
     void fetchPage(quint32 page, bool append);
 
     QString     m_source_id;
@@ -87,6 +93,8 @@ private:
     QString     m_sort_key;
     QStringList m_tags;
     QString     m_error;
+    bool        m_browsing_enabled { false };
+    quint64     m_generation { 0 };
 };
 
 export class RemoteDetailsQuery : public Query,
@@ -96,11 +104,13 @@ export class RemoteDetailsQuery : public Query,
 
     Q_PROPERTY(QString sourceId READ sourceId WRITE setSourceId NOTIFY sourceIdChanged FINAL)
     Q_PROPERTY(QString itemId READ itemId WRITE setItemId NOTIFY itemIdChanged FINAL)
+    Q_PROPERTY(QString author READ author NOTIFY loaded FINAL)
     Q_PROPERTY(QString description READ description NOTIFY loaded FINAL)
     Q_PROPERTY(QString size READ size NOTIFY loaded FINAL)
     Q_PROPERTY(int width READ width NOTIFY loaded FINAL)
     Q_PROPERTY(int height READ height NOTIFY loaded FINAL)
     Q_PROPERTY(QStringList tags READ tags NOTIFY loaded FINAL)
+    Q_PROPERTY(QString webUrl READ webUrl NOTIFY loaded FINAL)
 
 public:
     RemoteDetailsQuery(QObject* parent = nullptr);
@@ -110,11 +120,13 @@ public:
 
     auto itemId() const -> const QString&;
     void setItemId(const QString&);
+    auto author() const -> const QString&;
     auto description() const -> const QString&;
     auto size() const -> const QString&;
     auto width() const -> int;
     auto height() const -> int;
     auto tags() const -> const QStringList&;
+    auto webUrl() const -> const QString&;
 
     void reload() override;
 
@@ -125,11 +137,13 @@ public:
 private:
     QString     m_source_id;
     QString     m_item_id;
+    QString     m_author;
     QString     m_description;
     QString     m_size;
     int         m_width { 0 };
     int         m_height { 0 };
     QStringList m_tags;
+    QString     m_web_url;
 };
 
 export class RemoteDownloadQuery : public Query,
@@ -142,12 +156,50 @@ public:
 
     void             reload() override;
     Q_INVOKABLE void start(const QString& sourceId, const QString& id);
-    Q_INVOKABLE void uninstall(const QString& sourceId, const QString& id);
+    Q_INVOKABLE void remove(const QString& sourceId, const QString& id);
 
     Q_SIGNAL void accepted(const QString& sourceId, const QString& id);
     Q_SIGNAL void rejected(const QString& sourceId, const QString& id, const QString& error);
-    Q_SIGNAL void uninstalled(const QString& sourceId, const QString& id);
-    Q_SIGNAL void uninstallFailed(const QString& sourceId, const QString& id, const QString& error);
+    Q_SIGNAL void removed(const QString& sourceId, const QString& id);
+    Q_SIGNAL void removeFailed(const QString& sourceId, const QString& id, const QString& error);
+};
+
+export class RemoteSubscriptionQuery
+    : public Query,
+      public QueryExtra<control::v1::Response, RemoteSubscriptionQuery> {
+    Q_OBJECT
+    QML_ELEMENT
+
+public:
+    RemoteSubscriptionQuery(QObject* parent = nullptr);
+
+    void             reload() override;
+    Q_INVOKABLE void refresh(const QString& sourceId, const QString& id);
+    Q_INVOKABLE void setSubscribed(const QString& sourceId, const QString& id, bool subscribed);
+
+    Q_SIGNAL void stateLoaded(const QString& sourceId, const QString& id, int state,
+                              const QString& error);
+    Q_SIGNAL void setFinished(const QString& sourceId, const QString& id, bool subscribed,
+                              bool accepted, const QString& error);
+
+private:
+    quint64 m_refresh_generation { 0 };
+};
+
+export class RemoteSettingsPatchQuery
+    : public Query,
+      public QueryExtra<control::v1::Response, RemoteSettingsPatchQuery> {
+    Q_OBJECT
+    QML_ELEMENT
+
+public:
+    RemoteSettingsPatchQuery(QObject* parent = nullptr);
+
+    void             reload() override;
+    Q_INVOKABLE void patch(const QString& sourceId, const QVariantMap& values);
+
+    Q_SIGNAL void completed(const QString& sourceId, const QVariantMap& values, bool accepted,
+                            const QString& error);
 };
 
 } // namespace waywallen

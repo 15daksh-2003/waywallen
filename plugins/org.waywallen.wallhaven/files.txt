@@ -3,5 +3,6 @@ plugin.toml
 wallhaven/api.lua
 wallhaven/discover.lua
 wallhaven/map.lua
+wallhaven/session.lua
 wallhaven/source.lua
 wallhaven/wallpaper.lua

@@ -11,29 +11,41 @@ MD.Page {
     padding: 0
     showHeader: MD.MProp.size.isCompact
     showBackground: false
-    title: 'Status'
+    title: qsTr('Status')
 
     actions: [
         MD.Action {
             icon.name: MD.Token.icon.extension
             text: qsTr("Plugins")
-            onTriggered: MD.Util.showPopup('waywallen.ui/PagePopup', {
-                source: 'waywallen.ui/PluginManagePage'
-            }, root.Window.window)
+            property var presentation: null
+            onTriggered: {
+                if (!presentation?.active)
+                    presentation = root.Window.window.presentPopup('waywallen.ui/PagePopup', {
+                        source: 'waywallen.ui/PluginManagePage'
+                    });
+            }
         },
         MD.Action {
             icon.name: MD.Token.icon.settings
             text: qsTr("Settings")
-            onTriggered: MD.Util.showPopup('waywallen.ui/PagePopup', {
-                source: 'waywallen.ui/SettingsPage'
-            }, root.Window.window)
+            property var presentation: null
+            onTriggered: {
+                if (!presentation?.active)
+                    presentation = root.Window.window.presentPopup('waywallen.ui/PagePopup', {
+                        source: 'waywallen.ui/SettingsPage'
+                    });
+            }
         },
         MD.Action {
             icon.name: MD.Token.icon.info
             text: qsTr("About")
-            onTriggered: MD.Util.showPopup('waywallen.ui/PagePopup', {
-                source: 'waywallen.ui/AboutPage'
-            }, root.Window.window)
+            property var presentation: null
+            onTriggered: {
+                if (!presentation?.active)
+                    presentation = root.Window.window.presentPopup('waywallen.ui/PagePopup', {
+                        source: 'waywallen.ui/AboutPage'
+                    });
+            }
         }
     ]
 
@@ -58,6 +70,14 @@ MD.Page {
 
     W.HealthQuery {
         id: healthQuery
+    }
+
+    W.GlobalPauseSetQuery {
+        id: globalPauseSetQuery
+    }
+
+    W.GlobalMuteSetQuery {
+        id: globalMuteSetQuery
     }
 
     W.RendererListQuery {
@@ -143,12 +163,12 @@ MD.Page {
         id: killDialog
         property string rendererId: ""
         property string label: ""
-        title: "Kill renderer?"
+        title: qsTr("Kill renderer?")
         parent: T.Overlay.overlay
         standardButtons: T.Dialog.Cancel | T.Dialog.Ok
 
         contentItem: MD.Text {
-            text: "Stop the renderer process\n\"" + killDialog.label + "\"?\nUnsaved frame state may be lost."
+            text: qsTr("Stop the renderer process\n\"%1\"?\nUnsaved frame state may be lost.").arg(killDialog.label)
             typescale: MD.Token.typescale.body_medium
             color: MD.Token.color.on_surface_variant
             wrapMode: Text.WordWrap
@@ -177,13 +197,13 @@ MD.Page {
                     spacing: 8
 
                     SectionTitle {
-                        text: "Daemon"
+                        text: qsTr("Daemon")
                     }
 
                     RowLayout {
                         spacing: 8
                         MD.Text {
-                            text: "Service:"
+                            text: qsTr("Service:")
                             typescale: MD.Token.typescale.label_medium
                             color: MD.Token.color.on_surface_variant
                         }
@@ -191,6 +211,11 @@ MD.Page {
                             text: healthQuery.service || "—"
                             typescale: MD.Token.typescale.body_medium
                             color: MD.Token.color.on_surface
+                        }
+                        W.Tag {
+                            Layout.alignment: Qt.AlignVCenter
+                            visible: healthQuery.osName.length > 0
+                            text: healthQuery.osName
                         }
                         W.Tag {
                             readonly property string label: root.desktopLabel(W.Notify.displayBackend.desktop)
@@ -212,7 +237,7 @@ MD.Page {
                     RowLayout {
                         spacing: 8
                         MD.Text {
-                            text: "State:"
+                            text: qsTr("State:")
                             typescale: MD.Token.typescale.label_medium
                             color: MD.Token.color.on_surface_variant
                         }
@@ -238,14 +263,45 @@ MD.Page {
                 contentItem: ColumnLayout {
                     spacing: 8
 
-                    SectionTitle {
-                        text: "Active Renderers"
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        SectionTitle {
+                            text: qsTr("Active Renderers")
+                        }
+
+                        Item {
+                            Layout.fillWidth: true
+                        }
+
+                        MD.FilterChip {
+                            text: qsTr("Mute all")
+                            checkable: false
+                            checked: W.Notify.globalMuted
+                            enabled: W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready && !globalMuteSetQuery.querying
+                            onClicked: {
+                                globalMuteSetQuery.muted = !W.Notify.globalMuted;
+                                globalMuteSetQuery.reload();
+                            }
+                        }
+
+                        MD.FilterChip {
+                            text: qsTr("Pause all")
+                            checkable: false
+                            checked: W.Notify.globalPaused
+                            enabled: W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready && !globalPauseSetQuery.querying
+                            onClicked: {
+                                globalPauseSetQuery.paused = !W.Notify.globalPaused;
+                                globalPauseSetQuery.reload();
+                            }
+                        }
                     }
 
                     SectionHint {
                         readonly property var liveRenderers: W.App.rendererManager.renderers
                         visible: !liveRenderers || liveRenderers.length === 0
-                        text: "No active renderers"
+                        text: qsTr("No active renderers")
                     }
 
                     ListView {
@@ -268,8 +324,7 @@ MD.Page {
                             radius: 12
                             text: root.rendererLabel(modelData)
                             font.family: "monospace"
-                            supportText: (modelData.status || "") + " · " + (modelData.fps || 0) + " fps"
-                                + (modelData.textureWidth ? " · " + modelData.textureWidth + "×" + modelData.textureHeight : "")
+                            supportText: (modelData.status || "") + " · " + (modelData.fps || 0) + " fps" + (modelData.textureWidth ? " · " + modelData.textureWidth + "×" + modelData.textureHeight : "")
                             leader: MD.Icon {
                                 name: modelData.status === "paused" ? MD.Token.icon.pause : MD.Token.icon.play_arrow
                                 size: 24
@@ -277,6 +332,14 @@ MD.Page {
                             }
                             trailing: RowLayout {
                                 spacing: 6
+                                Repeater {
+                                    model: modelData.runtimeConditions || []
+                                    delegate: W.RuntimeConditionTag {
+                                        required property var modelData
+                                        Layout.alignment: Qt.AlignVCenter
+                                        condition: modelData
+                                    }
+                                }
                                 W.GpuTag {
                                     Layout.alignment: Qt.AlignVCenter
                                     drmRenderMajor: modelData.drmRenderMajor || 0
@@ -302,18 +365,18 @@ MD.Page {
                     spacing: 8
 
                     SectionTitle {
-                        text: "Components"
+                        text: qsTr("Components")
                     }
 
                     SectionHint {
                         typescale: MD.Token.typescale.label_medium
                         visible: pluginQuery.supportedTypes && pluginQuery.supportedTypes.length > 0
-                        text: "Supported types: " + (pluginQuery.supportedTypes ? pluginQuery.supportedTypes.join(", ") : "")
+                        text: qsTr("Supported types: %1").arg(pluginQuery.supportedTypes ? pluginQuery.supportedTypes.join(", ") : "")
                     }
 
                     SectionHint {
                         visible: !pluginQuery.renderers || pluginQuery.renderers.length === 0
-                        text: "No components"
+                        text: qsTr("No components")
                     }
 
                     ListView {
@@ -330,13 +393,14 @@ MD.Page {
                             required property var modelData
 
                             readonly property bool hasSettings: (modelData.settings && modelData.settings.length > 0) === true
+                            property var settingsPresentation: null
 
                             width: ListView.view.width
                             radius: 12
                             text: modelData.name || ""
                             supportText: (modelData.types ? modelData.types.join(", ") : "")
                             leader: MD.Icon {
-                                name: MD.Token.icon.extension
+                                name: MD.Token.icon.widgets
                                 size: 24
                                 color: MD.Token.color.on_surface_variant
                             }
@@ -350,9 +414,11 @@ MD.Page {
                                     visible: componentItem.hasSettings
                                     icon.name: MD.Token.icon.settings
                                     onClicked: {
+                                        if (componentItem.settingsPresentation?.active)
+                                            return;
                                         const name = componentItem.modelData.name;
                                         const p = settingsQuery.plugins ? settingsQuery.plugins[name] : undefined;
-                                        MD.Util.showPopup('waywallen.ui/PagePopup', {
+                                        componentItem.settingsPresentation = root.Window.window.presentPopup('waywallen.ui/PagePopup', {
                                             source: 'waywallen.ui/PluginSettingsPage',
                                             props: {
                                                 pluginName: name,
@@ -361,7 +427,7 @@ MD.Page {
                                                 currentGlobal: settingsQuery.global || ({}),
                                                 currentValues: p || ({})
                                             }
-                                        }, root.Window.window);
+                                        });
                                     }
                                 }
                             }

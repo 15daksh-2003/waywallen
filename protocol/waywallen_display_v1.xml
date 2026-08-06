@@ -1,306 +1,224 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  waywallen-display-v1
+  waywallen-display-v1, protocol version 8
 
-  Wire protocol between a display client (libwaywallen_display, or any
-  other conforming consumer) and the waywallen daemon. Spoken over
+  Wire protocol between a display consumer and the waywallen daemon over
   SOCK_STREAM Unix Domain Socket at $XDG_RUNTIME_DIR/waywallen/display.sock.
 
   Role model:
-    client  = display (passive output device; advertises size/name, does
-              not choose content)
-    server  = manager (waywallen daemon; decides which renderer feeds
-              which display, with what source_rect/dest_rect/transform)
+    client = passive display consumer. It owns display identity, current
+             surface metrics, window facts, input facts, GPU import
+             capabilities and completion acknowledgements.
+    server = daemon manager. It owns routing, renderer lifecycle, buffer
+             negotiation, composition, presentation effects and recovery.
 
-  Wire format (Wayland-inspired positional binary):
+  Wire format:
+    header = u16 opcode + u16 total byte length, little-endian.
+    body   = positional, 4-byte aligned values generated from this schema.
+    fds    = SCM_RIGHTS ancillary data in the order documented per event.
 
-    header: 4 bytes
-      u16 opcode
-      u16 total_length_in_bytes  (including the 4-byte header)
+  Connection contract:
+    - `hello` is the first request and `welcome` is the first reply.
+    - The daemon accepts exactly protocol v8 and rejects other versions
+      before reading registration capabilities or creating router state.
+    - `register_display` is sent exactly once after `welcome` and contains
+      every consumer-owned fact required for initial routing.
+    - `display_accepted` is the first event after registration. Its
+      presentation snapshot reflects the fully reconciled initial state.
+    - Backends and consumer capabilities are immutable for a connection;
+      changing GPU/backend requires reconnecting.
 
-    body: positional args, 4-byte aligned
+  Generation contract:
+    - buffer_generation is connection-local and strictly increasing.
+    - composition generation is strictly increasing and every composition
+      explicitly names its buffer_generation.
+    - frame seq is connection-local and strictly increasing across binds.
+    - presentation config/state generations are connection-local; a state
+      names the config generation it was resolved against.
 
-      u32/i32/f32 = 4 bytes LE
-      u64/i64/f64 = 8 bytes LE
-      string      = [u32 len_including_NUL] [utf8...] [NUL] [pad to 4]
-      array<T>    = [u32 count] [count * sizeof(T)] [pad to 4]
-      rect        = 4 * f32 = 16 bytes  (x, y, w, h)
-      kv_list     = [u32 count] [count * (string key, string value)]
+  Buffer/release contract:
+    - `bind_buffers` atomically carries one pool and its initial composition.
+    - A later `set_composition_config` may only target the current pool.
+    - `frame_ready` carries acquire sync_file then release syncobj fds.
+    - The consumer attaches or signals the release fence, then sends
+      `frame_release_armed`. GPU completion is observed from the syncobj.
+    - `ack_unbind` only confirms host-side teardown ownership transfer; it
+      is not GPU completion.
+    - No buffer_release request exists.
 
-    fds: passed out-of-band via SCM_RIGHTS ancillary data. Order defined
-         per-message. The inline body never contains an fd word.
+  Coordinates:
+    - DisplayMetrics and pointer x/y use actual surface-local coordinates,
+      after physical output rotation, independent of wallpaper transform.
+    - Composition source_rect is texture space and dest_rect is display
+      surface space. The daemon owns inverse pointer mapping.
 
-  Invariants:
-
-    - The first Request on a new connection MUST be `hello`.
-    - The first Event in reply MUST be `welcome`.
-    - `register_display` MUST be sent exactly once per connection, after
-      the hello/welcome exchange.
-    - `buffer_generation` is monotonically increasing.
-    - `config_generation` is monotonically increasing and independent of
-      buffer_generation.
-    - `seq` is globally monotonic per stream, not reset across rebinds.
-    - A new `bind_buffers` implicitly retires all prior generations. The
-      display MUST NOT send `buffer_release` for any retired generation.
-    - Between receipt of `bind_buffers` and the corresponding
-      `set_config`, the display is in PENDING_CONFIG and MUST NOT accept
-      any `frame_ready`.
-    - Every `frame_ready` carries exactly TWO fds (in order):
-        1. acquire sync_fd     — dma_fence sync_file the display MUST
-           wait on before sampling.
-        2. release_syncobj fd  — daemon-allocated drm_syncobj (binary).
-           The display signals it (via SYNC_FILE → IMPORT_SYNC_FILE, or
-           by signaling the imported Vulkan binary semaphore from its
-           own GPU work) once it has finished sampling. The signal IS
-           the release — there is no separate `buffer_release` request
-           in v1.
-        The display owns both fds and MUST close them after import.
-    - Display never panics/aborts; any wire or protocol error results
-      in on_disconnected and cleanup. Server is free to crash.
-
-  Version: 3
-
-  Versioning policy (daemon-authoritative):
-    - `hello.client_protocol_version` is a single u32 declared by the
-      client. The daemon owns the supported range [MIN..=MAX]; any
-      client version outside that range is rejected with
-      `error{code = WW_ERR_VERSION_UNSUPPORTED, message = ...}` and the
-      connection is closed. The client does NOT verify daemon version;
-      `welcome.server_version` is informational/diagnostic only.
-    - The version number is independent of the lib's API/ABI version
-      (libwaywallen_display SO version) — it tracks ONLY this XML's
-      `<protocol version="...">` attribute.
-
-  Error codes (carried in `error.code`):
-    1 — WW_ERR_PROTO_NAME_MISMATCH    (hello.protocol string mismatch)
-    2 — WW_ERR_VERSION_UNSUPPORTED    (hello.client_protocol_version
-                                       outside daemon's supported range)
-
-  v2 (modifier negotiation):
-    - Consumer ships `consumer_caps` request immediately after
-      `register_display`. Carries fourcc/modifier/plane_count
-      grids plus device_uuid + sync_caps + color_caps + mem_hints
-      mirroring the producer-side `format_caps` event in ipc_v2.
-    - Daemon pairs the consumer's caps with the bound renderer's caps,
-      picks an intersection (LINEAR cross-vendor / non-LINEAR same-GPU)
-      and only THEN dispatches `bind_buffers` for this consumer.
-    - Consumer sends `bind_failed` request on import failure; daemon
-      blacklists that (fourcc, modifier) pair on this consumer and
-      retries the picker. Non-terminal — only `error` is terminal.
-
-  v3 (explicit version negotiation):
-    - `hello` carries `client_protocol_version: u32` so the daemon can
-      reject too-old / too-new clients deterministically instead of
-      relying on the protocol-name string suffix.
-    - `welcome.features` is now informational. The daemon guarantees
-      the feature set implied by the negotiated version; clients MUST
-      NOT gate on features field contents.
-
-  v5 (features-first modifier filter):
-    - `consumer_caps` drops the `usages` per-modifier u32 array. The
-      daemon's picker never consumed it; both peers now filter
-      modifiers locally by `VkFormatFeatureFlags` and only the
-      surviving (fourcc, modifier, plane_count) tuples hit the wire.
-    - Wire-incompatible with v4. v4 clients send an extra `usages[]`
-      array that decode now fails on; daemon rejects them via
-      hello.client_protocol_version range check.
-
-  v6 (unbind ack):
-    - New request `unbind_done` (opcode 11): display→daemon ack that
-      an `unbind` event was received and host-side teardown has been
-      initiated. The daemon waits for this (with a short timeout)
-      before issuing `Shutdown` to the producer that owned the
-      unbound pool, so the producer's exported acquire dma_fence
-      doesn't get force-cancelled mid-blit by the consumer.
-    - Wire-compatible with v5 except for the new request — v5 clients
-      that never send `unbind_done` still work (daemon falls back to
-      the timeout). v6 clients on a v5 daemon would just have their
-      `unbind_done` silently ignored as an unknown opcode if the
-      daemon's range allowed v6 (it won't — daemon only accepts ≥6
-      once it advertises v6).
-
-  v7 (window-state reporting for daemon-side auto replay):
-    - New request `window_state` (opcode 12): consumer→daemon advisory
-      bitmask describing which kinds of windows currently cover this
-      display. Fire-and-forget; consumers that have no window-state
-      source (GNOME extension before window-management support,
-      headless tests, anything non-KDE) simply never send it — the
-      daemon defaults the display to "no covering windows".
-    - Daemon owns the per-display auto replay policy and is the
-      only side that decides renderer lifecycle changes. Consumers MUST
-      NOT debounce or filter; just emit on every observed change.
-    - Wire-compatible with v6 except for the new opcode. v6 clients
-      that never send `window_state` keep working (daemon defaults
-      that display to "no window-state condition met").
-
-  Informational features (welcome.features, advisory only in v3+):
-    "explicit_sync_fd"           — acquire fence as dma_fence sync_file.
-    "drm_syncobj_release"        — release fence as drm_syncobj fd.
-    "modifier_negotiation_v1"    — consumer_caps + bind_failed plumbing.
-  Optional features (reserved): "color_management", "hdr"
+  Removed development messages keep their request opcodes reserved:
+    4 = historical buffer_release, 5 = bye, 6 = consumer_caps.
 -->
-<protocol name="waywallen_display" version="7">
+<protocol name="waywallen_display" version="8">
 
   <!-- ==================================================================
-       REQUESTS  (display -> manager)
+       SHARED ENUMS AND STRUCTURES
        ================================================================== -->
 
-  <!--
-    Opening handshake. Must be the first message on a new connection.
-    Server verifies:
-      1. `protocol == PROTOCOL_NAME` (e.g. "waywallen-display-v3"); on
-         mismatch replies with `error{code=1}` and closes.
-      2. `client_protocol_version` is within the daemon's supported
-         [MIN..=MAX] range; on miss replies with `error{code=2}` and
-         closes.
-    On success the server replies with `welcome`.
+  <enum name="pause_effect_kind">
+    <entry name="none" value="0"/>
+    <entry name="blur" value="1"/>
+  </enum>
 
-    `client_version` is a free-form human-readable string (e.g. lib
-    SemVer) used purely for logs/diagnostics. The version gate is
-    `client_protocol_version`.
+  <enum name="buffer_import_failure_kind">
+    <entry name="unsupported" value="0"/>
+    <entry name="resource_exhausted" value="1"/>
+    <entry name="backend_failure" value="2"/>
+  </enum>
+
+  <enum name="pointer_button_state">
+    <entry name="released" value="0"/>
+    <entry name="pressed" value="1"/>
+  </enum>
+
+  <enum name="pointer_axis_source">
+    <entry name="wheel" value="0"/>
+    <entry name="finger" value="1"/>
+    <entry name="continuous" value="2"/>
+  </enum>
+
+  <enum name="display_error_code">
+    <entry name="protocol_violation" value="1"/>
+    <entry name="version_unsupported" value="2"/>
+    <entry name="negotiation_failed" value="3"/>
+    <entry name="internal" value="4"/>
+  </enum>
+
+  <struct name="rgba_color">
+    <field name="r" type="f32"/>
+    <field name="g" type="f32"/>
+    <field name="b" type="f32"/>
+    <field name="a" type="f32"/>
+  </struct>
+
+  <struct name="display_metrics">
+    <field name="width" type="u32"/>
+    <field name="height" type="u32"/>
+    <!-- Zero means the refresh rate is unknown. -->
+    <field name="refresh_mhz" type="u32"/>
+  </struct>
+
+  <!--
+    Flattened consumer DMA-BUF capabilities. The parallel arrays obey:
+      mod_counts.len == fourccs.len
+      modifiers.len == plane_counts.len == sum(mod_counts)
+      device_uuid.len == driver_uuid.len == 4 (16 bytes packed as LE u32)
+
+    drm_render=(0,0) and zero UUIDs mean unknown. The daemon then assumes
+    a cross-GPU path and chooses conservative host-visible placement.
   -->
+  <struct name="consumer_capabilities">
+    <field name="fourccs" type="array" element="u32"/>
+    <field name="mod_counts" type="array" element="u32"/>
+    <field name="modifiers" type="array" element="u64"/>
+    <field name="plane_counts" type="array" element="u32"/>
+    <field name="device_uuid" type="array" element="u32"/>
+    <field name="driver_uuid" type="array" element="u32"/>
+    <field name="drm_render_major" type="u32"/>
+    <field name="drm_render_minor" type="u32"/>
+    <field name="mem_hints" type="u32"/>
+    <field name="sync_caps" type="u32"/>
+    <field name="color_caps" type="u32"/>
+    <field name="extent_max_w" type="u32"/>
+    <field name="extent_max_h" type="u32"/>
+  </struct>
+
+  <struct name="presentation_capabilities">
+    <!-- bit 0 = Pause Blur; all other bits are reserved and must be zero. -->
+    <field name="flags" type="u32"/>
+  </struct>
+
+  <struct name="blur_effect_config">
+    <field name="radius" type="u32"/>
+  </struct>
+
+  <struct name="pause_effect_config">
+    <field name="kind" type="pause_effect_kind"/>
+    <field name="blur" type="blur_effect_config"/>
+  </struct>
+
+  <struct name="pause_effect_state">
+    <field name="active" type="bool"/>
+  </struct>
+
+  <struct name="presentation_config">
+    <field name="generation" type="u64"/>
+    <field name="pause_effect" type="pause_effect_config"/>
+  </struct>
+
+  <struct name="presentation_state">
+    <field name="generation" type="u64"/>
+    <field name="config_generation" type="u64"/>
+    <field name="pause_effect" type="pause_effect_state"/>
+  </struct>
+
+  <struct name="presentation_snapshot">
+    <field name="config" type="presentation_config"/>
+    <field name="state" type="presentation_state"/>
+  </struct>
+
+  <struct name="composition_config">
+    <field name="generation" type="u64"/>
+    <field name="buffer_generation" type="u64"/>
+    <field name="source_rect" type="rect"/>
+    <field name="dest_rect" type="rect"/>
+    <field name="transform" type="u32"/>
+    <field name="clear_color" type="rgba_color"/>
+  </struct>
+
+  <!-- ==================================================================
+       REQUESTS  (display -> daemon)
+       ================================================================== -->
+
+  <!-- Small version fence. Must be the first request. -->
   <request name="hello" opcode="1">
-    <arg name="protocol" type="string"/>
     <arg name="client_name" type="string"/>
     <arg name="client_version" type="string"/>
-    <arg name="client_protocol_version" type="u32"/>
+    <arg name="protocol_version" type="u32"/>
   </request>
 
   <!--
-    Advertise this display as an output device. The manager uses the
-    advertised dimensions (+ any properties) to pick content and compute
-    source_rect / dest_rect. Sent once per connection, after welcome.
-
-    `refresh_mhz` is millihertz (e.g. 60000 = 60.000 Hz). Zero means
-    unknown; manager may pick a conservative frame budget.
-
-    `drm_render_major` / `drm_render_minor` identify the DRM render
-    node of the GPU this display will sample dmabufs on (i.e. the GPU
-    backing the EGL/Vulkan context the consumer uses to import frames).
-    The manager compares this against each renderer's GPU id to decide
-    whether dmabuf placement must be promoted to HOST_VISIBLE/GTT for
-    cross-GPU PRIME import.
-
-    A client that cannot resolve its render node (driver lacks
-    `EGL_EXT_device_query` / `VK_EXT_physical_device_drm`) MUST send
-    `(0, 0)`; the manager then conservatively assumes a cross-GPU path
-    and asks the renderer for host-visible buffers.
-
-    `properties` is an open-ended kv list for forward compat. v1 defines
-    no keys — any unknown key is silently ignored by the server.
-
-    `instance_id` (added in v4) is a stable identifier persisted by the
-    consumer (e.g. UUID4 stored in KDE/GNOME extension config) that
-    survives reconnects and DE restarts. It is used by the manager as
-    the key into its per-display settings store; the empty string
-    means the consumer has no stable id, in which case the manager
-    falls back to indexing settings by `name` (legacy v3 behavior).
-    The manager treats the value as opaque — it is not parsed.
+    Atomically register one output with all consumer-owned initial facts.
+    `instance_id` is a stable opaque identifier; empty means settings fall
+    back to the display name. `window_state_flags` uses WW_WIN_HAS_* bits.
   -->
   <request name="register_display" opcode="2">
     <arg name="name" type="string"/>
     <arg name="instance_id" type="string"/>
-    <arg name="width" type="u32"/>
-    <arg name="height" type="u32"/>
-    <arg name="refresh_mhz" type="u32"/>
-    <arg name="drm_render_major" type="u32"/>
-    <arg name="drm_render_minor" type="u32"/>
-    <arg name="properties" type="kv_list"/>
+    <arg name="metrics" type="display_metrics"/>
+    <arg name="consumer_caps" type="consumer_capabilities"/>
+    <arg name="presentation_caps" type="presentation_capabilities"/>
+    <arg name="window_state_flags" type="u32"/>
   </request>
 
-  <!--
-    Display size/properties changed (window resize, monitor mode switch).
-    Fire-and-forget: display does not wait for an ack and keeps
-    rendering with its current SetConfig. Manager may respond with a
-    new `set_config` to adapt `dest_rect`, or may ignore.
-  -->
-  <request name="update_display" opcode="3">
-    <arg name="width" type="u32"/>
-    <arg name="height" type="u32"/>
-    <arg name="properties" type="kv_list"/>
+  <!-- Complete replacement of current physical surface metrics. -->
+  <request name="set_display_metrics" opcode="3">
+    <arg name="metrics" type="display_metrics"/>
   </request>
 
-  <!--
-    NOTE: opcode 4 is intentionally unused. v1's `buffer_release`
-    request was removed; release is now signaled by the display
-    flipping the `release_syncobj` fd that arrived alongside the
-    matching `frame_ready` (see opcode 5). Releasing a slot is
-    fire-and-forget on the GPU side: the daemon polls the syncobj
-    and only then merges the fence into the producer's release
-    timeline.
-  -->
+  <!-- Request opcodes 4, 5 and 6 are reserved. -->
 
   <!--
-    Clean shutdown marker from the display side. After sending `bye`
-    the display closes its write half; it may still drain pending
-    events until the server closes the socket.
+    A configured import backend could not import one candidate generation.
+    The daemon resolves format/modifier from its own binding state. `message`
+    is diagnostic only; recovery policy is selected from the typed kind.
   -->
-  <request name="bye" opcode="5">
-  </request>
-
-  <!--
-    Consumer capability declaration — sent immediately after
-    `register_display`. Mirrors `format_caps` in waywallen-ipc-v2;
-    same parallel-array layout, same bit definitions for sync_caps /
-    color_caps / mem_hints. The daemon stores it alongside the
-    renderer's caps and gates `bind_buffers` dispatch on a successful
-    `negotiate::pick(producer, consumer)`.
-
-    Encoding: see waywallen-ipc-v2 `format_caps` doc. Validation:
-    modifiers.len == plane_counts.len == sum(mod_counts).
-  -->
-  <request name="consumer_caps" opcode="6">
-    <arg name="fourccs" type="array" element="u32"/>
-    <arg name="mod_counts" type="array" element="u32"/>
-    <arg name="modifiers" type="array" element="u64"/>
-    <arg name="plane_counts" type="array" element="u32"/>
-    <arg name="device_uuid" type="array" element="u32"/>
-    <arg name="driver_uuid" type="array" element="u32"/>
-    <arg name="drm_render_major" type="u32"/>
-    <arg name="drm_render_minor" type="u32"/>
-    <arg name="mem_hints" type="u32"/>
-    <arg name="sync_caps" type="u32"/>
-    <arg name="color_caps" type="u32"/>
-    <arg name="extent_max_w" type="u32"/>
-    <arg name="extent_max_h" type="u32"/>
-  </request>
-
-  <!--
-    Consumer report that a daemon-issued `bind_buffers` could not be
-    imported on this device (e.g. `eglCreateImageKHR` returned
-    EGL_NO_IMAGE_KHR for the (fourcc, modifier) pair the daemon picked).
-    Non-terminal: the daemon adds (fourcc, modifier) to this consumer's
-    per-peer blacklist and re-runs `negotiate::pick`. If the picker
-    has nothing left it falls back to a terminal `error` event.
-    `reason` codes mirror ipc-v2 bind_failed.
-  -->
-  <request name="bind_failed" opcode="7">
-    <arg name="fourcc" type="u32"/>
-    <arg name="modifier" type="u64"/>
-    <arg name="reason" type="u32"/>
+  <request name="buffer_import_failed" opcode="7">
+    <arg name="buffer_generation" type="u64"/>
+    <arg name="kind" type="buffer_import_failure_kind"/>
     <arg name="message" type="string"/>
   </request>
 
   <!--
-    Pointer events forwarded from the consumer (display) to the manager.
-    **Reserved**: the manager currently logs at debug and drops. Future
-    work will route these to interactive renderers (parallax,
-    click-through, in-wallpaper widgets).
-
-    Coordinate space (all three messages):
-      `x` / `y` are surface-local pixel coordinates with origin at the
-      top-left of the consumer's advertised display extent (the same
-      space `register_display.width`/`height` are measured in).
-      Sub-pixel precision allowed for HiDPI compositors.
-
-    Common fields:
-      `timestamp_us` — monotonic, microseconds. 0 means "not provided"
-                       (the manager will stamp on receipt).
-      `modifiers`    — Linux KEY_* modifier bitmask (Ctrl=4, Alt=8, …).
-                       0 if unknown.
-
-    Modeled after `wl_pointer.{motion,button,axis}` to match renderer
-    authors' mental model.
+    Pointer coordinates are actual surface-local pixels. `modifiers` uses:
+      bit 0 Shift, bit 1 Ctrl, bit 2 Alt, bit 3 Super; bits 4..31 are zero.
+    timestamp_us is CLOCK_MONOTONIC microseconds; zero means unavailable.
   -->
   <request name="pointer_motion" opcode="8">
     <arg name="x" type="f32"/>
@@ -309,143 +227,61 @@
     <arg name="modifiers" type="u32"/>
   </request>
 
-  <!--
-    `button` is a Linux input event code (BTN_LEFT=0x110, BTN_RIGHT=0x111,
-    BTN_MIDDLE=0x112, BTN_SIDE=0x113, BTN_EXTRA=0x114).
-    `state` is 0 (release) or 1 (press).
-  -->
+  <!-- `button` is a Linux input BTN_* code. -->
   <request name="pointer_button" opcode="9">
     <arg name="x" type="f32"/>
     <arg name="y" type="f32"/>
     <arg name="button" type="u32"/>
-    <arg name="state" type="u32"/>
+    <arg name="state" type="pointer_button_state"/>
     <arg name="timestamp_us" type="u64"/>
     <arg name="modifiers" type="u32"/>
   </request>
 
-  <!--
-    `delta_x` / `delta_y` are scroll deltas in "logical notches"
-    (Qt's 120-per-notch convention divided by 120; Wayland's
-    wl_pointer.axis units divided by 10 for wheel sources). Diagonal
-    scroll fits in a single message.
-
-    `source` discriminates the input device:
-      0 — wheel       (discrete clicks, e.g. mouse wheel)
-      1 — finger      (touchpad two-finger scroll)
-      2 — continuous  (smooth scrollers, hi-res wheels)
-  -->
+  <!-- delta_x/y are logical notches; diagonal scrolling is one request. -->
   <request name="pointer_axis" opcode="10">
     <arg name="x" type="f32"/>
     <arg name="y" type="f32"/>
     <arg name="delta_x" type="f32"/>
     <arg name="delta_y" type="f32"/>
-    <arg name="source" type="u32"/>
+    <arg name="source" type="pointer_axis_source"/>
     <arg name="timestamp_us" type="u64"/>
     <arg name="modifiers" type="u32"/>
   </request>
 
-  <!--
-    Acknowledge that an `unbind` event with `buffer_generation` was
-    received and host-side teardown has been initiated (the on_textures
-    _releasing callback fired and the consumer's pending-pool list
-    captured the released imports). The acknowledgement does NOT
-    promise that the consumer's GPU has actually finished sampling —
-    that's a separate guarantee provided by the kernel/driver once the
-    producer's acquire dma_fence signals.
-
-    The manager waits for this ack with a short timeout before issuing
-    `Shutdown` to the producer that owned the pool, so the producer's
-    in-flight GPU work isn't force-cancelled while the consumer is
-    still blitting from it.
-
-    Fire-and-forget on the display side: send and move on. If the
-    socket dies before this is sent, the daemon's connection-close
-    handler treats EOF as an implicit ack for any pending unbinds.
-  -->
-  <request name="unbind_done" opcode="11">
+  <!-- Host accepted teardown ownership for this unbound generation. -->
+  <request name="ack_unbind" opcode="11">
     <arg name="buffer_generation" type="u64"/>
   </request>
 
-  <!--
-    Periodic / on-change window-state report from the consumer side.
-    Used by the daemon's per-display auto replay policy: each consumer
-    (e.g. the KDE wallpaper plasmoid) computes a small bitmask
-    describing windows that currently cover its display and emits a
-    new `window_state` whenever it changes. The daemon translates the
-    bitmask + daemon settings into renderer lifecycle changes.
-
-    Fire-and-forget. Consumers MUST NOT debounce, time-filter, or
-    otherwise interpret the bits — the daemon owns all policy. Bit
-    positions:
-
-      bit 0  WW_WIN_HAS_NON_MINIMIZED  some mapped (non-minimized)
-                                       window covers this display.
-      bit 1  WW_WIN_HAS_ACTIVE         some window on this display
-                                       has keyboard focus.
-      bit 2  WW_WIN_HAS_MAXIMIZED      some window is H+V maximized
-                                       (NOT counting fullscreen).
-      bit 3  WW_WIN_HAS_FULLSCREEN     some window is fullscreen.
-      bits 4..31  reserved, MUST be 0 on send, MUST be ignored on
-                  receive.
-
-    The implicit default for any display that never sends this
-    request is `flags = 0` (no window-state condition met).
-  -->
-  <request name="window_state" opcode="12">
+  <!-- Complete replacement of current daemon-side auto replay facts. -->
+  <request name="set_window_state" opcode="12">
     <arg name="flags" type="u32"/>
   </request>
 
+  <!-- The matching release syncobj now contains a fence or is signaled. -->
+  <request name="frame_release_armed" opcode="13">
+    <arg name="buffer_generation" type="u64"/>
+    <arg name="seq" type="u64"/>
+  </request>
 
   <!-- ==================================================================
-       EVENTS  (manager -> display)
+       EVENTS  (daemon -> display)
        ================================================================== -->
 
-  <!--
-    Reply to `hello`. Both fields are advisory in v3+:
-      - `server_version` is a free-form human-readable string for logs.
-      - `features` lists the daemon-guaranteed feature set implied by
-        the negotiated protocol version. Clients MUST NOT gate on the
-        contents — version negotiation has already happened by the
-        time `welcome` is sent, and the daemon is authoritative.
-  -->
   <event name="welcome" opcode="1">
     <arg name="server_version" type="string"/>
-    <arg name="features" type="array" element="string"/>
   </event>
 
-  <!--
-    Ack of `register_display`. `display_id` is an opaque u64 assigned
-    by the manager, intended for logs and debugging only.
-  -->
+  <!-- First normal event after register_display. -->
   <event name="display_accepted" opcode="2">
     <arg name="display_id" type="u64"/>
+    <arg name="presentation" type="presentation_snapshot"/>
   </event>
 
   <!--
-    A new set of DMA-BUF backing buffers is being bound to this
-    display. All previously-bound buffers (if any) are implicitly
-    retired; the display MUST stop using any textures derived from
-    the prior generation and MUST NOT send buffer_release messages
-    for retired frames.
-
-    `count` is the number of buffers in the pool. `planes_per_buffer`
-    is 1 for single-plane formats (most DRM_FORMAT_* cases) and >1
-    for multi-plane (e.g. YUV). The attached fds are ordered
-    buffer-major, plane-minor:
-
-      [ b0p0, b0p1, ..., b0p(P-1),
-        b1p0, b1p1, ..., b1p(P-1),
-        ...
-        b(N-1)p0, ..., b(N-1)p(P-1) ]
-
-    Total fds = count * planes_per_buffer.
-
-    `stride`, `plane_offset`, and `size` arrays follow the same
-    buffer-major, plane-minor ordering and have the same length as
-    the fd array.
-
-    After `bind_buffers` the display is in PENDING_CONFIG and MUST
-    wait for a matching `set_config` before accepting `frame_ready`.
+    Atomically publish one imported pool and its initial composition.
+    The attached DMA-BUF fds are buffer-major, plane-minor. stride,
+    plane_offset and size have count * planes_per_buffer entries.
   -->
   <event name="bind_buffers" opcode="3">
     <arg name="buffer_generation" type="u64"/>
@@ -458,66 +294,18 @@
     <arg name="stride" type="array" element="u32"/>
     <arg name="plane_offset" type="array" element="u32"/>
     <arg name="size" type="array" element="u64"/>
+    <arg name="initial_config" type="composition_config"/>
     <fds count_expr="count * planes_per_buffer"/>
   </event>
 
-  <!--
-    Tell the display how to compose its output. `source_rect` is in
-    texture-pixel coordinates (the buffer_generation's width/height
-    space). `dest_rect` is in display-pixel coordinates (the last
-    advertised register/update_display width/height).
-
-    `transform` follows the Wayland wl_output.transform enum for
-    the low two bits:
-       0 = identity (0°)
-       1 = rotated 90° CCW
-       2 = rotated 180°
-       3 = rotated 270° CCW
-    Bit 7 (0x80) = horizontal flip applied before rotation.
-    All other bits are reserved and MUST be zero in v1.
-
-    `clear_color` is used to fill display pixels outside `dest_rect`
-    (letterbox bars in keep-aspect fit). RGBA, non-premultiplied,
-    straight alpha, sRGB.
-
-    `config_generation` is monotonic and independent of
-    buffer_generation. Manager guarantees that before sending any
-    `frame_ready` with a new buffer_generation it has already sent
-    at least one `set_config` for that buffer_generation.
-  -->
-  <event name="set_config" opcode="4">
-    <arg name="config_generation" type="u64"/>
-    <arg name="source_rect" type="rect"/>
-    <arg name="dest_rect" type="rect"/>
-    <arg name="transform" type="u32"/>
-    <arg name="clear_r" type="f32"/>
-    <arg name="clear_g" type="f32"/>
-    <arg name="clear_b" type="f32"/>
-    <arg name="clear_a" type="f32"/>
+  <!-- Composition-only update for the current buffer generation. -->
+  <event name="set_composition_config" opcode="4">
+    <arg name="config" type="composition_config"/>
   </event>
 
   <!--
-    Producer has a new frame available in `buffer_index` of the
-    current buffer_generation. The display MUST wait on the attached
-    `acquire sync_fd` before sampling the texture, and signal the
-    attached `release_syncobj` fd from its release GPU work — the
-    signal is the release; v1 has no `buffer_release` request.
-
-    Two fds are attached, in order:
-
-      [0] acquire sync_fd  — dma_fence sync_file (as produced by
-          `vkGetSemaphoreFdKHR(SYNC_FD)` or `eglDupNativeFenceFDANDROID`).
-          Single-use; the display imports it (TEMPORARY) and closes
-          the fd.
-
-      [1] release_syncobj fd  — daemon-allocated drm_syncobj (binary,
-          unsignaled). Import via `vkImportSemaphoreFdKHR(OPAQUE_FD)`
-          and signal it from the GPU submit that consumes the buffer,
-          OR signal directly via `DRM_IOCTL_SYNCOBJ_IMPORT_SYNC_FILE`
-          using the sync_file produced by your release work.
-
-    `seq` is globally monotonic per connection; it does not reset
-    across `bind_buffers` rebinds.
+    One frame is available. Attached fds are acquire sync_file followed by
+    the daemon-owned binary release syncobj.
   -->
   <event name="frame_ready" opcode="5">
     <arg name="buffer_generation" type="u64"/>
@@ -526,28 +314,24 @@
     <fds count="2"/>
   </event>
 
-  <!--
-    Retire the current buffer_generation without binding a new one.
-    Manager sends this when it wants the display to stop rendering
-    (for example: the renderer was stopped, or the scheduler
-    reassigned the display). The display transitions back to IDLE.
-
-    After `unbind` the display MUST NOT send any `buffer_release`
-    for the retired generation.
-  -->
+  <!-- Retire the current generation without immediately publishing another. -->
   <event name="unbind" opcode="6">
     <arg name="buffer_generation" type="u64"/>
   </event>
 
-  <!--
-    Protocol or server-side error. Manager MAY close the connection
-    immediately after sending. From the display's point of view this
-    is semantically identical to EOF + a descriptive message; the
-    display handles it the same as any other disconnect.
-  -->
   <event name="error" opcode="7">
-    <arg name="code" type="u32"/>
+    <arg name="code" type="display_error_code"/>
     <arg name="message" type="string"/>
+  </event>
+
+  <!-- Replace persistent presentation config and runtime state atomically. -->
+  <event name="set_presentation_snapshot" opcode="8">
+    <arg name="presentation" type="presentation_snapshot"/>
+  </event>
+
+  <!-- Complete runtime presentation state replacement. -->
+  <event name="set_presentation_state" opcode="9">
+    <arg name="state" type="presentation_state"/>
   </event>
 
 </protocol>

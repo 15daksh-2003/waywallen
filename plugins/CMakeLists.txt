@@ -8,7 +8,7 @@ include(${CMAKE_SOURCE_DIR}/cmake/FetchDeps.cmake)
 set(VMA_BUILD_DOCUMENTATION OFF CACHE INTERNAL "")
 set(VMA_BUILD_SAMPLES       OFF CACHE INTERNAL "")
 set(VMA_ENABLE_INSTALL      OFF CACHE INTERNAL "")
-fetchdeps(${CMAKE_SOURCE_DIR}/deps.json NAMES vma rstd wavsen)
+fetchdeps(${CMAKE_SOURCE_DIR}/deps.json NAMES vma rstd vvk wavsen)
 
 add_subdirectory(../bridge waywallen-bridge-build)
 
@@ -20,7 +20,7 @@ target_sources(waywallen-plugin-common
 target_link_libraries(waywallen-plugin-common
     PUBLIC
         waywallen::bridge
-        wavsen::ffi::vulkan
+        vvk::ffi::vulkan
         rstd.cppstd
         rstd::json
 )
@@ -51,6 +51,7 @@ if(WAYWALLEN_INSTALL_WALLHAVEN_PLUGIN)
         ${CMAKE_CURRENT_SOURCE_DIR}/org.waywallen.wallhaven/wallhaven/api.lua
         ${CMAKE_CURRENT_SOURCE_DIR}/org.waywallen.wallhaven/wallhaven/discover.lua
         ${CMAKE_CURRENT_SOURCE_DIR}/org.waywallen.wallhaven/wallhaven/map.lua
+        ${CMAKE_CURRENT_SOURCE_DIR}/org.waywallen.wallhaven/wallhaven/session.lua
         ${CMAKE_CURRENT_SOURCE_DIR}/org.waywallen.wallhaven/wallhaven/source.lua
         ${CMAKE_CURRENT_SOURCE_DIR}/org.waywallen.wallhaven/wallhaven/wallpaper.lua
         DESTINATION ${_WALLHAVEN_PLUGIN_DIR}/wallhaven

@@ -10,7 +10,8 @@ Item {
     required property string title
     required property string previewUrl
     required property string author
-    required property bool installed
+    required property int acquisitionState
+    required property int remoteCapability
     property real itemWidth: width
     property real itemHeight: height
 
@@ -85,7 +86,8 @@ Item {
             }
 
             Rectangle {
-                visible: root.installed
+                visible: (root.remoteCapability === 1 && root.acquisitionState === 3)
+                    || (root.remoteCapability === 2 && root.acquisitionState === 2)
                 anchors { top: parent.top; right: parent.right; margins: 6 }
                 width: m_badge.implicitWidth + 12
                 height: m_badge.implicitHeight + 6
@@ -95,7 +97,7 @@ Item {
                 MD.Label {
                     id: m_badge
                     anchors.centerIn: parent
-                    text: qsTr("Installed")
+                    text: root.remoteCapability === 2 ? qsTr("Subscribed") : qsTr("Downloaded")
                     typescale: MD.Token.typescale.label_small
                     color: MD.Token.color.on_primary
                 }

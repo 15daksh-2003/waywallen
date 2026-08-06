@@ -1,4 +1,5 @@
 local M = {}
+local session = import("wallhaven.session")
 
 local API = "https://wallhaven.cc/api/v1"
 
@@ -49,42 +50,56 @@ local QUERY_TAGS = {
     Vehicle = "vehicle",
 }
 
-M.tags = {
-    "Abstract",
-    "Animal",
-    "Anime",
-    "Cartoon",
-    "CG",
-    "Cyberpunk",
-    "Fantasy",
-    "Game",
-    "Girls",
-    "Guys",
-    "Landscape",
-    "Medieval",
-    "Memes",
-    "MMD",
-    "Music",
-    "Nature",
-    "Pixel art",
-    "Relaxing",
-    "Retro",
-    "Sci-Fi",
-    "Sports",
-    "Technology",
-    "Vehicle",
-    "1280 x 720",
-    "1920 x 1080",
-    "2560 x 1440",
-    "3840 x 2160",
-    "2560 x 1080",
-    "3440 x 1440",
-    "5120 x 1440",
-    "3840 x 1080",
-    "7680 x 2160",
-    "1080 x 1920",
-    "720 x 1280",
-    "1440 x 2560",
+M.filters = {
+    {
+        id = "topics",
+        title = "Topics",
+        type = "multi_select",
+        values = {
+            "Abstract",
+            "Animal",
+            "Anime",
+            "Cartoon",
+            "CG",
+            "Cyberpunk",
+            "Fantasy",
+            "Game",
+            "Girls",
+            "Guys",
+            "Landscape",
+            "Medieval",
+            "Memes",
+            "MMD",
+            "Music",
+            "Nature",
+            "Pixel art",
+            "Relaxing",
+            "Retro",
+            "Sci-Fi",
+            "Sports",
+            "Technology",
+            "Vehicle",
+        },
+    },
+    {
+        id = "resolution",
+        title = "Resolution",
+        type = "multi_select",
+        values = {
+            "1280 x 720",
+            "1920 x 1080",
+            "2560 x 1440",
+            "3840 x 2160",
+            "2560 x 1080",
+            "3440 x 1440",
+            "5120 x 1440",
+            "3840 x 1080",
+            "7680 x 2160",
+            "1080 x 1920",
+            "720 x 1280",
+            "1440 x 2560",
+        },
+    },
 }
 
 local function append_query(query, term)
@@ -98,7 +113,15 @@ local function append_query(query, term)
 end
 
 local function request_json(ctx, url, query)
-    local rsp = ctx.http:get(url):query(query):timeout(20):send()
+    local rsp = ctx.http:get(url)
+        :headers(session.headers())
+        :query(query)
+        :timeout(20)
+        :send()
+    if rsp:status() == 401 or rsp:status() == 403 then
+        session.sign_out()
+        error("Wallhaven API key was rejected; log in again")
+    end
     if not rsp:ok() then
         error("wallhaven http " .. tostring(rsp:status()))
     end

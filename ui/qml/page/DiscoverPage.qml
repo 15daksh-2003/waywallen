@@ -9,18 +9,37 @@ MD.Page {
     id: root
     showBackground: false
     padding: MD.MProp.size.isCompact ? 0 : 12
+    rightPadding: 0
 
-    property var detailRow: null
-    property int detailState: 0
+    property bool detailOpen: false
+    readonly property var detailRow: detailOpen ? detailStore.item : null
 
     property string sourceId: ""
     property var sortOptions: []
     property int sortIndex: 0
     property var discoverTweakSheet: null
+    property var infoPresentation: null
+    property var managePresentation: null
+    readonly property var discoverTweakState: discoverTweakStateLoader.item
 
-    W.TweakState {
-        id: discoverTweakState
-        settingsCategory: "DiscoverView"
+    Loader {
+        id: discoverTweakStateLoader
+        active: true
+        property string settingsCategory: "DiscoverView"
+
+        sourceComponent: Component {
+            W.TweakState {
+                settingsCategory: discoverTweakStateLoader.settingsCategory
+            }
+        }
+    }
+
+    W.DiscoverState {
+        id: discoverState
+    }
+
+    W.RemoteStoreItem {
+        id: detailStore
     }
 
     function sourceInfo(id) {
@@ -36,9 +55,19 @@ MD.Page {
         return s ? (s.displayName && s.displayName.length > 0 ? s.displayName : s.name) : "";
     }
 
-    function sourceTags(id) {
+    function sourceFilters(id) {
         const s = sourceInfo(id);
-        return s && s.tags ? s.tags : [];
+        return s && s.filters ? s.filters : [];
+    }
+
+    function sourceCapability(id) {
+        const s = sourceInfo(id);
+        return s ? Number(s.remoteCapability ?? 0) : 0;
+    }
+
+    function sourceRemoteHint(id) {
+        const s = sourceInfo(id);
+        return s ? String(s.remoteHint ?? "") : "";
     }
 
     function sameList(a, b) {
@@ -53,10 +82,12 @@ MD.Page {
         return true;
     }
 
-    function pruneTags(tags, allowedTags) {
+    function pruneTags(tags, filters) {
         const allowed = {};
-        for (const tag of allowedTags ?? [])
-            allowed[String(tag)] = true;
+        for (const filter of filters ?? []) {
+            for (const value of filter.values ?? [])
+                allowed[String(value)] = true;
+        }
         let out = [];
         for (const tag of tags ?? []) {
             const value = String(tag);
@@ -72,6 +103,22 @@ MD.Page {
         return sortOptions[Math.max(0, Math.min(sortIndex, sortOptions.length - 1))].label;
     }
 
+    function tweakSettingsCategory(id) {
+        const source = String(id ?? "");
+        return source.length > 0 ? "DiscoverView/" + encodeURIComponent(source) + "/Tweak" : "DiscoverView";
+    }
+
+    function loadDiscoverTweakState(id) {
+        const category = tweakSettingsCategory(id);
+        if (discoverTweakStateLoader.item && discoverTweakStateLoader.settingsCategory === category)
+            return;
+        if (isSheetActive(discoverTweakSheet))
+            discoverTweakSheet.close();
+        discoverTweakStateLoader.active = false;
+        discoverTweakStateLoader.settingsCategory = category;
+        discoverTweakStateLoader.active = true;
+    }
+
     function setSource(id) {
         const s = sourceInfo(id);
         if (!s)
@@ -79,6 +126,9 @@ MD.Page {
         const sourceChanged = sourceId !== id;
         const currentSortKey = searchQuery.sortKey;
         sourceId = id;
+        discoverState.setSelectedSourceId(id);
+        if (sourceChanged)
+            loadDiscoverTweakState(id);
         sortOptions = s.sorts ?? [];
         sortIndex = 0;
         if (!sourceChanged && currentSortKey.length > 0) {
@@ -89,16 +139,20 @@ MD.Page {
                 }
             }
         }
-        const nextTags = sourceChanged ? [] : pruneTags(searchQuery.tags, s.tags ?? []);
+        const canBrowse = currentSourceLoginAction() === null;
+        searchQuery.browsingEnabled = canBrowse;
+        const candidateTags = sourceChanged ? discoverState.filterValuesFor(id) : searchQuery.tags;
+        const nextTags = pruneTags(candidateTags, s.filters ?? []);
         if (!sameList(searchQuery.tags, nextTags))
             searchQuery.tags = nextTags;
+        discoverState.setFilterValuesFor(id, nextTags);
         searchQuery.sourceId = id;
         detailsQuery.sourceId = id;
         searchQuery.sortKey = sortOptions.length > 0 ? sortOptions[sortIndex].key : "";
-        if (sourceChanged) {
-            detailRow = null;
-            detailState = 0;
+        if (sourceChanged || !canBrowse) {
+            detailOpen = false;
             detailsQuery.itemId = "";
+            m_grid.currentIndex = -1;
         }
     }
 
@@ -110,15 +164,16 @@ MD.Page {
     }
 
     function selectItem(index) {
-        detailRow = searchQuery.model.get(index);
-        detailState = detailRow.installed ? 3 : 0;
+        detailStore.item = searchQuery.model.item(index);
+        detailOpen = true;
         detailsQuery.sourceId = detailRow.sourceId;
         detailsQuery.itemId = detailRow.itemId;
+        if (root.sourceCapability(detailRow.sourceId) === 2)
+            refreshDetailSubscription();
     }
 
     function closeDetail() {
-        detailRow = null;
-        detailState = 0;
+        detailOpen = false;
         detailsQuery.itemId = "";
         m_grid.currentIndex = -1;
     }
@@ -126,58 +181,54 @@ MD.Page {
     function openInfo() {
         if (!root.detailRow)
             return;
-        MD.Util.showPopup('waywallen.ui/PagePopup', {
+        if (root.infoPresentation?.active)
+            return;
+        root.infoPresentation = root.Window.window.presentPopup('waywallen.ui/PagePopup', {
             source: 'waywallen.ui/RemoteInfoPage',
             props: {
-                item: root.detailRow,
+                itemStore: detailStore,
                 details: detailsQuery,
-                sourceName: root.sourceName(root.detailRow.sourceId)
+                sourceName: root.sourceName(root.detailRow.sourceId),
+                remoteCapability: root.sourceCapability(root.detailRow.sourceId),
+                remoteHint: root.sourceRemoteHint(root.detailRow.sourceId)
             }
-        }, root.Window.window);
+        });
     }
 
-    function formatBytes(bytes) {
-        let v = Number(bytes ?? 0);
-        if (!(v > 0))
-            return "";
-        const u = ["B", "KB", "MB", "GB", "TB"];
-        let i = 0;
-        while (v >= 1024 && i < u.length - 1) {
-            v /= 1024;
-            ++i;
-        }
-        return v.toFixed(i === 0 ? 0 : 1) + " " + u[i];
+    function setDetailSubscription(subscribed) {
+        if (!root.detailRow)
+            return;
+        const sourceId = root.detailRow.sourceId;
+        const itemId = root.detailRow.itemId;
+        subscriptionQuery.setSubscribed(sourceId, itemId, subscribed);
     }
 
-    function formatSize(s) {
-        const text = String(s ?? "").trim();
-        if (text.length === 0)
-            return "";
-        if (/^\d+$/.test(text))
-            return formatBytes(Number(text));
-        const m = text.match(/^([\d.,]+)\s*([KMGT]?B)$/i);
-        if (!m)
-            return text;
-        const num = parseFloat(m[1].replace(/,/g, ""));
-        if (isNaN(num))
-            return text;
-        const unit = m[2].toUpperCase();
-        if (unit === "B")
-            return formatBytes(num);
-        return num.toFixed(unit === "B" ? 0 : 1) + " " + unit;
+    function refreshDetailSubscription() {
+        if (!root.detailRow || root.sourceCapability(root.detailRow.sourceId) !== 2)
+            return;
+        if (root.currentSourceLoginAction() !== null)
+            return;
+        subscriptionQuery.refresh(root.detailRow.sourceId, root.detailRow.itemId);
     }
 
     function isSheetActive(sheet) {
-        return !!sheet && (sheet.opened || sheet.entering);
+        return !!sheet && (sheet.status === MD.PopupPresentation.Opening || sheet.status === MD.PopupPresentation.Open);
     }
 
     function ensureDiscoverTweakSheet() {
-        if (root.discoverTweakSheet)
+        if (!root.discoverTweakState)
+            return null;
+        if (root.discoverTweakSheet?.active)
             return root.discoverTweakSheet;
 
-        const sheet = MD.Util.showPopup(discoverTweakSheetComponent, {}, root.Window.window);
-        if (sheet)
+        const sheet = root.Window.window.presentPopup(discoverTweakSheetComponent);
+        if (sheet.active) {
             root.discoverTweakSheet = sheet;
+            sheet.activeChanged.connect(sheet, function () {
+                if (!sheet.active)
+                    root.releaseDiscoverTweakSheet(sheet);
+            });
+        }
         return sheet;
     }
 
@@ -187,18 +238,24 @@ MD.Page {
     }
 
     function toggleDiscoverTweakSheet() {
-        if (root.isSheetActive(root.discoverTweakSheet)) {
+        if (root.discoverTweakSheet?.active) {
             root.discoverTweakSheet.close();
             return;
         }
-        const sheet = root.ensureDiscoverTweakSheet();
-        if (sheet && !sheet.opened && !sheet.entering)
-            sheet.open();
+        root.ensureDiscoverTweakSheet();
+    }
+
+    MD.Action {
+        id: manageAction
+        icon.name: MD.Token.icon.manage_accounts
+        text: qsTr("Manage")
+        enabled: root.currentSourceConfig() !== null
+        onTriggered: root.openRemoteManagement()
     }
 
     MD.Action {
         id: tweakAction
-        text: "Tweak"
+        text: qsTr("Tweak")
         icon.name: MD.Token.icon.tune
         checked: root.isSheetActive(root.discoverTweakSheet)
         onTriggered: root.toggleDiscoverTweakSheet()
@@ -207,8 +264,8 @@ MD.Page {
     MD.Action {
         id: filterAction
         icon.name: MD.Token.icon.filter_list
-        text: "Filters"
-        enabled: m_filter_dialog.availableTags.length > 0
+        text: qsTr("Filters")
+        enabled: m_filter_dialog.filters.length > 0
         checked: searchQuery.tags.length > 0
         onTriggered: m_filter_dialog.open()
     }
@@ -216,40 +273,31 @@ MD.Page {
     MD.Action {
         id: refreshAction
         icon.name: MD.Token.icon.refresh
-        text: "Refresh"
-        enabled: !searchQuery.querying
+        text: qsTr("Refresh")
+        enabled: searchQuery.browsingEnabled && !searchQuery.querying
         onTriggered: searchQuery.reload()
-    }
-
-    MD.Action {
-        id: closeDetailAction
-        text: "Close"
-        icon.name: MD.Token.icon.close
-        onTriggered: root.closeDetail()
-    }
-
-    MD.Action {
-        id: infoAction
-        text: "Info"
-        icon.name: MD.Token.icon.info
-        enabled: root.detailRow !== null
-        onTriggered: root.openInfo()
     }
 
     W.RemoteAvailabilityQuery {
         id: availabilityQuery
         onSourcesChanged: {
-            if (sources.length === 0)
+            if (sources.length === 0) {
+                searchQuery.browsingEnabled = false;
                 return;
-            if (root.sourceId.length === 0)
-                root.setSource(defaultSourceId.length > 0 ? defaultSourceId : sources[0].id);
-            else
-                root.setSource(root.sourceId);
+            }
+            let nextSourceId = root.sourceId;
+            if (!root.sourceInfo(nextSourceId)) {
+                const savedSourceId = discoverState.selectedSourceId();
+                if (root.sourceInfo(savedSourceId))
+                    nextSourceId = savedSourceId;
+                else if (root.sourceInfo(defaultSourceId))
+                    nextSourceId = defaultSourceId;
+                else
+                    nextSourceId = sources[0].id;
+            }
+            root.setSource(nextSourceId);
+            root.refreshDetailSubscription();
         }
-    }
-
-    W.SettingsGetQuery {
-        id: settingsCfgQuery
     }
 
     function currentSourceConfig() {
@@ -262,32 +310,30 @@ MD.Page {
         return null;
     }
 
-    function currentSourceHasSettings() {
+    function currentSourceLoginAction() {
         const c = root.currentSourceConfig();
-        return !!(c && ((c.settings && c.settings.length > 0)
-            || (c.actions && c.actions.length > 0)
-            || (c.status && c.status.length > 0)));
+        const actions = c && c.actions ? c.actions : [];
+        for (let i = 0; i < actions.length; ++i) {
+            const kind = Number(actions[i].kind);
+            if ((kind === 2 || kind === 3) && actions[i].requiredForBrowsing === true && (actions[i].visible === undefined || actions[i].visible))
+                return actions[i];
+        }
+        return null;
     }
 
-    function openSourceConfig() {
+    function openRemoteManagement() {
         const c = root.currentSourceConfig();
         if (!c)
             return;
-        const pid = c.id;
-        const p = settingsCfgQuery.plugins ? settingsCfgQuery.plugins[pid] : undefined;
-        MD.Util.showPopup('waywallen.ui/PagePopup', {
-            source: 'waywallen.ui/PluginSettingsPage',
+        if (root.managePresentation?.active)
+            return;
+        root.managePresentation = root.Window.window.presentPopup('waywallen.ui/PagePopup', {
+            source: 'waywallen.ui/RemoteManagePage',
             props: {
-                pluginName: pid,
-                displayName: (c.displayName && c.displayName.length > 0) ? c.displayName : (c.name || pid),
-                schemaList: c.settings || [],
-                actionList: c.actions || [],
-                statusList: c.status || [],
-                allCurrentPlugins: settingsCfgQuery.plugins || ({}),
-                currentGlobal: settingsCfgQuery.global || ({}),
-                currentValues: p || ({})
+                sourceId: c.id,
+                displayName: (c.displayName && c.displayName.length > 0) ? c.displayName : (c.name || c.id)
             }
-        }, root.Window.window);
+        });
     }
 
     W.RemoteSearchQuery {
@@ -298,10 +344,12 @@ MD.Page {
         id: m_filter_dialog
         parent: T.Overlay.overlay
         anchors.centerIn: parent
-        availableTags: root.sourceTags(root.sourceId)
-        selectedTags: searchQuery.tags
-        onApply: function(tags) {
-            searchQuery.tags = tags;
+        popupWindow: root.Window.window
+        filters: root.sourceFilters(root.sourceId)
+        selectedValues: searchQuery.tags
+        onApply: function (values) {
+            searchQuery.tags = values;
+            discoverState.setFilterValuesFor(root.sourceId, values);
         }
     }
 
@@ -311,34 +359,42 @@ MD.Page {
 
     W.RemoteDownloadQuery {
         id: dlQuery
-        function onUninstalled(sourceId, id) {
-            searchQuery.model.setInstalled(sourceId, id, false);
-            if (root.detailRow && root.detailRow.sourceId === sourceId && root.detailRow.itemId === id) {
-                root.detailRow.installed = false;
-                root.detailState = 0;
-            }
-            W.Action.toast(qsTr("Uninstalled"));
+        function onRemoved(sourceId, id) {
+            W.Action.toast(qsTr("Removed"));
         }
-        function onUninstallFailed(sourceId, id, error) {
-            W.Action.toast(qsTr("Uninstall failed: ") + error);
+        function onRemoveFailed(sourceId, id, error) {
+            W.Action.toast(qsTr("Remove failed: ") + error);
         }
         function onRejected(sourceId, id, error) {
-            if (root.detailRow && root.detailRow.sourceId === sourceId && root.detailRow.itemId === id)
-                root.detailState = 0;
             W.Action.toast(qsTr("Download rejected: ") + error);
+        }
+    }
+
+    W.RemoteSubscriptionQuery {
+        id: subscriptionQuery
+        forwardError: false
+    }
+
+    Connections {
+        target: subscriptionQuery
+        function onStateLoaded(sourceId, id, state, error) {
+            if (error.length > 0)
+                W.Action.toast(qsTr("Couldn't load subscription status: ") + error);
+        }
+        function onSetFinished(sourceId, id, subscribed, accepted, error) {
+            if (accepted) {
+                const message = subscribed ? qsTr("Subscription request accepted") : qsTr("Unsubscribe request accepted");
+                const hint = root.sourceRemoteHint(sourceId);
+                W.Action.toast(hint.length > 0 ? message + "\n" + hint : message);
+            } else {
+                W.Action.toast(qsTr("Subscription update failed: ") + error);
+            }
         }
     }
 
     Connections {
         target: W.Notify
         function onRemoteDownloadProgress(sourceId, id, state, error) {
-            if (state === 3)
-                searchQuery.model.setInstalled(sourceId, id, true);
-            if (root.detailRow && root.detailRow.sourceId === sourceId && root.detailRow.itemId === id) {
-                root.detailState = state;
-                if (state === 3)
-                    root.detailRow.installed = true;
-            }
             if (state === 5 && error.length > 0)
                 W.Action.toast(qsTr("Download failed: ") + error);
         }
@@ -346,9 +402,6 @@ MD.Page {
 
     function reloadAll() {
         availabilityQuery.reload();
-        settingsCfgQuery.reload();
-        if (root.sourceId.length > 0)
-            searchQuery.reload();
     }
 
     Connections {
@@ -357,10 +410,10 @@ MD.Page {
             root.reloadAll();
         }
         function onSettingsChanged() {
-            settingsCfgQuery.reload();
             availabilityQuery.reload();
-            if (root.sourceId.length > 0)
-                searchQuery.reload();
+        }
+        function onPluginStateChanged() {
+            availabilityQuery.reload();
         }
     }
 
@@ -414,24 +467,6 @@ MD.Page {
                         }
                     }
 
-                    MD.IconButton {
-                        id: sourceConfigButton
-                        icon.name: MD.Token.icon.settings
-                        visible: {
-                            const list = availabilityQuery.sources || [];
-                            const id = root.sourceId;
-                            for (let i = 0; i < list.length; ++i) {
-                                const s = list[i];
-                                if (s.id === id)
-                                    return !!((s.settings && s.settings.length > 0)
-                                        || (s.actions && s.actions.length > 0)
-                                        || (s.status && s.status.length > 0));
-                            }
-                            return false;
-                        }
-                        onClicked: root.openSourceConfig()
-                    }
-
                     MD.EmbedChip {
                         id: sortChip
                         visible: root.sortOptions.length > 0
@@ -467,7 +502,7 @@ MD.Page {
 
                     MD.ActionToolBar {
                         Layout.fillWidth: true
-                        actions: [tweakAction, filterAction, refreshAction]
+                        actions: [manageAction, tweakAction, filterAction, refreshAction]
                     }
                 }
 
@@ -497,17 +532,18 @@ MD.Page {
                         rightMargin: 8
 
                         readonly property real _availableWidth: Math.max(0, width - leftMargin - rightMargin)
-                        readonly property int _cols: Math.max(1, Math.floor(_availableWidth / discoverTweakState.itemSize))
+                        readonly property int _cols: Math.max(1, Math.floor(_availableWidth / root.discoverTweakState.itemSize))
                         readonly property real _stretchedItemWidth: _availableWidth / _cols
-                        readonly property bool _fillCell: discoverTweakState.layoutMode === discoverTweakState.layoutFillCell
-                        readonly property real _displayItemWidth: _fillCell ? _stretchedItemWidth : Math.min(discoverTweakState.itemSize, _stretchedItemWidth)
-                        readonly property real _displayItemHeight: _displayItemWidth / Math.max(discoverTweakState.itemAspectRatio, 0.1)
+                        readonly property bool _fillCell: root.discoverTweakState.layoutMode === root.discoverTweakState.layoutFillCell
+                        readonly property real _displayItemWidth: _fillCell ? _stretchedItemWidth : Math.min(root.discoverTweakState.itemSize, _stretchedItemWidth)
+                        readonly property real _displayItemHeight: _displayItemWidth / Math.max(root.discoverTweakState.itemAspectRatio, 0.1)
                         cellWidth: _stretchedItemWidth
-                        cellHeight: _fillCell ? _displayItemHeight : discoverTweakState.itemHeight
+                        cellHeight: _fillCell ? _displayItemHeight : root.discoverTweakState.itemHeight
 
                         model: searchQuery.model
 
                         delegate: RemoteCard {
+                            remoteCapability: root.sourceCapability(root.sourceId)
                             itemWidth: m_grid._displayItemWidth
                             itemHeight: m_grid._displayItemHeight
                             onClicked: {
@@ -540,7 +576,23 @@ MD.Page {
                         spacing: 12
 
                         readonly property bool hasError: !searchQuery.querying && searchQuery.errorText.length > 0
-                        readonly property bool needsSetup: hasError && root.currentSourceHasSettings()
+                        readonly property var loginAction: root.currentSourceLoginAction()
+                        readonly property bool needsLogin: loginAction !== null
+                        readonly property string loginLabel: {
+                            const label = loginAction ? String(loginAction.label ?? "").trim() : "";
+                            return label.length > 0 ? label : qsTr("Log in to %1").arg(root.sourceName(root.sourceId));
+                        }
+                        readonly property string loginDescription: {
+                            const browseDescription = loginAction ? String(loginAction.browseDescription ?? "").trim() : "";
+                            if (browseDescription.length > 0)
+                                return browseDescription;
+                            const description = loginAction ? String(loginAction.description ?? "").trim() : "";
+                            return description.length > 0 ? description : qsTr("Log in to start browsing.");
+                        }
+                        readonly property string loginButtonLabel: {
+                            const label = loginAction ? String(loginAction.browseButtonLabel ?? "").trim() : "";
+                            return label.length > 0 ? label : qsTr("Log in");
+                        }
 
                         MD.BusyIndicator {
                             Layout.alignment: Qt.AlignHCenter
@@ -548,21 +600,18 @@ MD.Page {
                             visible: running
                         }
 
-                        // Setup / error prompt (replaces the ephemeral toast).
                         MD.Icon {
                             Layout.alignment: Qt.AlignHCenter
-                            visible: parent.needsSetup
-                            name: MD.Token.icon.settings
+                            visible: parent.needsLogin
+                            name: MD.Token.icon.person
                             size: 40
                             color: MD.Token.color.on_surface_variant
                         }
                         MD.Label {
                             Layout.fillWidth: true
                             horizontalAlignment: Text.AlignHCenter
-                            visible: parent.hasError
-                            text: parent.needsSetup
-                                ? qsTr("%1 needs to be set up").arg(root.sourceName(root.sourceId))
-                                : qsTr("Couldn't load this source")
+                            visible: parent.needsLogin || parent.hasError
+                            text: parent.needsLogin ? parent.loginLabel : qsTr("Couldn't load this source")
                             typescale: MD.Token.typescale.title_medium
                             color: MD.Token.color.on_surface
                             wrapMode: Text.WordWrap
@@ -570,27 +619,26 @@ MD.Page {
                         MD.Label {
                             Layout.fillWidth: true
                             horizontalAlignment: Text.AlignHCenter
-                            visible: parent.hasError
-                            text: parent.needsSetup
-                                ? qsTr("Add the required settings to start browsing.")
-                                : searchQuery.errorText
+                            visible: parent.needsLogin || parent.hasError
+                            text: parent.needsLogin ? parent.loginDescription : searchQuery.errorText
                             typescale: MD.Token.typescale.body_medium
                             color: MD.Token.color.on_surface_variant
+                            font.capitalization: Font.MixedCase
                             wrapMode: Text.WordWrap
                             maximumLineCount: 4
                             elide: Text.ElideRight
                         }
                         MD.Button {
                             Layout.alignment: Qt.AlignHCenter
-                            visible: parent.needsSetup
-                            text: qsTr("Set up %1").arg(root.sourceName(root.sourceId))
+                            visible: parent.needsLogin
+                            text: parent.loginButtonLabel
                             mdState.type: MD.Enum.BtFilledTonal
-                            onClicked: root.openSourceConfig()
+                            onClicked: root.openRemoteManagement()
                         }
 
                         MD.Label {
                             Layout.alignment: Qt.AlignHCenter
-                            visible: !searchQuery.querying && searchQuery.errorText.length === 0
+                            visible: !searchQuery.querying && !parent.needsLogin && searchQuery.errorText.length === 0
                             text: qsTr("No wallpapers found")
                             typescale: MD.Token.typescale.body_large
                             color: MD.Token.color.on_surface_variant
@@ -601,196 +649,35 @@ MD.Page {
         }
 
         MD.Pane {
-            Layout.preferredWidth: 300
-            Layout.maximumWidth: 300
+            Layout.preferredWidth: root.detailRow !== null ? 280 : 0
+            Layout.maximumWidth: 280
             Layout.fillHeight: true
             visible: root.detailRow !== null
             radius: root.MD.MProp.page.backgroundRadius
             padding: 0
             showBackground: true
 
-            contentItem: ColumnLayout {
-                spacing: 12
+            contentItem: RemoteDetailPanel {
+                item: root.detailRow
+                details: detailsQuery
+                remoteCapability: root.detailRow ? root.sourceCapability(root.detailRow.sourceId) : 0
+                remoteHint: root.detailRow ? root.sourceRemoteHint(root.detailRow.sourceId) : ""
+                downloadState: Number(root.detailRow?.acquisitionState ?? 0)
+                subscriptionState: Number(root.detailRow?.acquisitionState ?? 0)
 
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.topMargin: 16
-                    Layout.leftMargin: 16
-                    Layout.rightMargin: 16
-                    Layout.preferredHeight: width * 0.56
-                    radius: MD.Token.shape.corner.medium
-                    clip: true
-                    color: MD.Token.color.surface_container
-
-                    AnimatedImage {
-                        anchors.fill: parent
-                        source: root.detailRow ? root.detailRow.previewUrl : ""
-                        fillMode: Image.PreserveAspectCrop
-                        horizontalAlignment: Image.AlignHCenter
-                        verticalAlignment: Image.AlignVCenter
-                        smooth: true
-                        cache: true
-                        playing: true
-                    }
+                onBack: root.closeDetail()
+                onShowInfo: root.openInfo()
+                onDownloadRequested: {
+                    if (!root.detailRow)
+                        return;
+                    dlQuery.start(root.detailRow.sourceId, root.detailRow.itemId);
                 }
-
-                Flickable {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    Layout.leftMargin: 16
-                    Layout.rightMargin: 16
-                    clip: true
-                    contentWidth: width
-                    contentHeight: m_info.implicitHeight
-                    boundsBehavior: Flickable.StopAtBounds
-
-                    ColumnLayout {
-                        id: m_info
-                        width: parent.width
-                        spacing: 8
-
-                        MD.Label {
-                            Layout.fillWidth: true
-                            text: root.detailRow ? root.detailRow.title : ""
-                            typescale: MD.Token.typescale.title_medium
-                            wrapMode: Text.WordWrap
-                        }
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 8
-
-                            MD.Label {
-                                Layout.fillWidth: true
-                                text: root.detailRow ? root.detailRow.wpType : ""
-                                typescale: MD.Token.typescale.label_large
-                                color: MD.Token.color.on_surface_variant
-                                maximumLineCount: 1
-                                elide: Text.ElideRight
-                            }
-
-                            MD.ActionToolBar {
-                                actions: [infoAction, closeDetailAction]
-                                iconDelegate: MD.SmallIconButton {
-                                    action: MD.ToolBarLayout.action
-                                }
-                            }
-                        }
-
-                        MD.Label {
-                            Layout.fillWidth: true
-                            text: root.detailRow ? qsTr("by ") + root.detailRow.author : ""
-                            visible: root.detailRow && root.detailRow.author.length > 0
-                            typescale: MD.Token.typescale.body_medium
-                            color: MD.Token.color.on_surface_variant
-                            wrapMode: Text.WordWrap
-                        }
-
-                        GridLayout {
-                            id: m_meta
-                            Layout.fillWidth: true
-                            Layout.topMargin: 4
-                            columns: 2
-                            columnSpacing: 12
-                            rowSpacing: 4
-                            visible: hasResolution || hasSize
-
-                            readonly property bool hasResolution: detailsQuery.width > 0 && detailsQuery.height > 0
-                            readonly property string formattedSize: root.formatSize(detailsQuery.size)
-                            readonly property bool hasSize: formattedSize.length > 0
-
-                            MD.Text {
-                                visible: m_meta.hasResolution
-                                text: "Resolution"
-                                typescale: MD.Token.typescale.label_medium
-                                color: MD.Token.color.on_surface_variant
-                            }
-                            MD.Text {
-                                visible: m_meta.hasResolution
-                                text: detailsQuery.width + "×" + detailsQuery.height
-                                typescale: MD.Token.typescale.body_medium
-                                color: MD.Token.color.on_surface
-                            }
-
-                            MD.Text {
-                                visible: m_meta.hasSize
-                                text: "Size"
-                                typescale: MD.Token.typescale.label_medium
-                                color: MD.Token.color.on_surface_variant
-                            }
-                            MD.Text {
-                                visible: m_meta.hasSize
-                                text: m_meta.formattedSize
-                                typescale: MD.Token.typescale.body_medium
-                                color: MD.Token.color.on_surface
-                            }
-                        }
-
-                        Flow {
-                            Layout.fillWidth: true
-                            Layout.topMargin: 4
-                            spacing: 4
-                            visible: detailsQuery.tags.length > 0
-
-                            Repeater {
-                                model: detailsQuery.tags
-                                delegate: W.Tag {
-                                    required property string modelData
-                                    text: modelData
-                                }
-                            }
-                        }
-
-                        MD.Divider {
-                            Layout.fillWidth: true
-                            Layout.topMargin: 4
-                            visible: detailsQuery.description.length > 0 || detailsQuery.querying
-                        }
-
-                        MD.Text {
-                            visible: detailsQuery.description.length > 0 || detailsQuery.querying
-                            text: "Description"
-                            typescale: MD.Token.typescale.label_large
-                            color: MD.Token.color.on_surface_variant
-                        }
-                        MD.Label {
-                            Layout.fillWidth: true
-                            text: detailsQuery.querying ? qsTr("Loading…") : detailsQuery.description
-                            visible: text.length > 0
-                            typescale: MD.Token.typescale.body_medium
-                            color: MD.Token.color.on_surface
-                            wrapMode: Text.WordWrap
-                        }
-                    }
+                onRemoveRequested: {
+                    if (root.detailRow)
+                        dlQuery.remove(root.detailRow.sourceId, root.detailRow.itemId);
                 }
-
-                MD.Button {
-                    Layout.fillWidth: true
-                    Layout.leftMargin: 16
-                    Layout.rightMargin: 16
-                    Layout.bottomMargin: 16
-                    mdState.type: root.detailState === 3 ? MD.Enum.BtFilledTonal : MD.Enum.BtFilled
-                    enabled: root.detailState === 0 || root.detailState === 3
-                    text: {
-                        switch (root.detailState) {
-                        case 1: return qsTr("Pending");
-                        case 2: return qsTr("Downloading");
-                        case 3: return qsTr("Uninstall");
-                        case 4: return qsTr("Retry");
-                        case 5: return qsTr("Retry");
-                        default: return qsTr("Download");
-                        }
-                    }
-                    onClicked: {
-                        if (!root.detailRow) return;
-                        if (root.detailState === 3) {
-                            dlQuery.uninstall(root.detailRow.sourceId, root.detailRow.itemId);
-                        } else {
-                            root.detailState = 1;
-                            dlQuery.start(root.detailRow.sourceId, root.detailRow.itemId);
-                        }
-                    }
-                }
+                onSubscriptionRefreshRequested: root.refreshDetailSubscription()
+                onSubscriptionChangeRequested: subscribed => root.setDetailSubscription(subscribed)
             }
         }
     }
@@ -800,10 +687,7 @@ MD.Page {
 
         W.TweakSheet {
             popupParent: root
-            tweak: discoverTweakState
-            onReleased: function (sheet) {
-                root.releaseDiscoverTweakSheet(sheet);
-            }
+            tweak: root.discoverTweakState
         }
     }
 }

@@ -4,13 +4,15 @@ default-members = ["."]
 
 [package]
 name = "waywallen"
-version = "0.2.5"
+version = "0.3.1"
 edition = "2021"
 build = "build.rs"
 
 [build-dependencies]
 wayproto-gen = { path = "tools/wayproto-gen" }
 prost-build = "0.13"
+cc = "1"
+pkg-config = "0.3"
 
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
@@ -38,12 +40,10 @@ ash = "0.38"
 toml = "0.8"
 glob = "0.3"
 zip = { version = "2", default-features = false, features = ["deflate", "zstd"] }
-# Steam QR auth + DepotDownloader
 base64 = "0.22"
-flate2 = "1"
 qrcode = "0.14"
 mlua = { version = "0.10", features = ["lua54", "vendored", "send", "async", "serialize"] }
-mlua-extra = { git = "https://github.com/hypengw/mlua-extra", rev = "16fc20f1445e6b723da78fb08b236dfeaad10db0" }
+mlua-extra = { git = "https://github.com/hypengw/mlua-extra", rev = "df1d282170dd1718b8aeff405638c18cedd435ca" }
 libloading = "0.8"
 zbus = { version = "4", default-features = false, features = ["tokio"] }
 sea-orm = { version = "1.1", default-features = false, features = [

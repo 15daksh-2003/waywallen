@@ -24,7 +24,7 @@ pub struct WallpaperEntry {
     /// Source-assigned tags. Case-insensitive deduped at the DB layer.
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Stable external identifier (e.g. Wallpaper Engine `workshopid`).
+    /// Stable identifier assigned by the source plugin.
     #[serde(default)]
     pub external_id: Option<String>,
     /// File size in bytes.

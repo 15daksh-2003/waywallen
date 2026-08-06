@@ -5,12 +5,22 @@ import Qcm.Material as MD
 
 MD.Page {
     id: root
-    title: "Remote info"
+    title: qsTr("Remote info")
     scrolling: !infoFlick.atYBeginning
 
-    property var item: null
+    property var itemStore: null
+    readonly property var item: itemStore?.item ?? null
     property var details: null
     property string sourceName: ""
+    property int remoteCapability: 0
+    property string remoteHint: ""
+
+    // A source that cannot name an item while listing it may still name it once
+    // the item is opened, so let a detail lookup fill in what the row lacks.
+    readonly property string authorName: {
+        const own = String(root.item?.author ?? "");
+        return own.length > 0 ? own : String(root.details?.author ?? "");
+    }
 
     readonly property string formattedSize: formatSize(details?.size)
     readonly property string tagsText: formatList(details?.tags)
@@ -63,6 +73,15 @@ MD.Page {
         return num.toFixed(1) + " " + unit;
     }
 
+    function subscriptionText(state) {
+        switch (Number(state ?? 0)) {
+        case 1: return qsTr("Unsubscribed");
+        case 2: return qsTr("Subscribed");
+        case 3: return qsTr("Updating");
+        default: return qsTr("Unknown");
+        }
+    }
+
     component InfoLabel: MD.Text {
         required property string label
 
@@ -101,25 +120,25 @@ MD.Page {
 
             InfoLabel {
                 visible: root.hasText(root.sourceName)
-                label: "Source"
+                label: qsTr("Source")
             }
             InfoValue {
                 visible: root.hasText(root.sourceName)
                 text: root.sourceName
             }
 
-            InfoLabel { label: "Source ID" }
+            InfoLabel { label: qsTr("Source ID") }
             InfoValue { text: root.value(root.item?.sourceId) }
 
-            InfoLabel { label: "Item ID" }
+            InfoLabel { label: qsTr("Item ID") }
             InfoValue { text: root.value(root.item?.itemId) }
 
-            InfoLabel { label: "Title" }
+            InfoLabel { label: qsTr("Title") }
             InfoValue { text: root.value(root.item?.title) }
 
             InfoLabel {
                 visible: root.hasText(root.item?.wpType)
-                label: "Type"
+                label: qsTr("Type")
             }
             InfoValue {
                 visible: root.hasText(root.item?.wpType)
@@ -127,17 +146,17 @@ MD.Page {
             }
 
             InfoLabel {
-                visible: root.hasText(root.item?.author)
-                label: "Author"
+                visible: root.authorName.length > 0
+                label: qsTr("Author")
             }
             InfoValue {
-                visible: root.hasText(root.item?.author)
-                text: root.value(root.item?.author)
+                visible: root.authorName.length > 0
+                text: root.authorName
             }
 
             InfoLabel {
                 visible: root.hasText(root.item?.previewUrl)
-                label: "Preview"
+                label: qsTr("Preview")
             }
             InfoValue {
                 visible: root.hasText(root.item?.previewUrl)
@@ -146,7 +165,7 @@ MD.Page {
 
             InfoLabel {
                 visible: root.hasText(root.formattedSize)
-                label: "Size"
+                label: qsTr("Size")
             }
             InfoValue {
                 visible: root.hasText(root.formattedSize)
@@ -155,7 +174,7 @@ MD.Page {
 
             InfoLabel {
                 visible: Number(root.details?.width ?? 0) > 0
-                label: "Width"
+                label: qsTr("Width")
             }
             InfoValue {
                 visible: Number(root.details?.width ?? 0) > 0
@@ -164,19 +183,43 @@ MD.Page {
 
             InfoLabel {
                 visible: Number(root.details?.height ?? 0) > 0
-                label: "Height"
+                label: qsTr("Height")
             }
             InfoValue {
                 visible: Number(root.details?.height ?? 0) > 0
                 text: String(root.details?.height ?? 0)
             }
 
-            InfoLabel { label: "Installed" }
-            InfoValue { text: root.item?.installed ? "true" : "false" }
+            InfoLabel {
+                visible: root.remoteCapability === 1
+                label: qsTr("Downloaded")
+            }
+            InfoValue {
+                visible: root.remoteCapability === 1
+                text: Number(root.item?.acquisitionState ?? 0) === 3 ? "true" : "false"
+            }
+
+            InfoLabel {
+                visible: root.remoteCapability === 2
+                label: qsTr("Subscription")
+            }
+            InfoValue {
+                visible: root.remoteCapability === 2
+                text: root.subscriptionText(root.item?.acquisitionState)
+            }
+
+            InfoLabel {
+                visible: root.hasText(root.remoteHint)
+                label: qsTr("Acquisition")
+            }
+            InfoValue {
+                visible: root.hasText(root.remoteHint)
+                text: root.remoteHint
+            }
 
             InfoLabel {
                 visible: root.hasText(root.tagsText)
-                label: "Tags"
+                label: qsTr("Tags")
             }
             InfoValue {
                 visible: root.hasText(root.tagsText)
@@ -185,7 +228,7 @@ MD.Page {
 
             InfoLabel {
                 visible: root.hasText(root.details?.description)
-                label: "Description"
+                label: qsTr("Description")
             }
             InfoValue {
                 visible: root.hasText(root.details?.description)

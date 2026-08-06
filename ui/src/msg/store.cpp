@@ -15,7 +15,7 @@ auto store_instance() -> AppStore* {
 }
 } // namespace
 
-AppStore::AppStore(QObject* parent): QObject(parent), wallpapers() {}
+AppStore::AppStore(QObject* parent): QObject(parent), wallpapers(), remotes() {}
 
 AppStore::~AppStore() {}
 
@@ -25,6 +25,15 @@ AppStore* AppStore::create(QQmlEngine*, QJSEngine*) {
     auto self = store_instance();
     QJSEngine::setObjectOwnership(self, QJSEngine::ObjectOwnership::CppOwnership);
     return self;
+}
+
+void AppStore::setRemoteAcquisitionState(const QString& sourceId, const QString& itemId,
+                                         int state) {
+    auto key = model::remoteKey(sourceId, itemId);
+    auto row = remotes.store_query(key);
+    if (! row || row->acquisitionState == state) return;
+    row->acquisitionState = state;
+    remotes.store_changed_callback(std::span { &key, 1 });
 }
 
 } // namespace waywallen

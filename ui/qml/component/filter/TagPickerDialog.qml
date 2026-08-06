@@ -11,9 +11,10 @@ MD.Dialog {
 
     property var allTags: []
     property var selected: []
+    property string dialogTitle: qsTr("Select tags")
     signal commit(var tags)
 
-    title: qsTr("Select tags")
+    title: dialogTitle
     parent: T.Overlay.overlay
     horizontalPadding: 16
     implicitWidth: Math.min(330, parent ? parent.width - 48 : 330)

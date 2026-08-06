@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build waywallen end-to-end and produce a single-file AppImage at:
-#     <repo>/waywallen-x86_64.AppImage
+#     <repo>/waywallen-<version>-<architecture>.AppImage
 #
 # Audience: users unfamiliar with cmake / cargo / linuxdeploy.
 # Prerequisites:
@@ -23,7 +23,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_NAME="${WAYWALLEN_CONDA_ENV:-waywallen}"
 TMP_DIR="${TMPDIR:-/tmp}"
 WAYWALLEN_DISPLAY_REPO="${WAYWALLEN_DISPLAY_REPO:-https://github.com/waywallen/waywallen-display.git}"
-WAYWALLEN_DISPLAY_REF="${WAYWALLEN_DISPLAY_REF:-9cf9d8d93254bd64483cc14081ef9ee677e6e6a9}"
+WAYWALLEN_DISPLAY_REF="${WAYWALLEN_DISPLAY_REF:-c8632dcb62a0b82bbcb560e2d32b2b5e23ebd81d}"
 APPDIR="$PROJECT_DIR/build/AppDir"
 INSTALL_DIR="$APPDIR/usr"          # AppDir's /usr is the cmake install prefix
 TOOLS_DIR="$PROJECT_DIR/build/_tools"
@@ -31,6 +31,29 @@ WAYWALLEN_DISPLAY_SRC="${WAYWALLEN_DISPLAY_SRC:-$TMP_DIR/waywallen-display-src}"
 
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 fail() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+HOST_ARCH="$(uname -m)"
+case "$HOST_ARCH" in
+    x86_64)
+        APPIMAGE_ARCH="x86_64"
+        CONDA_TARGET="linux-64"
+        CONDA_GBM_ARCH="x86_64"
+        ;;
+    aarch64|arm64)
+        APPIMAGE_ARCH="aarch64"
+        CONDA_TARGET="linux-aarch64"
+        CONDA_GBM_ARCH="aarch64"
+        ;;
+    *) fail "unsupported host architecture: $HOST_ARCH" ;;
+esac
+
+ENV_MERGED_FILE="$PROJECT_DIR/build/environment-${CONDA_TARGET}.yml"
+CONDA_TARGET_PACKAGES=(
+    "clang_${CONDA_TARGET}=22"
+    "clangxx_${CONDA_TARGET}=22"
+    "sysroot_${CONDA_TARGET}=2.28"
+    "mesa-libgbm-devel-conda-${CONDA_GBM_ARCH}=23.1.4"
+)
 
 # ---- Compute the version string baked into the AppImage filename ----
 # Pull the canonical version from Cargo.toml; refine with git metadata so
@@ -59,8 +82,8 @@ fi
 # Clean APPDIR
 rm -rf "$APPDIR"
 
-APPIMAGE_OUT="$PROJECT_DIR/waywallen-$BUILD_TAG-x86_64.AppImage"
-step "Building AppImage tagged as $BUILD_TAG"
+APPIMAGE_OUT="$PROJECT_DIR/waywallen-$BUILD_TAG-$APPIMAGE_ARCH.AppImage"
+step "Building $APPIMAGE_ARCH AppImage tagged as $BUILD_TAG"
 
 # ---- Check required tools ----
 command -v conda >/dev/null \
@@ -71,6 +94,8 @@ command -v curl >/dev/null \
     || fail "curl not found. Install curl first, then re-run."
 command -v git >/dev/null \
     || fail "git not found. Install git first, then re-run."
+command -v python3 >/dev/null \
+    || fail "python3 not found. Install Python 3 first, then re-run."
 
 # ---- Set up the conda environment ----
 # Make `conda activate` available inside this script.
@@ -83,12 +108,52 @@ set -u
 ENV_FILE="$PROJECT_DIR/environment.yml"
 [[ -f "$ENV_FILE" ]] || fail "missing $ENV_FILE"
 
+step "Writing conda env: $ENV_MERGED_FILE"
+mkdir -p "$(dirname "$ENV_MERGED_FILE")"
+python3 - "$ENV_FILE" "$ENV_MERGED_FILE" "${CONDA_TARGET_PACKAGES[@]}" <<'PY'
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+extras = sys.argv[3:]
+
+lines = src.read_text().splitlines()
+existing = set()
+in_dependencies = False
+for raw in lines:
+    line = raw.split("#", 1)[0].rstrip()
+    if line.strip() == "dependencies:":
+        in_dependencies = True
+        continue
+    if not in_dependencies:
+        continue
+    stripped = line.strip()
+    if stripped.startswith("- "):
+        existing.add(stripped[2:].strip())
+
+extras = [pkg for pkg in extras if pkg not in existing]
+if extras:
+    insert_at = len(lines)
+    for idx, raw in enumerate(lines):
+        if raw.strip() == "- llvm-tools=22":
+            insert_at = idx + 1
+            break
+
+    additions = [f"  - {pkg}" for pkg in extras]
+    if insert_at < len(lines) and lines[insert_at].strip():
+        additions.append("")
+    lines[insert_at:insert_at] = additions
+
+dst.write_text("\n".join(lines) + "\n")
+PY
+
 if conda env list | awk 'NF && $1 !~ /^#/ {print $1}' | grep -qx "$ENV_NAME"; then
     step "Updating conda env: $ENV_NAME (sync to environment.yml)"
-    conda env update -n "$ENV_NAME" -f "$ENV_FILE" --prune
+    conda env update -n "$ENV_NAME" -f "$ENV_MERGED_FILE" --prune
 else
     step "Creating conda env: $ENV_NAME (install per environment.yml)"
-    conda env create -n "$ENV_NAME" -f "$ENV_FILE"
+    conda env create -n "$ENV_NAME" -f "$ENV_MERGED_FILE"
 fi
 
 step "Activating env: $ENV_NAME"
@@ -162,11 +227,12 @@ fi
 git -C "$WAYWALLEN_DISPLAY_SRC" fetch --tags origin "$WAYWALLEN_DISPLAY_REF" \
     || git -C "$WAYWALLEN_DISPLAY_SRC" fetch --tags origin
 git -C "$WAYWALLEN_DISPLAY_SRC" checkout --detach "$WAYWALLEN_DISPLAY_REF"
+pushd "$WAYWALLEN_DISPLAY_SRC"
 cargo build \
-    --manifest-path "$WAYWALLEN_DISPLAY_SRC/Cargo.toml" \
     --bin waywallen-layer-shell \
     --release \
     --locked
+popd
 install -Dm755 \
     "$WAYWALLEN_DISPLAY_SRC/target/release/waywallen-layer-shell" \
     "$INSTALL_DIR/bin/waywallen-layer-shell"
@@ -175,9 +241,9 @@ popd
 
 # # ---- Fetch linuxdeploy / appimagetool (cached on first run under build/_tools) ----
 mkdir -p "$TOOLS_DIR"
-LINUXDEPLOY="$TOOLS_DIR/linuxdeploy-x86_64.AppImage"
+LINUXDEPLOY="$TOOLS_DIR/linuxdeploy-$APPIMAGE_ARCH.AppImage"
 LINUXDEPLOY_QT="$TOOLS_DIR/linuxdeploy_plugin_qt"
-APPIMAGETOOL="$TOOLS_DIR/appimagetool-x86_64.AppImage"
+APPIMAGETOOL="$TOOLS_DIR/appimagetool-$APPIMAGE_ARCH.AppImage"
 download_if_missing() {
     local url="$1" dest="$2"
     if [[ ! -x "$dest" ]]; then
@@ -187,13 +253,13 @@ download_if_missing() {
     fi
 }
 download_if_missing \
-    "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage" \
+    "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-$APPIMAGE_ARCH.AppImage" \
     "$LINUXDEPLOY"
 download_if_missing \
-    "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage" \
+    "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-$APPIMAGE_ARCH.AppImage" \
     "$LINUXDEPLOY_QT"
 download_if_missing \
-    "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" \
+    "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$APPIMAGE_ARCH.AppImage" \
     "$APPIMAGETOOL"
 
 # ---- Custom AppRun (launches the daemon and points it at the bundled UI / display backend) ----
@@ -287,7 +353,7 @@ done
 step "Packing AppImage"
 rm -f "$APPIMAGE_OUT"
 PATH="$TOOLS_DIR:$PATH" \
-ARCH=x86_64 \
+ARCH="$APPIMAGE_ARCH" \
 "$APPIMAGETOOL" --appimage-extract-and-run \
     --no-appstream \
     "$APPDIR" "$APPIMAGE_OUT"

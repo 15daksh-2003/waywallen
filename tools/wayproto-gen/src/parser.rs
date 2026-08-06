@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 #[derive(Debug)]
@@ -23,6 +24,7 @@ fn err<T>(pos: usize, msg: impl Into<String>) -> Result<T, ParseError> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArgType {
+    Bool,
     U32,
     I32,
     U64,
@@ -33,11 +35,14 @@ pub enum ArgType {
     Array(Box<ArgType>),
     KvList,
     Rect,
+    Named(String),
+    Enum(String),
 }
 
 impl ArgType {
     fn parse(s: &str) -> Option<Self> {
         Some(match s {
+            "bool" => Self::Bool,
             "u32" => Self::U32,
             "i32" => Self::I32,
             "u64" => Self::U64,
@@ -51,6 +56,24 @@ impl ArgType {
             _ => return None,
         })
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct NamedStruct {
+    pub name: String,
+    pub fields: Vec<Arg>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NamedEnum {
+    pub name: String,
+    pub entries: Vec<EnumEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumEntry {
+    pub name: String,
+    pub value: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +111,8 @@ pub struct Protocol {
     pub name: String,
     pub version: u32,
     pub inbound_kind: InboundKind,
+    pub enums: Vec<NamedEnum>,
+    pub structs: Vec<NamedStruct>,
     pub requests: Vec<Message>,
     pub events: Vec<Message>,
 }
@@ -138,6 +163,53 @@ pub fn parse_protocol(src: &str) -> Result<Protocol, ParseError> {
             msg: "protocol version not u32".into(),
         })?;
 
+    let enum_nodes: Vec<&Node> = root
+        .children
+        .iter()
+        .filter(|child| child.name == "enum")
+        .collect();
+    let mut enum_names = HashSet::new();
+    for node in &enum_nodes {
+        let enum_name = node.attr("name").ok_or_else(|| ParseError {
+            pos: 0,
+            msg: "<enum> missing name".into(),
+        })?;
+        if !enum_names.insert(enum_name.to_string()) {
+            return err(0, format!("duplicate enum {enum_name}"));
+        }
+    }
+    let enums = enum_nodes
+        .into_iter()
+        .map(parse_enum)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let struct_nodes: Vec<&Node> = root
+        .children
+        .iter()
+        .filter(|child| child.name == "struct")
+        .collect();
+    let mut struct_names = HashSet::new();
+    for node in &struct_nodes {
+        let struct_name = node.attr("name").ok_or_else(|| ParseError {
+            pos: 0,
+            msg: "<struct> missing name".into(),
+        })?;
+        if !struct_names.insert(struct_name.to_string()) {
+            return err(0, format!("duplicate struct {struct_name}"));
+        }
+        if enum_names.contains(struct_name) {
+            return err(
+                0,
+                format!("type {struct_name} is both an enum and a struct"),
+            );
+        }
+    }
+    let parsed_structs = struct_nodes
+        .into_iter()
+        .map(|node| parse_struct(node, &struct_names, &enum_names))
+        .collect::<Result<Vec<_>, _>>()?;
+    let structs = order_structs(parsed_structs)?;
+
     let mut requests = Vec::new();
     let mut events = Vec::new();
     let mut inbound_kind: Option<InboundKind> = None;
@@ -145,24 +217,137 @@ pub fn parse_protocol(src: &str) -> Result<Protocol, ParseError> {
         match child.name.as_str() {
             "request" => {
                 set_inbound_kind(&mut inbound_kind, InboundKind::Request)?;
-                requests.push(parse_message(child)?);
+                requests.push(parse_message(child, &struct_names, &enum_names)?);
             }
             "event_in" => {
                 set_inbound_kind(&mut inbound_kind, InboundKind::EventIn)?;
-                requests.push(parse_message(child)?);
+                requests.push(parse_message(child, &struct_names, &enum_names)?);
             }
-            "event" => events.push(parse_message(child)?),
+            "event" => events.push(parse_message(child, &struct_names, &enum_names)?),
+            "enum" | "struct" => {}
             other => return err(0, format!("unknown top-level element <{other}>")),
         }
     }
+
+    validate_fd_paths(&requests, &structs)?;
+    validate_fd_paths(&events, &structs)?;
 
     Ok(Protocol {
         name,
         version,
         inbound_kind: inbound_kind.unwrap_or(InboundKind::Request),
+        enums,
+        structs,
         requests,
         events,
     })
+}
+
+fn validate_fd_paths(messages: &[Message], structs: &[NamedStruct]) -> Result<(), ParseError> {
+    let structs: HashMap<&str, &NamedStruct> = structs
+        .iter()
+        .map(|item| (item.name.as_str(), item))
+        .collect();
+
+    for message in messages {
+        let FdSpec::Product(paths) = &message.fds else {
+            continue;
+        };
+        for path in paths {
+            let mut segments = path.split('.');
+            let root = segments.next().expect("validated non-empty fd path");
+            let mut ty = &message
+                .args
+                .iter()
+                .find(|arg| arg.name == root)
+                .ok_or_else(|| ParseError {
+                    pos: 0,
+                    msg: format!(
+                        "count_expr path {path} does not start with a field of message {}",
+                        message.name
+                    ),
+                })?
+                .ty;
+
+            for segment in segments {
+                let ArgType::Named(struct_name) = ty else {
+                    return err(
+                        0,
+                        format!("count_expr path {path} traverses non-struct field {segment}"),
+                    );
+                };
+                let item = structs
+                    .get(struct_name.as_str())
+                    .expect("validated named struct reference");
+                ty = &item
+                    .fields
+                    .iter()
+                    .find(|field| field.name == segment)
+                    .ok_or_else(|| ParseError {
+                        pos: 0,
+                        msg: format!(
+                            "count_expr path {path} has no field {segment} in struct {struct_name}"
+                        ),
+                    })?
+                    .ty;
+            }
+
+            if !matches!(ty, ArgType::U32 | ArgType::U64) {
+                return err(
+                    0,
+                    format!("count_expr path {path} must resolve to u32 or u64"),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_enum(node: &Node) -> Result<NamedEnum, ParseError> {
+    let name = node
+        .attr("name")
+        .ok_or_else(|| ParseError {
+            pos: 0,
+            msg: "<enum> missing name".into(),
+        })?
+        .to_string();
+    let mut entries = Vec::new();
+    let mut entry_names = HashSet::new();
+    let mut entry_values = HashSet::new();
+    for child in &node.children {
+        if child.name != "entry" {
+            return err(0, format!("unknown enum child <{}>", child.name));
+        }
+        let entry_name = child.attr("name").ok_or_else(|| ParseError {
+            pos: 0,
+            msg: "<entry> missing name".into(),
+        })?;
+        if !entry_names.insert(entry_name.to_string()) {
+            return err(0, format!("duplicate entry {entry_name} in enum {name}"));
+        }
+        let value = child
+            .attr("value")
+            .ok_or_else(|| ParseError {
+                pos: 0,
+                msg: "<entry> missing value".into(),
+            })?
+            .parse::<u32>()
+            .map_err(|_| ParseError {
+                pos: 0,
+                msg: format!("entry {entry_name} value is not u32"),
+            })?;
+        if !entry_values.insert(value) {
+            return err(0, format!("duplicate value {value} in enum {name}"));
+        }
+        entries.push(EnumEntry {
+            name: entry_name.to_string(),
+            value,
+        });
+    }
+    if entries.is_empty() {
+        return err(0, format!("enum {name} must contain at least one entry"));
+    }
+    Ok(NamedEnum { name, entries })
 }
 
 fn set_inbound_kind(slot: &mut Option<InboundKind>, k: InboundKind) -> Result<(), ParseError> {
@@ -178,7 +363,106 @@ fn set_inbound_kind(slot: &mut Option<InboundKind>, k: InboundKind) -> Result<()
     }
 }
 
-fn parse_message(node: &Node) -> Result<Message, ParseError> {
+fn parse_struct(
+    node: &Node,
+    struct_names: &HashSet<String>,
+    enum_names: &HashSet<String>,
+) -> Result<NamedStruct, ParseError> {
+    let name = node
+        .attr("name")
+        .ok_or_else(|| ParseError {
+            pos: 0,
+            msg: "<struct> missing name".into(),
+        })?
+        .to_string();
+    let mut fields = Vec::new();
+    let mut field_names = HashSet::new();
+    for child in &node.children {
+        if child.name != "field" {
+            return err(0, format!("unknown struct child <{}>", child.name));
+        }
+        let field = parse_typed_field(child, struct_names, enum_names)?;
+        if !field_names.insert(field.name.clone()) {
+            return err(
+                0,
+                format!("duplicate field {} in struct {name}", field.name),
+            );
+        }
+        if !matches!(
+            field.ty,
+            ArgType::Bool
+                | ArgType::U32
+                | ArgType::I32
+                | ArgType::U64
+                | ArgType::I64
+                | ArgType::F32
+                | ArgType::F64
+                | ArgType::String
+                | ArgType::Array(_)
+                | ArgType::KvList
+                | ArgType::Rect
+                | ArgType::Named(_)
+                | ArgType::Enum(_)
+        ) {
+            return err(
+                0,
+                format!("struct field {} uses unsupported owned type", field.name),
+            );
+        }
+        fields.push(field);
+    }
+    if fields.is_empty() {
+        return err(0, format!("struct {name} must contain at least one field"));
+    }
+    Ok(NamedStruct { name, fields })
+}
+
+fn order_structs(structs: Vec<NamedStruct>) -> Result<Vec<NamedStruct>, ParseError> {
+    fn visit(
+        name: &str,
+        by_name: &HashMap<String, NamedStruct>,
+        visiting: &mut HashSet<String>,
+        visited: &mut HashSet<String>,
+        out: &mut Vec<NamedStruct>,
+    ) -> Result<(), ParseError> {
+        if visited.contains(name) {
+            return Ok(());
+        }
+        if !visiting.insert(name.to_string()) {
+            return err(0, format!("recursive struct reference involving {name}"));
+        }
+        let item = by_name.get(name).expect("validated struct name");
+        for field in &item.fields {
+            if let ArgType::Named(dependency) = &field.ty {
+                visit(dependency, by_name, visiting, visited, out)?;
+            }
+        }
+        visiting.remove(name);
+        visited.insert(name.to_string());
+        out.push(item.clone());
+        Ok(())
+    }
+
+    let by_name: HashMap<String, NamedStruct> = structs
+        .into_iter()
+        .map(|item| (item.name.clone(), item))
+        .collect();
+    let mut names: Vec<String> = by_name.keys().cloned().collect();
+    names.sort();
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        visit(&name, &by_name, &mut visiting, &mut visited, &mut out)?;
+    }
+    Ok(out)
+}
+
+fn parse_message(
+    node: &Node,
+    struct_names: &HashSet<String>,
+    enum_names: &HashSet<String>,
+) -> Result<Message, ParseError> {
     let name = node
         .attr("name")
         .ok_or_else(|| ParseError {
@@ -202,7 +486,7 @@ fn parse_message(node: &Node) -> Result<Message, ParseError> {
     let mut fds = FdSpec::None;
     for child in &node.children {
         match child.name.as_str() {
-            "arg" => args.push(parse_arg(child)?),
+            "arg" => args.push(parse_typed_field(child, struct_names, enum_names)?),
             "fds" => fds = parse_fds(child)?,
             other => return err(0, format!("unknown message child <{other}>")),
         }
@@ -215,7 +499,11 @@ fn parse_message(node: &Node) -> Result<Message, ParseError> {
     })
 }
 
-fn parse_arg(node: &Node) -> Result<Arg, ParseError> {
+fn parse_typed_field(
+    node: &Node,
+    struct_names: &HashSet<String>,
+    enum_names: &HashSet<String>,
+) -> Result<Arg, ParseError> {
     let name = node
         .attr("name")
         .ok_or_else(|| ParseError {
@@ -237,16 +525,18 @@ fn parse_arg(node: &Node) -> Result<Arg, ParseError> {
             msg: format!("unknown array element type {elem_str}"),
         })?;
         match elem {
-            ArgType::Array(_) | ArgType::KvList => {
-                return err(0, "arrays of arrays / kv_list not supported");
+            ArgType::Bool | ArgType::Array(_) | ArgType::KvList => {
+                return err(0, "arrays of bool / arrays / kv_list not supported");
             }
             _ => ArgType::Array(Box::new(elem)),
         }
     } else {
-        ArgType::parse(ty_str).ok_or_else(|| ParseError {
-            pos: 0,
-            msg: format!("unknown type {ty_str}"),
-        })?
+        match ArgType::parse(ty_str) {
+            Some(ty) => ty,
+            None if struct_names.contains(ty_str) => ArgType::Named(ty_str.to_string()),
+            None if enum_names.contains(ty_str) => ArgType::Enum(ty_str.to_string()),
+            None => return err(0, format!("unknown type {ty_str}")),
+        }
     };
     Ok(Arg { name, ty })
 }
@@ -263,8 +553,8 @@ fn parse_fds(node: &Node) -> Result<FdSpec, ParseError> {
             Ok(FdSpec::Fixed(n))
         }
     } else if let Some(expr) = node.attr("count_expr") {
-        // Support only "a * b * c ..." — whitespace-separated field names
-        // joined by `*`. Anything fancier is rejected.
+        // Support only products of message fields or nested struct fields.
+        // Each operand is an identifier path such as `pool.count`.
         let parts: Vec<String> = expr
             .split('*')
             .map(|p| p.trim().to_string())
@@ -274,8 +564,13 @@ fn parse_fds(node: &Node) -> Result<FdSpec, ParseError> {
             return err(0, "empty count_expr");
         }
         for p in &parts {
-            if !p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                return err(0, format!("count_expr field not an ident: {p}"));
+            if p.split('.').any(|segment| {
+                segment.is_empty()
+                    || !segment
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            }) {
+                return err(0, format!("count_expr field not an ident path: {p}"));
             }
         }
         Ok(FdSpec::Product(parts))
@@ -495,9 +790,16 @@ mod tests {
     #[test]
     fn parse_fds() {
         let src = r#"<protocol name="t" version="1">
+            <struct name="pool">
+                <field name="count" type="u32"/>
+                <field name="planes_per_buffer" type="u32"/>
+            </struct>
             <event name="a" opcode="1"><fds count="1"/></event>
             <event name="b" opcode="2"><fds count="0"/></event>
-            <event name="c" opcode="3"><fds count_expr="count * planes_per_buffer"/></event>
+            <event name="c" opcode="3">
+                <arg name="pool" type="pool"/>
+                <fds count_expr="pool.count * pool.planes_per_buffer"/>
+            </event>
         </protocol>"#;
         let p = parse_protocol(src).unwrap();
         assert!(matches!(p.events[0].fds, FdSpec::Fixed(1)));
@@ -506,11 +808,35 @@ mod tests {
             FdSpec::Product(parts) => {
                 assert_eq!(
                     parts,
-                    &vec!["count".to_string(), "planes_per_buffer".to_string()]
+                    &vec![
+                        "pool.count".to_string(),
+                        "pool.planes_per_buffer".to_string()
+                    ]
                 );
             }
             _ => panic!("expected Product"),
         }
+    }
+
+    #[test]
+    fn rejects_invalid_fd_field_paths() {
+        let missing = r#"<protocol name="t" version="1">
+            <struct name="pool"><field name="count" type="u32"/></struct>
+            <event name="bind" opcode="1">
+                <arg name="pool" type="pool"/>
+                <fds count_expr="pool.missing"/>
+            </event>
+        </protocol>"#;
+        assert!(parse_protocol(missing).is_err());
+
+        let non_integer = r#"<protocol name="t" version="1">
+            <struct name="pool"><field name="label" type="string"/></struct>
+            <event name="bind" opcode="1">
+                <arg name="pool" type="pool"/>
+                <fds count_expr="pool.label"/>
+            </event>
+        </protocol>"#;
+        assert!(parse_protocol(non_integer).is_err());
     }
 
     #[test]
@@ -525,5 +851,99 @@ mod tests {
             </protocol>"#;
         let p = parse_protocol(src).unwrap();
         assert_eq!(p.requests.len(), 1);
+    }
+
+    #[test]
+    fn parses_and_orders_named_structs() {
+        let src = r#"<protocol name="t" version="1">
+            <struct name="outer">
+                <field name="inner" type="inner"/>
+                <field name="enabled" type="bool"/>
+            </struct>
+            <struct name="inner">
+                <field name="generation" type="u64"/>
+            </struct>
+            <event name="configured" opcode="1">
+                <arg name="config" type="outer"/>
+            </event>
+        </protocol>"#;
+        let p = parse_protocol(src).unwrap();
+        assert_eq!(p.structs.len(), 2);
+        assert_eq!(p.structs[0].name, "inner");
+        assert_eq!(p.structs[1].name, "outer");
+        assert_eq!(p.events[0].args[0].ty, ArgType::Named("outer".to_string()));
+    }
+
+    #[test]
+    fn parses_named_enums_in_structs_and_messages() {
+        let src = r#"<protocol name="t" version="1">
+            <enum name="effect_kind">
+                <entry name="none" value="0"/>
+                <entry name="blur" value="1"/>
+            </enum>
+            <struct name="config">
+                <field name="kind" type="effect_kind"/>
+            </struct>
+            <event name="configured" opcode="1">
+                <arg name="kind" type="effect_kind"/>
+                <arg name="config" type="config"/>
+            </event>
+        </protocol>"#;
+        let p = parse_protocol(src).unwrap();
+        assert_eq!(p.enums.len(), 1);
+        assert_eq!(p.enums[0].name, "effect_kind");
+        assert_eq!(p.enums[0].entries[1].name, "blur");
+        assert_eq!(p.enums[0].entries[1].value, 1);
+        assert_eq!(
+            p.structs[0].fields[0].ty,
+            ArgType::Enum("effect_kind".to_string())
+        );
+        assert_eq!(
+            p.events[0].args[0].ty,
+            ArgType::Enum("effect_kind".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_named_enums() {
+        let duplicate_value = r#"<protocol name="t" version="1">
+            <enum name="kind">
+                <entry name="one" value="1"/>
+                <entry name="other" value="1"/>
+            </enum>
+        </protocol>"#;
+        assert!(parse_protocol(duplicate_value)
+            .unwrap_err()
+            .msg
+            .contains("duplicate value"));
+
+        let duplicate_type = r#"<protocol name="t" version="1">
+            <enum name="config"><entry name="one" value="1"/></enum>
+            <struct name="config"><field name="value" type="u32"/></struct>
+        </protocol>"#;
+        assert!(parse_protocol(duplicate_type)
+            .unwrap_err()
+            .msg
+            .contains("both an enum and a struct"));
+    }
+
+    #[test]
+    fn rejects_unknown_and_recursive_structs() {
+        let unknown = r#"<protocol name="t" version="1">
+            <struct name="a"><field name="value" type="missing"/></struct>
+        </protocol>"#;
+        assert!(parse_protocol(unknown)
+            .unwrap_err()
+            .msg
+            .contains("unknown type"));
+
+        let recursive = r#"<protocol name="t" version="1">
+            <struct name="a"><field name="value" type="b"/></struct>
+            <struct name="b"><field name="value" type="a"/></struct>
+        </protocol>"#;
+        assert!(parse_protocol(recursive)
+            .unwrap_err()
+            .msg
+            .contains("recursive struct reference"));
     }
 }

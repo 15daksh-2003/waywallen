@@ -4,6 +4,7 @@ module;
 module waywallen;
 import :notify;
 import :app;
+import :msg.store;
 
 namespace proto = waywallen::control::v1;
 
@@ -74,14 +75,19 @@ Notify::Notify(QObject* parent): QObject(parent) {
                 const DaemonPhase new_phase = pb_phase_to_enum(s.phase());
                 const auto        new_backend =
                     s.hasDisplayBackend() ? s.displayBackend() : proto::DisplayBackendStatus {};
+                const bool new_paused = s.globalPaused();
+                const bool new_muted  = s.globalMuted();
                 const bool ready_edge =
                     new_phase == DaemonPhase::Ready && m_daemon_phase != DaemonPhase::Ready;
                 if (new_scan != m_scan_in_progress || new_tasks != m_active_task_count ||
-                    new_phase != m_daemon_phase || new_backend != m_display_backend) {
+                    new_phase != m_daemon_phase || new_backend != m_display_backend ||
+                    new_paused != m_global_paused || new_muted != m_global_muted) {
                     m_scan_in_progress  = new_scan;
                     m_active_task_count = new_tasks;
                     m_daemon_phase      = new_phase;
                     m_display_backend   = new_backend;
+                    m_global_paused     = new_paused;
+                    m_global_muted      = new_muted;
                     Q_EMIT statusChanged();
                 }
                 if (ready_edge) {
@@ -95,12 +101,23 @@ Notify::Notify(QObject* parent): QObject(parent) {
                     f.clientName(), f.clientProtocolVersion(), f.errorCode(), f.reason());
             } else if (evt.hasRemoteDownloadProgress()) {
                 const auto& p = evt.remoteDownloadProgress();
+                AppStore::instance()->setRemoteAcquisitionState(
+                    p.sourceId(), p.id_proto(), static_cast<int>(p.state()));
                 Q_EMIT remoteDownloadProgress(
                     p.sourceId(), p.id_proto(), static_cast<int>(p.state()), p.error());
-            } else if (evt.hasSteamLoginProgress()) {
-                const auto& p = evt.steamLoginProgress();
-                Q_EMIT steamLoginProgress(
-                    static_cast<int>(p.state()), p.qrImage(), p.accountName(), p.error());
+            } else if (evt.hasQrLoginProgress()) {
+                const auto& p = evt.qrLoginProgress();
+                Q_EMIT qrLoginProgress(p.sessionId(),
+                                       p.pluginId(),
+                                       p.actionId(),
+                                       static_cast<int>(p.state()),
+                                       p.qrImage(),
+                                       p.displayValue(),
+                                       p.error(),
+                                       p.title(),
+                                       p.instruction());
+            } else if (evt.hasPluginStateChanged()) {
+                Q_EMIT pluginStateChanged();
             } else if (evt.hasPlaylistChanged()) {
                 Q_EMIT playlistChanged();
             } else if (evt.hasPluginChanged()) {
@@ -139,7 +156,8 @@ Notify::Notify(QObject* parent): QObject(parent) {
     connect(backend, &Backend::disconnected, this, [this] {
         const bool changed = m_scan_in_progress || m_active_task_count != 0 ||
                              m_daemon_phase != DaemonPhase::Starting ||
-                             m_display_backend != proto::DisplayBackendStatus {};
+                             m_display_backend != proto::DisplayBackendStatus {} ||
+                             m_global_paused || m_global_muted;
         if (! changed) {
             return;
         }
@@ -147,6 +165,8 @@ Notify::Notify(QObject* parent): QObject(parent) {
         m_active_task_count = 0;
         m_daemon_phase      = DaemonPhase::Starting;
         m_display_backend   = proto::DisplayBackendStatus {};
+        m_global_paused     = false;
+        m_global_muted      = false;
         m_task_progress.clear();
         m_task_progress_sequence = 0;
         Q_EMIT statusChanged();

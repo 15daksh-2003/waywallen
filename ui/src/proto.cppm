@@ -2,6 +2,7 @@ module;
 #include "control.qpb.h"
 
 export module waywallen:proto;
+export import qextra;
 
 namespace proto = waywallen::control::v1;
 
@@ -31,6 +32,9 @@ using proto::RendererPauseRequest;
 using proto::RendererPlayRequest;
 using proto::RendererSpawnRequest;
 using proto::RendererSpawnResponse;
+using proto::RuntimeCondition;
+using proto::RuntimeConditionKindGadget::RuntimeConditionKind;
+using proto::RuntimeConditionOriginGadget::RuntimeConditionOrigin;
 
 using proto::RendererPluginInfo;
 using proto::RendererPluginListRequest;
@@ -55,6 +59,8 @@ using proto::WallpaperRemoveResponse;
 using proto::WallpaperScanRequest;
 using proto::WallpaperScanResponse;
 using proto::WallpaperSyncFinished;
+using proto::WallpaperUnsubscribeRequest;
+using proto::WallpaperUnsubscribeResponse;
 
 using proto::DisplayBackendStatus;
 using proto::StatusSync;
@@ -75,6 +81,13 @@ using proto::DisplayRenameRequest;
 using proto::DisplayRenameResponse;
 using proto::LayoutOverride;
 
+using proto::PluginActionDef;
+using proto::PluginActionRequest;
+using proto::PluginActionResponse;
+using proto::PluginStatusRow;
+using proto::QrLoginCancelRequest;
+using proto::QrLoginCancelResponse;
+using proto::QrLoginProgress;
 using proto::RemoteAvailabilityRequest;
 using proto::RemoteAvailabilityResponse;
 using proto::RemoteDetailsRequest;
@@ -85,21 +98,21 @@ using proto::RemoteDownloadResponse;
 using proto::RemoteItem;
 using proto::RemoteSearchRequest;
 using proto::RemoteSearchResponse;
+using proto::RemoteSettingsPatchRequest;
 using proto::RemoteSortOption;
 using proto::RemoteSourceInfo;
 using proto::RemoteUninstallRequest;
 using proto::RemoteUninstallResponse;
+using proto::SubscriptionItemState;
+using proto::SubscriptionSetRequest;
+using proto::SubscriptionSetResponse;
+using proto::SubscriptionStatusRequest;
+using proto::SubscriptionStatusResponse;
+using proto::PluginActionKindGadget::PluginActionKind;
+using proto::QrLoginStateGadget::QrLoginState;
+using proto::RemoteCapabilityGadget::RemoteCapability;
 using proto::RemoteDownloadStateGadget::RemoteDownloadState;
-using proto::SteamLoginStartRequest;
-using proto::SteamLoginStartResponse;
-using proto::SteamLoginCancelRequest;
-using proto::SteamLoginCancelResponse;
-using proto::SteamLoginProgress;
-using proto::SteamLoginStateGadget::SteamLoginState;
-using proto::PluginActionDef;
-using proto::PluginStatusRow;
-using proto::PluginActionRequest;
-using proto::PluginActionResponse;
+using proto::SubscriptionStateGadget::SubscriptionState;
 
 using proto::GpuInfo;
 using proto::GpuListRequest;
@@ -142,9 +155,17 @@ using proto::AutostartGetRequest;
 using proto::AutostartGetResponse;
 using proto::AutostartSetRequest;
 using proto::AutostartSetResponse;
+using proto::BlurEffectConfig;
+using proto::GlobalMuteSetRequest;
+using proto::GlobalMuteSetResponse;
+using proto::GlobalPauseSetRequest;
+using proto::GlobalPauseSetResponse;
+using proto::GlobalPauseToggleRequest;
+using proto::GlobalPauseToggleResponse;
 using proto::GlobalRendererSettings;
 using proto::GlobalSettings;
 using proto::LayoutPrefs;
+using proto::PauseEffectConfig;
 using proto::PluginSettings;
 using proto::SettingsChanged;
 using proto::SettingsGetRequest;
@@ -154,6 +175,7 @@ using proto::AlignGadget::Align;
 using proto::AutoActionGadget::AutoAction;
 using proto::FillModeGadget::FillMode;
 using proto::LayoutSourceGadget::LayoutSource;
+using proto::PauseEffectKindGadget::PauseEffectKind;
 using proto::RotationGadget::Rotation;
 
 using proto::FilterLogic;
@@ -187,3 +209,8 @@ using proto::StringConditionGadget::StringCondition;
 using proto::WallpaperFilterTypeGadget::WallpaperFilterType;
 using proto::WallpaperSortKeyGadget::WallpaperSortKey;
 } // namespace waywallen::control::v1
+
+export namespace waywallen
+{
+auto runtimeConditionsFromPb(const QList<proto::RuntimeCondition>& conditions) -> QVariantList;
+} // namespace waywallen

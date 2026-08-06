@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Regenerate the C protocol bindings (include/waywallen-bridge/ipc_v2.h
-# and src/ipc_v2.c) from the authoritative XML in the waywallen repo.
+# Regenerate the C protocol bindings (include/waywallen-bridge/ipc_v3.h
+# and src/ipc_v3.c) from the authoritative XML in the waywallen repo.
 #
 # Usage:
 #     scripts/regen.sh /path/to/waywallen
@@ -19,7 +19,7 @@ fi
 WAYWALLEN="$1"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 
-XML="$WAYWALLEN/protocol/waywallen_ipc_v2.xml"
+XML="$WAYWALLEN/protocol/waywallen_ipc_v3.xml"
 TOOL="$WAYWALLEN/tools/wayproto-gen"
 
 if [ ! -f "$XML" ]; then
@@ -31,8 +31,8 @@ if [ ! -d "$TOOL" ]; then
     exit 1
 fi
 
-OUT_H="$HERE/include/waywallen-bridge/ipc_v2.h"
-OUT_C="$HERE/src/ipc_v2.c"
+OUT_H="$HERE/include/waywallen-bridge/ipc_v3.h"
+OUT_C="$HERE/src/ipc_v3.c"
 
 echo "regenerating from $XML ..."
 (
@@ -44,7 +44,7 @@ echo "regenerating from $XML ..."
 )
 
 # Patch the generated #include to use the public header path.
-sed -i 's|#include "ww_proto.h"|#include "waywallen-bridge/ipc_v2.h"|' "$OUT_C"
+sed -i 's|#include "ww_proto.h"|#include "waywallen-bridge/ipc_v3.h"|' "$OUT_C"
 
 echo "done:"
 echo "  $OUT_H"

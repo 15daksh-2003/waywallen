@@ -33,6 +33,7 @@ MD.Page {
 
     W.WallpaperRemoveQuery {
         id: selectionRemoveQuery
+        forwardError: false
         onRemovedMany: function (wallpaperIds, removedCount) {
             wallpaperQuery.reload();
             root.clearWallpaperSelection();
@@ -40,9 +41,7 @@ MD.Page {
         }
         onStatusChanged: {
             if (selectionRemoveQuery.status === 3) {
-                const message = selectionRemoveQuery.error && selectionRemoveQuery.error.length > 0
-                    ? selectionRemoveQuery.error
-                    : qsTr("Remove failed");
+                const message = selectionRemoveQuery.error && selectionRemoveQuery.error.length > 0 ? selectionRemoveQuery.error : qsTr("Remove failed");
                 W.Action.toast(message, 6000, 1, null);
             }
         }
@@ -70,6 +69,7 @@ MD.Page {
 
     W.PlaylistMutationQuery {
         id: playlistMutation
+        forwardError: false
         onDone: {
             if (playlistMutation.status === 3) {
                 root.playlistMutationSuccessMessage = "";
@@ -93,6 +93,7 @@ MD.Page {
 
     W.PlaylistMutationQuery {
         id: playlistPlaybackMutation
+        forwardError: false
         onDone: {
             if (playlistPlaybackMutation.status === 3)
                 W.Action.toast(qsTr("Playlist playback failed"));
@@ -188,9 +189,9 @@ MD.Page {
         target: W.Notify
         function onWallpaperSyncFinished(count, error) {
             if (error && error.length > 0) {
-                W.Action.toast("Sync failed: " + error);
+                W.Action.toast(qsTr("Sync failed: %1").arg(error));
             } else {
-                W.Action.toast("Scanned " + count + " wallpapers");
+                W.Action.toast(qsTr("Scanned %n wallpaper(s)", "", count));
             }
             wallpaperQuery.reload();
         }
@@ -219,7 +220,7 @@ MD.Page {
 
     MD.Action {
         id: createPlaylistFromSelectionAction
-        text: "New playlist"
+        text: qsTr("New playlist")
         icon.name: MD.Token.icon.playlist_add
         busy: playlistMutation.querying
         checked: wallpaperSelectSheetRelay.activeAction === createPlaylistFromSelectionAction
@@ -229,7 +230,7 @@ MD.Page {
 
     MD.Action {
         id: addToPlaylistAction
-        text: "Add to playlist"
+        text: qsTr("Add to playlist")
         icon.name: MD.Token.icon.playlist_add
         checked: wallpaperSelectSheetRelay.activeAction === addToPlaylistAction
         enabled: root.selectedWallpaperCount > 0 && (playlistListQuery.playlists || []).length > 0 && !playlistMutation.querying
@@ -238,7 +239,7 @@ MD.Page {
 
     MD.Action {
         id: applyPlaylistSelectionAction
-        text: "Apply"
+        text: qsTr("Apply")
         icon.name: MD.Token.icon.check
         busy: playlistMutation.querying
         enabled: playlistWallpaperSelect.playlistEditTargetId > 0 && !playlistMutation.querying
@@ -256,7 +257,7 @@ MD.Page {
 
     MD.Action {
         id: playlistListAction
-        text: "Playlists"
+        text: qsTr("Playlists")
         icon.name: MD.Token.icon.playlist_play
         checked: W.App.displayManager.hasActivePlaylistDisplays
         onTriggered: root.togglePlaylistListSheet()
@@ -264,7 +265,7 @@ MD.Page {
 
     MD.Action {
         id: tweakAction
-        text: "Tweak"
+        text: qsTr("Tweak")
         icon.name: MD.Token.icon.tune
         checked: root.isSheetActive(root.wallpaperTweakSheet)
         onTriggered: root.toggleWallpaperTweakSheet()
@@ -273,24 +274,33 @@ MD.Page {
     MD.Action {
         id: filterAction
         icon.name: MD.Token.icon.filter_list
-        text: "Filters"
+        text: qsTr("Filters")
         checked: wallpaperQuery.hasActiveFilters
-        onTriggered: MD.Util.showPopup(filterDialogComponent, {}, root.Window.window)
+        onTriggered: {
+            if (root.filterPresentation?.active)
+                return;
+            root.filterPresentation = root.Window.window.presentPopup(filterDialogComponent);
+        }
     }
 
     MD.Action {
         id: sourcesAction
         icon.name: MD.Token.icon.hard_drive
         text: qsTr("Library Manager")
-        onTriggered: MD.Util.showPopup('waywallen.ui/PagePopup', {
-            source: 'waywallen.ui/SourceManagePage'
-        }, root.Window.window)
+        property var presentation: null
+        onTriggered: {
+            if (presentation?.active)
+                return;
+            presentation = root.Window.window.presentPopup('waywallen.ui/PagePopup', {
+                source: 'waywallen.ui/SourceManagePage'
+            });
+        }
     }
 
     MD.Action {
         id: refreshAction
         icon.name: MD.Token.icon.refresh
-        text: "Refresh"
+        text: qsTr("Refresh")
         enabled: !W.Notify.scanInProgress
         onTriggered: scanQuery.reload()
     }
@@ -362,8 +372,7 @@ MD.Page {
         id: filterDialogComponent
 
         W.WallpaperFilterDialog {
-            id: dynamicFilterDialog
-            parent: T.Overlay.overlay
+            popupWindow: root.Window.window
             model: wallpaperFilterModel
             supportedTypes: pluginQuery.supportedTypes || []
             skipTypes: wallpaperQuery.skipTypes
@@ -500,6 +509,8 @@ MD.Page {
     property var wallpaperSelectSheet: null
     property var wallpaperTweakSheet: null
     property var playlistListSheet: null
+    property var filterPresentation: null
+    Component.onDestruction: root.filterPresentation?.cancel()
     readonly property int selectionSheetReserve: wallpaperSelectSheetRelay.currentComponent ? 360 : 160
     readonly property int selectedWallpaperCount: root.currentWallpaperSelect ? root.currentWallpaperSelect.selectedCount : 0
     readonly property int removableSelectedWallpaperCount: root.currentWallpaperSelect ? root.currentWallpaperSelect.removableSelectedCount : 0
@@ -532,12 +543,20 @@ MD.Page {
     }
 
     function ensureWallpaperSelectSheet() {
-        if (root.wallpaperSelectSheet)
+        if (root.wallpaperSelectSheet?.active)
             return root.wallpaperSelectSheet;
 
-        const sheet = MD.Util.showPopup(wallpaperSelectSheetComponent, {}, root.Window.window);
-        if (sheet)
+        const sheet = root.Window.window.presentPopup(wallpaperSelectSheetComponent);
+        if (sheet.active) {
             root.wallpaperSelectSheet = sheet;
+            sheet.activeChanged.connect(sheet, function () {
+                if (!sheet.active) {
+                    root.releaseWallpaperSelectSheet(sheet);
+                    if (root.selectionActionSheetActive)
+                        root.syncWallpaperSelectSheet();
+                }
+            });
+        }
         return sheet;
     }
 
@@ -549,25 +568,22 @@ MD.Page {
             root.wallpaperSelectSheet = null;
     }
 
-    function destroyWallpaperSelectSheet(sheet) {
-        const target = sheet || root.wallpaperSelectSheet;
-        root.releaseWallpaperSelectSheet(target);
-        Qt.callLater(function () {
-            target.destroy();
-        });
-    }
-
     function isSheetActive(sheet) {
-        return !!sheet && (sheet.opened || sheet.entering);
+        return !!sheet && (sheet.status === MD.PopupPresentation.Opening || sheet.status === MD.PopupPresentation.Open);
     }
 
     function ensureWallpaperTweakSheet() {
-        if (root.wallpaperTweakSheet)
+        if (root.wallpaperTweakSheet?.active)
             return root.wallpaperTweakSheet;
 
-        const sheet = MD.Util.showPopup(wallpaperTweakSheetComponent, {}, root.Window.window);
-        if (sheet)
+        const sheet = root.Window.window.presentPopup(wallpaperTweakSheetComponent);
+        if (sheet.active) {
             root.wallpaperTweakSheet = sheet;
+            sheet.activeChanged.connect(sheet, function () {
+                if (!sheet.active)
+                    root.releaseWallpaperTweakSheet(sheet);
+            });
+        }
         return sheet;
     }
 
@@ -577,12 +593,17 @@ MD.Page {
     }
 
     function ensurePlaylistListSheet() {
-        if (root.playlistListSheet)
+        if (root.playlistListSheet?.active)
             return root.playlistListSheet;
 
-        const sheet = MD.Util.showPopup(playlistListSheetComponent, {}, root.Window.window);
-        if (sheet)
+        const sheet = root.Window.window.presentPopup(playlistListSheetComponent);
+        if (sheet.active) {
             root.playlistListSheet = sheet;
+            sheet.activeChanged.connect(sheet, function () {
+                if (!sheet.active)
+                    root.releasePlaylistListSheet(sheet);
+            });
+        }
         return sheet;
     }
 
@@ -595,19 +616,12 @@ MD.Page {
         root.configureWallpaperSelectSheetDefault();
 
         if (root.selectionActionSheetActive) {
-            const sheet = root.ensureWallpaperSelectSheet();
-            if (sheet && !sheet.opened && !sheet.entering)
-                sheet.open();
+            root.ensureWallpaperSelectSheet();
             return;
         }
 
-        if (root.wallpaperSelectSheet && (root.wallpaperSelectSheet.opened || root.wallpaperSelectSheet.entering)) {
+        if (root.wallpaperSelectSheet?.active)
             root.wallpaperSelectSheet.close();
-            return;
-        }
-
-        if (root.wallpaperSelectSheet && !root.wallpaperSelectSheet.closing)
-            root.destroyWallpaperSelectSheet(root.wallpaperSelectSheet);
     }
 
     function adoptWallpaperSelect(storage) {
@@ -757,28 +771,24 @@ MD.Page {
     }
 
     function togglePlaylistListSheet() {
-        if (root.isSheetActive(root.playlistListSheet)) {
+        if (root.playlistListSheet?.active) {
             root.playlistListSheet.close();
             return;
         }
-        if (root.isSheetActive(root.wallpaperTweakSheet))
+        if (root.wallpaperTweakSheet?.active)
             root.wallpaperTweakSheet.close();
         playlistListQuery.reload();
-        const sheet = root.ensurePlaylistListSheet();
-        if (sheet && !sheet.opened && !sheet.entering)
-            sheet.open();
+        root.ensurePlaylistListSheet();
     }
 
     function toggleWallpaperTweakSheet() {
-        if (root.isSheetActive(root.wallpaperTweakSheet)) {
+        if (root.wallpaperTweakSheet?.active) {
             root.wallpaperTweakSheet.close();
             return;
         }
-        if (root.isSheetActive(root.playlistListSheet))
+        if (root.playlistListSheet?.active)
             root.playlistListSheet.close();
-        const sheet = root.ensureWallpaperTweakSheet();
-        if (sheet && !sheet.opened && !sheet.entering)
-            sheet.open();
+        root.ensureWallpaperTweakSheet();
     }
 
     function isEditingPlaylist(playlist) {
@@ -1076,10 +1086,7 @@ MD.Page {
 
                         ColumnLayout {
                             spacing: 16
-                            readonly property bool showLibraryHint: !wallpaperQuery.querying
-                                && !wallpaperQuery.hasActiveFilters
-                                && wallpaperQuery.searchText.trim().length === 0
-                                && W.App.libraryManager.count === 0
+                            readonly property bool showLibraryHint: !wallpaperQuery.querying && !wallpaperQuery.hasActiveFilters && wallpaperQuery.searchText.trim().length === 0 && W.App.libraryManager.count === 0
                             readonly property int libraryHintSize: 22
                             readonly property string libraryHintIcon: '<font face="' + MD.Token.font.icon_family + '" style="font-size: ' + libraryHintSize + 'px;">' + sourcesAction.icon.name + '</font>'
 
@@ -1091,7 +1098,7 @@ MD.Page {
                             MD.Text {
                                 Layout.alignment: Qt.AlignHCenter
                                 visible: !wallpaperQuery.querying
-                                text: "No wallpapers found"
+                                text: qsTr("No wallpapers found")
                                 typescale: MD.Token.typescale.body_large
                                 color: MD.Token.color.on_surface_variant
                             }
@@ -1117,7 +1124,7 @@ MD.Page {
                                 // (in that case the user wants Refresh, not a
                                 // second round of auto-detection).
                                 visible: parent.showLibraryHint
-                                text: "Auto detect libraries"
+                                text: qsTr("Auto detect libraries")
                                 busy: autoDetectQuery.querying
                                 mdState.type: MD.Enum.BtFilledTonal
                                 onClicked: {
@@ -1157,9 +1164,6 @@ MD.Page {
             popupParent: root
             relay: wallpaperSelectSheetRelay
             currentWallpaperSelect: root.currentWallpaperSelect
-            onReleased: function (sheet) {
-                root.releaseWallpaperSelectSheet(sheet);
-            }
         }
     }
 
@@ -1169,9 +1173,6 @@ MD.Page {
         W.TweakSheet {
             popupParent: root
             tweak: wallpaperTweakState
-            onReleased: function (sheet) {
-                root.releaseWallpaperTweakSheet(sheet);
-            }
         }
     }
 
@@ -1181,9 +1182,6 @@ MD.Page {
         W.PlaylistListSheet {
             popupParent: root
             sheetState: playlistListSheetState
-            onReleased: function (sheet) {
-                root.releasePlaylistListSheet(sheet);
-            }
         }
     }
 

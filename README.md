@@ -6,11 +6,11 @@
 
 <p align="center"><strong> Wallpaper Manager for Linux </strong></p>
 
-<a href="README.CN.md">中文 README</a> · <a href="https://discord.gg/2xEdmMrhRF">Discord</a>
+<a href="README.CN.md">中文 README</a> · <a href="README.RU.md">Русский README</a> · <a href="https://discord.gg/2xEdmMrhRF">Discord</a>
 
 ---
 
-Waywallen is a dynamic wallpaper solution for Linux desktops.  
+Waywallen is a dynamic wallpaper solution for Linux desktops.<br>
 It started life as a Wallpaper Engine plugin for KDE.
 
 ---
@@ -25,9 +25,9 @@ It started life as a Wallpaper Engine plugin for KDE.
 
 ### Install
 
-**Prebuilt binaries** — grab the latest appimage from the [Releases page](https://github.com/waywallen/waywallen/releases).
+**Prebuilt binaries** — grab the latest AppImage from the [Releases page](https://github.com/waywallen/waywallen/releases).
 
-**Flatpak**  
+**Flatpak**
 
 <a href='https://flathub.org/en/apps/org.waywallen.waywallen'>
 <img width='240' alt='Get it on Flathub' src='https://flathub.org/api/badge?locale=en'/>
@@ -42,45 +42,55 @@ It started life as a Wallpaper Engine plugin for KDE.
 | **KDE Plasma** | [waywallen-display](https://github.com/waywallen/waywallen-display/) | ✅ | ✅ |
 | **GNOME** | [waywallen-display](https://github.com/waywallen/waywallen-display/) | ✅ | ✅ |
 | **Hyprland** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ✅ |
-| **Niri** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ❌ |
+| **Niri** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ✅ |
+| **Wayfire** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ✅ |
 | **Sway** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ❌ |
 | **COSMIC** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ❌ |
 
 ## Known issue
-- Web wallpapers on nvidia gpu require to set `shared_texture_enabled` OFF in web renderer setting.
+
+- Web wallpapers on NVIDIA GPUs require `shared_texture_enabled` to be disabled in the web renderer settings.
 
 ## Wallpaper plugins
-- image plugin
-- video plugin
-  - hwdec by vulkan,vaapi
-- wallhaven plugin
 
-### Third plugins
+- Image plugin
+- Video plugin
+  - Hardware decoding via Vulkan and VA-API
+- Wallhaven plugin
+
+### Third-party plugins
+
 - [open-wallpaper-engine](https://github.com/waywallen/open-wallpaper-engine)
-  - scene support
-  - web support
+  - Scene support
+  - Web wallpaper support
 
-> [!NOTE]  
-> For third plugins:  
-> You need to mannually download plugin zip and install in the ui's plugins page.  
-> After installed, this plugin's update will be notified and handled by waywallen.  
+> [!NOTE]
+> To install a third-party plugin, manually download its ZIP archive and install it from the plugins page in the UI.<br>
+> After installation, Waywallen will notify you of plugin updates and install them.
 
 ## FAQ
-- How to debug in flatpak
+
+- How to get logs<br>
+  First, stop the running Waywallen daemon.
+  ```bash
+  export RSTD_LOG=debug RUST_LOG=debug,zbus=warn
+  ./waywallen
+  ```
+- How to debug in Flatpak
   ```bash
   flatpak install org.waywallen.waywallen.Debug
   flatpak run --devel --command=bash org.waywallen.waywallen
-  # 1. run directly
-  [📦 org.waywallen.waywallen ~]$ gdb Qcm
+  # 1. Run directly
+  [📦 org.waywallen.waywallen ~]$ gdb waywallen
   (gdb) run
   Enable debuginfod for this session? (y or [n]) n
   ...
-  # get the stacktrace
+  # Get the stack trace
   (gdb) bt
-  
-  # 2. or use coredump file
+
+  # 2. Or use a core dump file
   coredumpctl dump <id> -o core.save
   flatpak run --devel --filesystem=host --command=bash org.waywallen.waywallen
-  [📦 org.waywallen.waywallen ~]$ gdb Qcm core.save
+  [📦 org.waywallen.waywallen ~]$ gdb waywallen core.save
   ...
   ```

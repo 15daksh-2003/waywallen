@@ -5,13 +5,11 @@ import QtQuick.Templates as T
 import Qcm.Material as MD
 import waywallen.ui as W
 
-// Renderer/plugin settings, hosted inside PagePopup. Opened via
-// MD.Util.showPopup('waywallen.ui/PagePopup', { source:
-// 'waywallen.ui/PluginSettingsPage', props: {...} }). Props are an
-// open-time snapshot; edits stay pending until Apply.
+// Renderer/plugin settings hosted inside PagePopup. Props are an open-time
+// snapshot; edits stay pending until Apply.
 MD.Page {
     id: root
-    title: "Configure " + (displayName.length > 0 ? displayName : pluginName)
+    title: qsTr("Configure %1").arg(displayName.length > 0 ? displayName : pluginName)
     scrolling: !settingsList.atYBeginning
 
     property string pluginName: ""
@@ -23,6 +21,11 @@ MD.Page {
 
     W.PluginActionQuery {
         id: actionQuery
+        forwardError: false
+        onCompleted: function (accepted, error, sessionId) {
+            if (!accepted)
+                W.Global.toastError(error.length > 0 ? error : qsTr("Action failed"));
+        }
     }
     function runAction(actionId) {
         actionQuery.pluginId = root.pluginName;
@@ -49,6 +52,9 @@ MD.Page {
     Connections {
         target: W.Notify
         function onSettingsChanged() {
+            availabilityQuery.reload();
+        }
+        function onPluginStateChanged() {
             availabilityQuery.reload();
         }
     }
@@ -132,7 +138,7 @@ MD.Page {
         const buckets = {};
         for (let i = 0; i < schemaList.length; ++i) {
             const s = schemaList[i];
-            const g = (s.group && s.group.length > 0) ? s.group : "General";
+            const g = (s.group && s.group.length > 0) ? s.group : qsTr("General");
             if (!buckets[g])
                 buckets[g] = [];
             buckets[g].push(s);
@@ -171,14 +177,14 @@ MD.Page {
         bottomPadding: 16
 
         MD.Button {
-            text: "Reset"
+            text: qsTr("Reset")
             mdState.type: MD.Enum.BtText
             enabled: root.isDirty
             T.DialogButtonBox.buttonRole: T.DialogButtonBox.ResetRole
             onClicked: root.reset()
         }
         MD.Button {
-            text: "Apply"
+            text: qsTr("Apply")
             mdState.type: MD.Enum.BtText
             enabled: root.isDirty
             T.DialogButtonBox.buttonRole: T.DialogButtonBox.ApplyRole
@@ -222,7 +228,6 @@ MD.Page {
             leftPadding: 4
         }
 
-        // Plugin-declared status rows + action buttons (e.g. Steam sign-in).
         footer: ColumnLayout {
             width: settingsList.contentWidth
             spacing: 6
@@ -281,6 +286,8 @@ MD.Page {
                     delegate: MD.Button {
                         required property var modelData
                         text: modelData.label
+                        visible: modelData.visible === undefined || modelData.visible
+                        enabled: modelData.enabled === undefined || modelData.enabled
                         mdState.type: MD.Enum.BtFilledTonal
                         onClicked: root.runAction(modelData.id)
                     }

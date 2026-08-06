@@ -3,7 +3,7 @@
  *
  * This header layers length-prefix framing + SCM_RIGHTS fd passing
  * on top of the auto-generated per-message encoders/decoders in
- * <waywallen-bridge/ipc_v2.h>.
+ * <waywallen-bridge/ipc_v3.h>.
  *
  * Wire frame (same layout as waywallen-display-v1):
  *
@@ -14,7 +14,7 @@
  *
  * Error conventions: all functions return 0 on success and a negative
  * value on failure. The negative is either a negated errno, or one of
- * the WW_ERR_* codes defined in <waywallen-bridge/ipc_v2.h>.
+ * the WW_ERR_* codes defined in <waywallen-bridge/ipc_v3.h>.
  *
  * Thread safety: none. Each socket is single-writer, single-reader
  * from the caller's perspective.
@@ -22,7 +22,7 @@
 #ifndef WAYWALLEN_BRIDGE_H
 #define WAYWALLEN_BRIDGE_H
 
-#include <waywallen-bridge/ipc_v2.h>
+#include <waywallen-bridge/ipc_v3.h>
 #include <waywallen-bridge/drm_fourcc.h>
 #include <waywallen-bridge/protocol_bits.h>
 
@@ -32,6 +32,13 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Stable metadata for audio playback created by integrated renderer hosts.
+ * The daemon uses process ownership for classification; these values keep
+ * PulseAudio/PipeWire mixers and diagnostics consistent. */
+#define WW_BRIDGE_AUDIO_APPLICATION_NAME "Waywallen Renderer"
+#define WW_BRIDGE_AUDIO_APPLICATION_ID   "org.waywallen.renderer"
+#define WW_BRIDGE_AUDIO_STREAM_PREFIX    "waywallen.renderer."
 
 /* -----------------------------------------------------------------------
  * Connection
@@ -102,39 +109,31 @@ int ww_bridge_recv_frame(int sock, uint16_t* opcode_out, uint8_t** body_out, siz
 
 /* Emit `Ready`. Must be the first event after connecting. No fds.
  *
- * `drm_render_major` / `drm_render_minor` identify the DRM render-node
+ * `drm_node` identifies the DRM render-node
  * of the GPU the renderer's Vulkan/EGL/etc. instance picked, so the
  * daemon can decide whether each subscribed display is on the same GPU
  * (zero-copy) or a different GPU (must round-trip via HOST_VISIBLE).
  * Pass `(0, 0)` when the renderer cannot resolve its render node — the
  * daemon then conservatively assumes cross-GPU and forces HOST_VISIBLE
- * placement on every subsequent `configure_buffers`. */
-int ww_bridge_send_ready(int sock, uint32_t drm_render_major, uint32_t drm_render_minor);
+ * placement on every subsequent buffer negotiation. */
+int ww_bridge_send_ready(int sock, const waywallen_drm_node_t* drm_node);
 
 /* Emit `BindBuffers` carrying one DMA-BUF fd per flattened buffer plane.
- * `fds` must have exactly `m->count * m->planes_per_buffer` entries. */
-int ww_bridge_send_bind_buffers(int sock, const ww_evt_bind_buffers_t* m, const int* fds);
+ * `fds` must have exactly `pool->count * pool->format.plane_count` entries. */
+int ww_bridge_send_bind_buffers(int sock, const waywallen_buffer_pool_t* pool, const int* fds);
 
 /* Emit `FrameReady` with a single acquire sync_fd (dma_fence sync_file).
- * `m->release_point` names the timeline value the daemon will signal on
+ * `frame->release_point` names the timeline value the daemon will signal on
  * the producer-exported `release_syncobj` once every consumer has
  * finished sampling this frame.
  *
- * `sync_fd` semantics:
- *   - REQUIRED on the COMPAT_LINEAR / GPU_LINEAR path (the daemon
- *     negotiated a cross-vendor consumer; amdgpu and other importing
- *     drivers refuse to schedule a foreign dma-buf without an explicit
- *     dma_fence wait, manifesting as "Not enough memory for command
- *     submission" and a lost device).
- *   - OPTIONAL on OPTIMIZED same-GPU paths (driver-internal scheduling
- *     carries the producer-consumer dependency).
- *
- * The fd MUST be a SYNC_FD (dma_fence sync_file), produced via
+ * The fd is required on every path and MUST be a SYNC_FD (dma_fence
+ * sync_file), produced via
  * `vkGetSemaphoreFdKHR(SYNC_FD)` on a binary semaphore created with
  * `VkExportSemaphoreCreateInfo.handleTypes = SYNC_FD`. OPAQUE_FD
  * timeline exports are NOT cross-vendor portable and MUST NOT be used
- * here. Pass `-1` when no fence is being signalled (same-GPU only). */
-int ww_bridge_send_frame_ready(int sock, const ww_evt_frame_ready_t* m, int sync_fd);
+ * here. */
+int ww_bridge_send_frame_ready(int sock, const waywallen_frame_t* frame, int sync_fd);
 
 /* Emit `ReleaseSyncobj` carrying the producer's timeline drm_syncobj fd.
  * Send exactly once per connection, after `Ready` and before any
@@ -162,83 +161,37 @@ int ww_bridge_send_release_syncobj(int sock, int release_syncobj_fd);
 
 /* Emit `FormatCaps` — the producer's modifier-negotiation declaration.
  * Send exactly once per connection, after `Ready` and before any
- * `BindBuffers`. Caller fills the parallel-array fields directly on
- * `m`; this helper is a thin encode + framed-send wrapper.
+ * `BindBuffers`. Caller fills the generated capability struct directly.
  *
  * Validation invariant (mirrored on the daemon side):
- *   m->modifiers.count == m->usages.count == m->plane_counts.count ==
- *   sum(m->mod_counts.data[0..fourccs.count])
+ *   capabilities->modifiers.count == capabilities->plane_counts.count ==
+ *   sum(capabilities->mod_counts.data[0..fourccs.count])
  * The helper does NOT enforce this — the renderer must construct the
  * arrays consistently or the daemon's unflatten_caps will reject. */
-int ww_bridge_send_format_caps(int sock, const ww_evt_format_caps_t* m);
-
-/* Caller-friendly inputs for `ww_bridge_send_format_caps_v2`. Holds
- * pointers to caller-owned arrays (no copies, no ownership transfer)
- * plus the scalar negotiation knobs. The helper assembles the
- * `ww_evt_format_caps_t` wire shape from these fields, packs the two
- * 16-byte UUIDs as 4×u32 LE, and dispatches to
- * `ww_bridge_send_format_caps`.
- *
- * Length invariants (mirrored on the daemon's `unflatten_caps`):
- *   modifiers_count == plane_counts_count ==
- *   sum(mod_counts[0..fourccs_count])
- *
- * `device_uuid` / `driver_uuid`: pass NULL to send 16 zero bytes
- * (renderers without `VK_KHR_external_memory_capabilities` /
- * EGL_DEVICE_UUID_EXT do this). When non-NULL, must point at 16
- * readable bytes. */
-typedef struct ww_format_caps_caller {
-    const uint32_t* fourccs;
-    uint32_t        fourccs_count;
-    const uint32_t* mod_counts;
-    uint32_t        mod_counts_count;
-    const uint64_t* modifiers;
-    uint32_t        modifiers_count;
-    const uint32_t* plane_counts;
-    uint32_t        plane_counts_count;
-    const uint8_t*  device_uuid; /* NULL or 16 bytes */
-    const uint8_t*  driver_uuid; /* NULL or 16 bytes */
-    uint32_t        drm_render_major;
-    uint32_t        drm_render_minor;
-    uint32_t        mem_hints;
-    uint32_t        sync_caps;
-    uint32_t        color_caps;
-    uint32_t        extent_max_w;
-    uint32_t        extent_max_h;
-} ww_format_caps_caller_t;
-
-/* High-level wrapper around `ww_bridge_send_format_caps` that takes
- * caller-owned C arrays and the negotiation scalars in one struct.
- * Use this when assembling format caps from a probe loop — both
- * renderer plugins go through this path. */
-int ww_bridge_send_format_caps_v2(int sock, const ww_format_caps_caller_t* m);
+int ww_bridge_send_format_caps(int sock, const waywallen_producer_capabilities_t* capabilities);
 
 /* Emit `BindFailed` — non-terminal report that the renderer could not
  * satisfy a `negotiate_buffers` request. Daemon blacklists the
  * (fourcc, modifier) pair on this renderer and re-runs the picker. */
-int ww_bridge_send_bind_failed(int sock, uint32_t fourcc, uint64_t modifier, uint32_t reason,
-                               const char* message);
+int ww_bridge_send_bind_failed(int sock, const waywallen_bind_failure_t* failure);
 
 /* Emit an `Error` event with a text message. */
 int ww_bridge_send_error(int sock, const char* msg);
 
-/* Emit `ReportState` — kv-list of renderer-published state the daemon
- * merges into its per-renderer view. Same wire shape as the inbound
- * `setting_changed` event but the other direction.
- *
- * Recognised keys (v1):
- *   `clear_color` — `"r,g,b,a"`, four floats in 0..=1, comma-separated;
- *                   feeds the daemon's display `set_config.clear_*`.
- *
- * Caller owns the `ww_kv_list_t` storage; the bridge reads it and
- * encodes — no ownership transfer. */
-int ww_bridge_send_report_state(int sock, const ww_evt_report_state_t* m);
+/* Emit typed renderer state. The caller retains all storage. */
+int ww_bridge_send_report_state(int sock, const waywallen_renderer_state_t* state);
 
-/* Convenience: publish a single `clear_color = "r,g,b,a"` kv pair.
- * Components are clamped to `[0, 1]` and formatted with `%.6f`. The
- * caller is expected to dedupe against the previous published value
- * (cheap to keep four floats around per-renderer). */
+/* Convenience: publish a typed clear color. Components are clamped to
+ * `[0, 1]`; callers should deduplicate unchanged values. */
 int ww_bridge_send_report_state_clear_color(int sock, float r, float g, float b, float a);
+
+/* Replace the complete runtime optional-event subscription set. `revision`
+ * starts at 1 and increases monotonically for this connection. The daemon
+ * replies with `WW_EVT_IN_EVENT_SUBSCRIPTIONS_APPLIED` before it begins
+ * delivering events for the new revision. An empty array unsubscribes from
+ * every optional event. */
+#define WW_BRIDGE_MAX_EVENT_SUBSCRIPTIONS 16u
+int ww_bridge_set_event_subscriptions(int sock, const waywallen_event_subscription_t* subscription);
 
 /* -----------------------------------------------------------------------
  * Modifier negotiation
@@ -291,7 +244,7 @@ typedef struct ww_negotiation_state {
 int ww_bridge_negotiation_contains(const ww_negotiation_state_t* neg, uint32_t fourcc,
                                    uint64_t modifier);
 
-/* Populate a `ww_format_caps_caller_t` from the negotiation state plus
+/* Populate a generated producer-capability struct from the negotiation state plus
  * caller-provided scratch arrays. Walks `advertised` collapsing
  * contiguous same-fourcc runs into the wire format's
  * `(fourccs[], mod_counts[])` shape; relies on the
@@ -305,13 +258,13 @@ int ww_bridge_negotiation_contains(const ww_negotiation_state_t* neg, uint32_t f
  *   - `scratch_plane_counts` [advertised_count]
  *
  * Caller still fills the scalar negotiation knobs (sync_caps,
- * color_caps, mem_hints, extent_max, UUIDs, drm_render_*) on `out`
+ * color_caps, mem_hints, max_extent, UUIDs, drm_node) on `out`
  * after this call. */
 void ww_bridge_negotiation_fill_format_caps(const ww_negotiation_state_t* neg,
                                             uint32_t* scratch_fourccs, uint32_t* scratch_mod_counts,
-                                            uint64_t*                scratch_modifiers,
-                                            uint32_t*                scratch_plane_counts,
-                                            ww_format_caps_caller_t* out);
+                                            uint64_t*                          scratch_modifiers,
+                                            uint32_t*                          scratch_plane_counts,
+                                            waywallen_producer_capabilities_t* out);
 
 /* -----------------------------------------------------------------------
  * Renderer utilities
@@ -326,13 +279,6 @@ void ww_bridge_negotiation_fill_format_caps(const ww_negotiation_state_t* neg,
  * the (vanishingly rare) clock_gettime failure rather than crashing —
  * the daemon treats ts_ns as advisory. */
 uint64_t ww_bridge_now_ns(void);
-
-/* (Removed in Step 3 of the renderer-Init refactor: the
- * `ww_bridge_skip_unknown_kv_arg` helper is gone — every in-tree
- * renderer now consumes spawn parameters from the typed `Init`
- * message and parses only `--ipc` plus a small fixed set of
- * standalone-debug flags. The wescene renderer in OWE uses argparse
- * and never linked the helper, so its migration is independent.) */
 
 /* -----------------------------------------------------------------------
  * Diagnostics
@@ -370,19 +316,20 @@ void ww_bridge_log_gpu_info(const char* prefix, const ww_gpu_info_field_t* field
 typedef struct ww_bridge_control {
     ww_event_in_op_t op;
     union {
-        ww_evt_in_init_t              init;
-        ww_evt_in_setting_changed_t   setting_changed;
-        ww_evt_in_play_t              play;
-        ww_evt_in_pause_t             pause;
-        ww_evt_in_mute_t              mute;
-        ww_evt_in_unmute_t            unmute;
-        ww_evt_in_pointer_motion_t    pointer_motion;
-        ww_evt_in_pointer_button_t    pointer_button;
-        ww_evt_in_pointer_axis_t      pointer_axis;
-        ww_evt_in_mpris_t             mpris;
-        ww_evt_in_set_fps_t           set_fps;
-        ww_evt_in_shutdown_t          shutdown;
-        ww_evt_in_negotiate_buffers_t negotiate_buffers;
+        ww_evt_in_init_t                        init;
+        ww_evt_in_setting_changed_t             setting_changed;
+        ww_evt_in_play_t                        play;
+        ww_evt_in_pause_t                       pause;
+        ww_evt_in_mute_t                        mute;
+        ww_evt_in_unmute_t                      unmute;
+        ww_evt_in_pointer_motion_t              pointer_motion;
+        ww_evt_in_pointer_button_t              pointer_button;
+        ww_evt_in_pointer_axis_t                pointer_axis;
+        ww_evt_in_mpris_t                       mpris;
+        ww_evt_in_event_subscriptions_applied_t event_subscriptions_applied;
+        ww_evt_in_audio_window_t                audio_window;
+        ww_evt_in_shutdown_t                    shutdown;
+        ww_evt_in_negotiate_buffers_t           negotiate_buffers;
     } u;
 } ww_bridge_control_t;
 
@@ -395,57 +342,15 @@ int ww_bridge_recv_control(int sock, ww_bridge_control_t* out);
 void ww_bridge_control_free(ww_bridge_control_t* msg);
 
 /* -----------------------------------------------------------------------
- * Init handshake (v4) — typed spawn payload + structured rejection
- *
- * Step 1 of the renderer-Init refactor adds these helpers; renderers
- * are NOT yet wired to call them (Step 3 swaps each renderer's
- * `main.cpp`). The daemon already double-sends — legacy `--key value`
- * argv plus a typed `init` request immediately after accept(). When
- * Step 3 lands, every renderer's `main` will:
- *
- *   int sock = ww_bridge_connect(socket_path);
- *   ww_bridge_init_t init = {0};
- *   int rc = ww_bridge_recv_init(sock, &init);
- *   if (rc < 0) {
- *       ww_bridge_send_init_nack(sock, init.spawn_version,
- *                                WW_BRIDGE_SUPPORTED_SPAWN_VERSION,
- *                                "rejected");
- *       exit(1);
- *   }
- *   // ... use init.{settings, user_properties} to drive renderer init.
- *   //     Render-target size is the renderer's own choice — combine
- *   //     its content's native size with the `resolution` kv if the
- *   //     manifest declares one (see <waywallen-bridge/resolution.h>).
- *   ww_bridge_init_free(&init);
+ * Init handshake
  * ----------------------------------------------------------------------- */
 
 /* Renderer IPC compatibility version this build of the bridge handles.
  * Bump when the daemon/renderer wire contract changes; `ww_bridge_recv_init`
  * validates the value sent by the daemon matches and returns -EPROTO
  * otherwise. */
-#define WW_BRIDGE_SUPPORTED_PROTOCOL_VERSION 2u
-#define WW_BRIDGE_SUPPORTED_SPAWN_VERSION    8u
-
-/* Caller-friendly view of the typed Init payload. The kv list is
- * heap-owned (transferred from the underlying `ww_evt_in_init_t`
- * decode); call `ww_bridge_init_free` exactly once after consumption.
- *
- * Resource path + plugin-specific extras (assets, workshop_id, …)
- * arrive on the renderer's CLI argv, NOT in this struct. fps,
- * test_pattern, volume, loop_file, hwdec, render_node, resolution, …
- * all live as keys in `settings` whenever the renderer's manifest
- * declares them; no scalar gets promoted to a typed wire field. */
-typedef struct ww_bridge_init {
-    uint32_t     protocol_version;
-    uint32_t     spawn_version;
-    ww_kv_list_t settings;
-    /* Raw JSON object forwarded from the DB row's
-     * `user_property_overrides` column (project.json property key →
-     * value). The renderer decodes once and routes through its
-     * user-property pipeline. `NULL` / "" when no overrides exist.
-     * Heap-owned; freed by `ww_bridge_init_free`. */
-    char* user_properties;
-} ww_bridge_init_t;
+#define WW_BRIDGE_SUPPORTED_PROTOCOL_VERSION 3u
+#define WW_BRIDGE_SUPPORTED_SPAWN_VERSION    9u
 
 /* Receive the daemon's typed `init` request and copy it into `out`.
  *
@@ -457,15 +362,10 @@ typedef struct ww_bridge_init {
  *     `spawn_version != WW_BRIDGE_SUPPORTED_SPAWN_VERSION`, decoded
  *     values remain available to the caller and the function returns
  *     -EPROTO. Heap fields must still be released via
- *     `ww_bridge_init_free`.
+ *     `waywallen_renderer_init_free`.
  *   - On success returns 0; ownership of every heap allocation
  *     transfers to the caller. */
-int ww_bridge_recv_init(int sock, ww_bridge_init_t* out);
-
-/* Release every heap allocation inside `out`. Safe to call on a
- * zero-initialized struct or after a successful free. Always returns
- * with `out` cleared. */
-void ww_bridge_init_free(ww_bridge_init_t* out);
+int ww_bridge_recv_init(int sock, waywallen_renderer_init_t* out);
 
 /* Emit an `init_nack` event back to the daemon (subprocess →
  * daemon). Used when `ww_bridge_recv_init` returns -EPROTO due to a
@@ -475,108 +375,36 @@ void ww_bridge_init_free(ww_bridge_init_t* out);
  *
  * `reason` may be NULL (encoded as the empty string). Returns 0 on
  * success or a negative errno / WW_ERR_* on failure. */
-int ww_bridge_send_init_nack(int sock, uint32_t received_spawn_version,
-                             uint32_t supported_spawn_version, const char* reason);
+int ww_bridge_send_init_nack(int sock, const waywallen_init_rejection_t* rejection);
 
 /* -----------------------------------------------------------------------
- * setting_changed — runtime hot-reload of plugin settings
- *
- * The daemon fires `setting_changed` over a live renderer's IPC socket
- * whenever a non-identity plugin setting changes — e.g. `loop_file` /
- * `hwdec` for mpv, `volume` for wescene, `fps` for any plugin whose
- * manifest declares it. The whole payload is a kv list (same shape
- * as `init.settings`); no typed scalars are promoted.
+ * Runtime optional events
  * ----------------------------------------------------------------------- */
 
-/* Caller-friendly view of the setting_changed payload. Backing storage
- * lives in the underlying `ww_bridge_control_t::u.setting_changed`;
- * `_from_control` transfers ownership of the heap kv list into this
- * struct, so the caller MUST call `ww_bridge_setting_changed_free`
- * exactly once (NOT `ww_bridge_control_free`) when done. */
-typedef struct ww_bridge_setting_changed {
-    ww_kv_list_t settings;
-} ww_bridge_setting_changed_t;
+#define WW_BRIDGE_AUDIO_SAMPLE_RATE   48000u
+#define WW_BRIDGE_AUDIO_CHANNELS      2u
+#define WW_BRIDGE_AUDIO_WINDOW_FRAMES 4096u
+#define WW_BRIDGE_AUDIO_SAMPLE_COUNT  (WW_BRIDGE_AUDIO_CHANNELS * WW_BRIDGE_AUDIO_WINDOW_FRAMES)
+#define WW_BRIDGE_AUDIO_END_OF_STREAM 1u
 
-/* Peel the setting_changed typed view out of a generic control message.
- * On success, ownership of the heap kv list moves from `ctrl` into
- * `out`; `ctrl->u.setting_changed.settings` is zeroed so a follow-up
- * `ww_bridge_control_free(ctrl)` is a no-op for that arm.
- * Returns 0 on success, -EINVAL if `ctrl->op != WW_EVT_IN_SETTING_CHANGED`
- * or either pointer is NULL. */
-int ww_bridge_setting_changed_from_control(ww_bridge_control_t*         ctrl,
-                                           ww_bridge_setting_changed_t* out);
+typedef struct ww_bridge_audio_window {
+    uint64_t subscription_revision;
+    uint64_t generation;
+    uint64_t sequence;
+    uint64_t captured_at_ns;
+    uint64_t end_sample_frame;
+    uint32_t sample_rate_hz;
+    uint32_t channels;
+    uint32_t frames;
+    uint32_t flags;
+    float    samples[WW_BRIDGE_AUDIO_SAMPLE_COUNT];
+} ww_bridge_audio_window_t;
 
-/* Release every heap allocation inside `out`. Safe to call on a
- * zero-initialized struct or after a successful free. Always returns
- * with `out` cleared. */
-void ww_bridge_setting_changed_free(ww_bridge_setting_changed_t* out);
-
-/* -----------------------------------------------------------------------
- * Pointer events — optional, gated by manifest `events = ["pointer"]`
- *
- * The daemon forwards these only when the renderer's manifest declared
- * the "pointer" subscription. They are POD copies of the wire payload,
- * with no heap-owned fields, so no _free is required. The semantics of
- * (button, state, source, modifiers) mirror waywallen-display-v1's
- * pointer events.
- * ----------------------------------------------------------------------- */
-
-typedef struct ww_bridge_pointer_motion {
-    float    x;
-    float    y;
-    uint64_t timestamp_us;
-    uint32_t modifiers;
-} ww_bridge_pointer_motion_t;
-
-typedef struct ww_bridge_pointer_button {
-    float    x;
-    float    y;
-    uint32_t button;
-    uint32_t state;
-    uint64_t timestamp_us;
-    uint32_t modifiers;
-} ww_bridge_pointer_button_t;
-
-typedef struct ww_bridge_pointer_axis {
-    float    x;
-    float    y;
-    float    delta_x;
-    float    delta_y;
-    uint32_t source;
-    uint64_t timestamp_us;
-    uint32_t modifiers;
-} ww_bridge_pointer_axis_t;
-
-typedef struct ww_bridge_mpris {
-    uint32_t state;
-    char*    title;
-    char*    artist;
-    char*    album;
-    char*    album_artist;
-    char*    art_url;
-    char*    previous_art_url;
-} ww_bridge_mpris_t;
-
-/* Peel a pointer-event view out of a generic control message. POD
- * copies — `ctrl` keeps no resources, so a trailing
- * `ww_bridge_control_free(ctrl)` is still safe (and a no-op for the
- * pointer arms). Returns -EINVAL when `ctrl->op` doesn't match. */
-int ww_bridge_pointer_motion_from_control(ww_bridge_control_t*        ctrl,
-                                          ww_bridge_pointer_motion_t* out);
-int ww_bridge_pointer_button_from_control(ww_bridge_control_t*        ctrl,
-                                          ww_bridge_pointer_button_t* out);
-int ww_bridge_pointer_axis_from_control(ww_bridge_control_t* ctrl, ww_bridge_pointer_axis_t* out);
-
-/* -----------------------------------------------------------------------
- * MPRIS media events — optional, gated by manifest `events = ["mpris"]`
- *
- * The daemon sends already-normalized media snapshots. String storage is
- * heap-owned; `_from_control` transfers it from `ctrl` into `out`, and
- * the caller MUST release it with `ww_bridge_mpris_free`.
- * ----------------------------------------------------------------------- */
-
-int  ww_bridge_mpris_from_control(ww_bridge_control_t* ctrl, ww_bridge_mpris_t* out);
-void ww_bridge_mpris_free(ww_bridge_mpris_t* out);
+/* Copy and validate a complete PCM window or an explicit end marker. `ctrl`
+ * retains its allocations and must still be released with
+ * `ww_bridge_control_free`. */
+int ww_bridge_audio_window_from_control(const ww_bridge_control_t* ctrl,
+                                        ww_bridge_audio_window_t*  out);
 
 #ifdef __cplusplus
 } /* extern "C" */
