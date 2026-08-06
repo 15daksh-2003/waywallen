@@ -120,7 +120,7 @@ auto global_to_map(const proto::GlobalSettings& g) -> QVariantMap {
         ! has_renderer || ! g.renderer().hasEnableAudio() || g.renderer().enableAudio();
     m[u"renderer.volume"_s] =
         has_renderer && g.renderer().hasVolume() ? g.renderer().volume() : 100;
-    m[u"hideTrayIcon"_s]              = g.hideTrayIcon();
+    m[u"hideTrayIcon"_s] = g.hideTrayIcon();
     QStringList wallpaper_skip_types;
     for (const auto& t : g.wallpaperSkipTypes()) {
         wallpaper_skip_types.append(t);
