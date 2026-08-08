@@ -818,30 +818,66 @@ impl Router {
         Some(target_id)
     }
 
-    /// Re-emit composition config for a single display to pick up new
-    /// settings without rebinding buffers.
-    async fn resync_display_composition(self: &Arc<Self>, display_id: DisplayId) {
+    /// Re-emit composition config before asking each affected renderer
+    /// for one current frame. Each display's outbound channel preserves
+    /// this order.
+    async fn resync_display_compositions(
+        self: &Arc<Self>,
+        display_ids: impl IntoIterator<Item = DisplayId>,
+    ) {
+        let display_ids: HashSet<DisplayId> = display_ids.into_iter().collect();
+        let mut renderer_requests: HashMap<String, u64> = HashMap::new();
         let mut inner = self.inner.lock().await;
-        if !inner.displays.contains_key(&display_id) {
-            return;
+        for display_id in display_ids {
+            if !inner.displays.contains_key(&display_id) {
+                continue;
+            }
+            let display_links = inner.table.links_for_display(display_id);
+            let target = display_links.into_iter().find(|l| l.enabled).and_then(|l| {
+                let binding = inner.displays.get(&display_id)?.binding.as_ref()?;
+                (binding.renderer.id == l.renderer_id).then(|| {
+                    (
+                        l,
+                        Arc::clone(&binding.pool),
+                        binding.wire_generation,
+                        binding.renderer.id.clone(),
+                    )
+                })
+            });
+            let Some((link, pool, buffer_generation, renderer_id)) = target else {
+                continue;
+            };
+            inner.next_config_generation += 1;
+            let cfg_gen = inner.next_config_generation;
+            let info = inner.displays.get(&display_id).unwrap().info.clone();
+            let layout = self.resolved_layout_for_renderer(&info, &link.renderer_id, &inner);
+            let cfg = project_link(&link, &pool, &info, cfg_gen, buffer_generation, &layout);
+            if let Some(state) = inner.displays.get(&display_id) {
+                if state
+                    .tx
+                    .send(DisplayOutEvent::SetCompositionConfig(cfg))
+                    .is_ok()
+                {
+                    renderer_requests
+                        .entry(renderer_id)
+                        .and_modify(|generation| *generation = (*generation).max(cfg_gen))
+                        .or_insert(cfg_gen);
+                }
+            }
         }
-        let display_links = inner.table.links_for_display(display_id);
-        let target = display_links.into_iter().find(|l| l.enabled).and_then(|l| {
-            let binding = inner.displays.get(&display_id)?.binding.as_ref()?;
-            (binding.renderer.id == l.renderer_id)
-                .then(|| (l, Arc::clone(&binding.pool), binding.wire_generation))
-        });
-        let Some((link, pool, buffer_generation)) = target else {
-            return;
-        };
-        inner.next_config_generation += 1;
-        let cfg_gen = inner.next_config_generation;
-        let info = inner.displays.get(&display_id).unwrap().info.clone();
-        let layout = self.resolved_layout_for_renderer(&info, &link.renderer_id, &inner);
-        let cfg = project_link(&link, &pool, &info, cfg_gen, buffer_generation, &layout);
-        if let Some(state) = inner.displays.get(&display_id) {
-            let _ = state.tx.send(DisplayOutEvent::SetCompositionConfig(cfg));
+        drop(inner);
+
+        for (renderer_id, config_generation) in renderer_requests {
+            if let Err(error) = self.mgr.request_frame(&renderer_id).await {
+                log::warn!(
+                    "router: request current frame from renderer {renderer_id} after composition config generation {config_generation}: {error}"
+                );
+            }
         }
+    }
+
+    async fn resync_display_composition(self: &Arc<Self>, display_id: DisplayId) {
+        self.resync_display_compositions([display_id]).await;
     }
 
     async fn resolve_display_mutation_target(
@@ -869,9 +905,7 @@ impl Router {
             let inner = self.inner.lock().await;
             inner.displays.keys().copied().collect()
         };
-        for did in ids {
-            self.resync_display_composition(did).await;
-        }
+        self.resync_display_compositions(ids).await;
     }
 
     /// Push a DisplaysReplace router event after a settings-only
@@ -1040,9 +1074,8 @@ impl Router {
                 .map(|l| l.display_id)
                 .collect()
         };
-        for did in &display_ids {
-            self.resync_display_composition(*did).await;
-        }
+        self.resync_display_compositions(display_ids.iter().copied())
+            .await;
         if !display_ids.is_empty() {
             let all = self.snapshot_displays().await;
             self.emit(RouterEvent::DisplaysReplace(all));
@@ -1336,9 +1369,7 @@ impl Router {
             }
             affected
         };
-        for did in affected {
-            self.resync_display_composition(did).await;
-        }
+        self.resync_display_compositions(affected).await;
     }
 
     pub async fn set_display_metrics(
@@ -2436,7 +2467,7 @@ impl Router {
         clear_rgba: Option<[f32; 4]>,
         z_order: Option<i32>,
     ) -> bool {
-        let payload: Option<(DisplayId, CompositionConfig)> = {
+        let affected_display = {
             let mut inner = self.inner.lock().await;
             let changed = inner
                 .table
@@ -2447,34 +2478,18 @@ impl Router {
             let Some(link) = inner.table.get_link(link_id).cloned() else {
                 return false;
             };
-            let (info, pool, buffer_generation) = match inner.displays.get(&link.display_id) {
-                Some(state) => match state.binding.as_ref() {
-                    Some(binding) if binding.renderer.id == link.renderer_id => (
-                        state.info.clone(),
-                        Arc::clone(&binding.pool),
-                        binding.wire_generation,
-                    ),
-                    _ => return true,
-                },
-                None => return false,
-            };
-            inner.next_config_generation += 1;
-            let cfg_gen = inner.next_config_generation;
-            let layout = self.resolved_layout_for_renderer(&info, &link.renderer_id, &inner);
-            let cfg = project_link(&link, &pool, &info, cfg_gen, buffer_generation, &layout);
-            Some((link.display_id, cfg))
+            inner
+                .displays
+                .contains_key(&link.display_id)
+                .then_some(link.display_id)
         };
-        let affected_display = payload.as_ref().map(|(d, _)| *d);
-        if let Some((did, cfg)) = payload {
-            let inner = self.inner.lock().await;
-            if let Some(state) = inner.displays.get(&did) {
-                let _ = state.tx.send(DisplayOutEvent::SetCompositionConfig(cfg));
-            }
-        }
         if let Some(did) = affected_display {
+            self.resync_display_composition(did).await;
             if let Some(snap) = self.snapshot_display(did).await {
                 self.emit(RouterEvent::DisplayUpsert(snap));
             }
+        } else {
+            return false;
         }
         true
     }
@@ -4488,6 +4503,48 @@ mod tests {
         assert_eq!(
             router.snapshot_display(h.id).await.unwrap().refresh_mhz,
             75_000
+        );
+    }
+
+    #[tokio::test]
+    async fn composition_resync_requests_one_frame_per_renderer() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        let (renderer, peer) = RendererHandle::test_stub_with_peer("r1", "scene");
+        renderer.test_publish_pool(fake_published_pool(1, 1920, 1080));
+        mgr.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer).await;
+
+        let mut first = router.register_display(reg("HDMI-A-1", 1920, 1080)).await;
+        let mut second = router.register_display(reg("DP-1", 1920, 1080)).await;
+        let _ = last_composition_config(&mut first.rx);
+        let _ = last_composition_config(&mut second.rx);
+        drain_renderer_controls(&peer);
+
+        router.resync_all_compositions().await;
+
+        assert!(last_composition_config(&mut first.rx).is_some());
+        assert!(last_composition_config(&mut second.rx).is_some());
+        let (message, fds) = crate::ipc::uds::recv_control(&peer).expect("request_frame");
+        assert_eq!(message, ControlMsg::RequestFrame);
+        assert!(fds.is_empty());
+
+        peer.set_read_timeout(Some(Duration::from_millis(10)))
+            .unwrap();
+        let extra = crate::ipc::uds::recv_control(&peer);
+        assert!(
+            matches!(
+                &extra,
+                Err(crate::ipc::uds::CodecError::Io(error))
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    )
+            ) || matches!(
+                &extra,
+                Err(crate::ipc::uds::CodecError::Nix(nix::errno::Errno::EAGAIN))
+            ),
+            "unexpected control after deduplicated request: {extra:?}"
         );
     }
 

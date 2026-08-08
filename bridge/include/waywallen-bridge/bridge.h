@@ -330,6 +330,7 @@ typedef struct ww_bridge_control {
         ww_evt_in_audio_window_t                audio_window;
         ww_evt_in_shutdown_t                    shutdown;
         ww_evt_in_negotiate_buffers_t           negotiate_buffers;
+        ww_evt_in_request_frame_t               request_frame;
     } u;
 } ww_bridge_control_t;
 
@@ -350,7 +351,7 @@ void ww_bridge_control_free(ww_bridge_control_t* msg);
  * validates the value sent by the daemon matches and returns -EPROTO
  * otherwise. */
 #define WW_BRIDGE_SUPPORTED_PROTOCOL_VERSION 3u
-#define WW_BRIDGE_SUPPORTED_SPAWN_VERSION    9u
+#define WW_BRIDGE_SUPPORTED_SPAWN_VERSION    10u
 
 /* Receive the daemon's typed `init` request and copy it into `out`.
  *

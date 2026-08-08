@@ -94,6 +94,10 @@ struct ww_pool {
     uint32_t                  release_slot_count;
     uint32_t                  next_slot;
     uint64_t                  next_acquire_serial;
+    int                       latest_acquire_sync_fd;
+    uint64_t                  latest_bind_generation;
+    uint32_t                  latest_slot_index;
+    bool                      latest_content_valid;
 
     /* Producer-side advertised caps (filled by backend->advertise_caps).
      * Stable across the pool's lifetime once advertise has run. */

@@ -217,6 +217,7 @@ struct HostState {
     std::mutex              neg_mu;
     std::condition_variable neg_cv;
     bool                    neg_pending { false };
+    bool                    frame_request_pending { false };
     ww_pool_directive_t     neg_directive {};
     std::mutex              send_mu;
 
@@ -328,6 +329,46 @@ int cancel_slot_wait(void* userdata) {
     if (host.shutdown.load(std::memory_order_acquire)) return 1;
     std::lock_guard<std::mutex> lk(host.neg_mu);
     return host.neg_pending ? 1 : 0;
+}
+
+enum class RepublishStatus
+{
+    Published,
+    Cancelled,
+    Failed,
+};
+
+RepublishStatus republish_latest(HostState& host) {
+    std::lock_guard<std::mutex> send_lk(host.send_mu);
+    ww_pool_republish_result_t  result {};
+    const int                   rc = ww_bridge_pool_wait_republish_latest(
+        host.pool, host.sock, cancel_slot_wait, &host, &result);
+    if (rc != 0) {
+        rstd_error("waywallen-image-renderer: republish contract failed: {}", rc);
+        return RepublishStatus::Failed;
+    }
+    switch (result.status) {
+    case WW_POOL_REPUBLISH_PUBLISHED:
+        rstd_debug("waywallen-image-renderer: republished slot {} seq={}",
+                   result.slot_index,
+                   result.sequence);
+        return RepublishStatus::Published;
+    case WW_POOL_REPUBLISH_CANCELLED: return RepublishStatus::Cancelled;
+    case WW_POOL_REPUBLISH_NO_CONTENT:
+    case WW_POOL_REPUBLISH_BUSY:
+        rstd_error("waywallen-image-renderer: current frame cannot be republished "
+                   "(status={}, error={})",
+                   static_cast<int>(result.status),
+                   result.error_code);
+        return RepublishStatus::Failed;
+    case WW_POOL_REPUBLISH_SESSION_LOST:
+    case WW_POOL_REPUBLISH_ERROR:
+        rstd_error("waywallen-image-renderer: republish failed (status={}, error={})",
+                   static_cast<int>(result.status),
+                   result.error_code);
+        return RepublishStatus::Failed;
+    }
+    return RepublishStatus::Failed;
 }
 
 UploadStatus upload_to_slot(HostState& host, wavsen::video::Producer& producer,
@@ -502,6 +543,14 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
             std::lock_guard<std::mutex> lk(host.neg_mu);
             host.neg_directive = d;
             host.neg_pending   = true;
+        }
+        host.neg_cv.notify_all();
+        break;
+    }
+    case WW_EVT_IN_REQUEST_FRAME: {
+        {
+            std::lock_guard<std::mutex> lk(host.neg_mu);
+            host.frame_request_pending = true;
         }
         host.neg_cv.notify_all();
         break;
@@ -899,20 +948,32 @@ int run(int argc, char** argv) {
         reader_loop(host);
     });
 
-    /* Main loop: drain pending negotiate requests as they come. Static
-     * image: one upload per directive is enough; afterwards we just
-     * wait for shutdown. */
+    /* Main loop: negotiation publishes new content; request_frame only
+     * republishes the latest released slot. */
     while (! host.shutdown.load(std::memory_order_acquire)) {
         std::unique_lock<std::mutex> lk(host.neg_mu);
         host.neg_cv.wait(lk, [&] {
-            return host.neg_pending || host.shutdown.load(std::memory_order_acquire);
+            return host.neg_pending ||
+                   (host.frame_request_pending &&
+                    host.negotiated.load(std::memory_order_acquire)) ||
+                   host.shutdown.load(std::memory_order_acquire);
         });
         if (host.shutdown.load(std::memory_order_acquire)) break;
         if (host.neg_pending) {
-            ww_pool_directive_t d = host.neg_directive;
-            host.neg_pending      = false;
+            ww_pool_directive_t d      = host.neg_directive;
+            host.neg_pending           = false;
+            host.frame_request_pending = false;
             lk.unlock();
             apply_negotiate_request(host, *producer, d);
+            continue;
+        }
+        if (host.frame_request_pending) {
+            host.frame_request_pending = false;
+            lk.unlock();
+            const auto status = republish_latest(host);
+            if (status == RepublishStatus::Failed) {
+                signal_shutdown(host);
+            }
         }
     }
 

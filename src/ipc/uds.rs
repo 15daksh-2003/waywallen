@@ -264,6 +264,16 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_request_frame() {
+        let (a, b) = pair();
+        let sent = EventIn::RequestFrame;
+        send_control(&a, &sent, &[]).unwrap();
+        let (got, fds) = recv_control(&b).unwrap();
+        assert_eq!(sent, got);
+        assert!(fds.is_empty());
+    }
+
+    #[test]
     fn roundtrip_apply_settings() {
         let (a, b) = pair();
         // SPAWN_VERSION 3: pure kv. fps lives as a kv key when the
@@ -294,7 +304,7 @@ mod tests {
         let sent = EventIn::Init {
             config: RendererInit {
                 protocol_version: PROTOCOL_VERSION,
-                spawn_version: 9,
+                spawn_version: 10,
                 settings: vec![("fps".into(), "60".into()), ("volume".into(), "1.0".into())],
                 user_properties: String::new(),
             },

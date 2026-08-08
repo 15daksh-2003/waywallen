@@ -298,7 +298,9 @@
     <fds count_expr="count * planes_per_buffer"/>
   </event>
 
-  <!-- Composition-only update for the current buffer generation. -->
+  <!-- Composition-only update for the current buffer generation. It does
+       not rebind the pool; the daemon schedules a current-content frame
+       after publishing the new config. -->
   <event name="set_composition_config" opcode="4">
     <arg name="config" type="composition_config"/>
   </event>

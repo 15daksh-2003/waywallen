@@ -252,6 +252,35 @@ int ww_bridge_pool_submit_acquired_slot(ww_pool_t* pool, int sock,
                                         int                            acquire_sync_fd,
                                         ww_pool_slot_submit_result_t*  out_result);
 
+typedef enum ww_pool_republish_status
+{
+    WW_POOL_REPUBLISH_PUBLISHED    = 0,
+    WW_POOL_REPUBLISH_NO_CONTENT   = 1,
+    WW_POOL_REPUBLISH_BUSY         = 2,
+    WW_POOL_REPUBLISH_CANCELLED    = 3,
+    WW_POOL_REPUBLISH_SESSION_LOST = 4,
+    WW_POOL_REPUBLISH_ERROR        = 5,
+} ww_pool_republish_status_t;
+
+typedef struct ww_pool_republish_result {
+    ww_pool_republish_status_t status;
+    int32_t                    error_code;
+    uint32_t                   slot_index;
+    uint64_t                   sequence;
+    uint64_t                   release_point;
+} ww_pool_republish_result_t;
+
+/* Publish the most recently submitted slot again without modifying its
+ * contents. The previous consumer release must complete first; the new
+ * frame always receives a fresh sequence and release point. */
+int ww_bridge_pool_try_republish_latest(ww_pool_t* pool, int sock,
+                                        ww_pool_republish_result_t* out_result);
+
+/* Wait for the latest slot's release and republish it. Cancellation does
+ * not discard the retained content, so a later request may retry. */
+int ww_bridge_pool_wait_republish_latest(ww_pool_t* pool, int sock, ww_pool_cancel_fn cancel,
+                                         void* userdata, ww_pool_republish_result_t* out_result);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

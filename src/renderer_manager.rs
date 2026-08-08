@@ -21,7 +21,7 @@ use crate::ipc::uds::{recv_event, send_control};
 
 /// Renderer IPC compatibility version the daemon currently emits. Bump
 /// this when the daemon/renderer wire contract changes.
-pub const SPAWN_VERSION: u32 = 9;
+pub const SPAWN_VERSION: u32 = 10;
 use crate::plugin::renderer_registry::{RendererActivityMode, RendererDef, RendererRegistry};
 use crate::routing::Router;
 use crate::settings::SettingsStore;
@@ -1375,6 +1375,14 @@ impl RendererManager {
             self.mark_dead(id);
             Error::RendererControlFailed(format!("send_control: {error}"))
         })
+    }
+
+    /// Ask a renderer to publish its current content once. The renderer
+    /// may satisfy this with its next normal frame or republish the latest
+    /// released slot without advancing content time.
+    pub async fn request_frame(&self, id: &str) -> Result<()> {
+        log::debug!("renderer {id}: request current frame");
+        self.send_control(id, ControlMsg::RequestFrame).await
     }
 
     /// Dispatch the complete buffer allocation decision.
@@ -2751,6 +2759,23 @@ mod reuse_tests {
             mgr.find_reusable(&req).await.is_none(),
             "different path must miss reuse",
         );
+    }
+
+    #[tokio::test]
+    async fn request_frame_writes_typed_control() {
+        let mut registry = RendererRegistry::new();
+        registry.register(def_mpv());
+        let mgr = RendererManager::new(registry);
+        let (handle, peer) = RendererHandle::test_stub_with_peer("h1", "image");
+        mgr.register_test_handle(handle).await;
+
+        let reader = std::thread::spawn(move || {
+            crate::ipc::uds::recv_control(&peer).expect("recv request_frame")
+        });
+        mgr.request_frame("h1").await.expect("request_frame send");
+        let (message, fds) = reader.join().expect("peer joined");
+        assert_eq!(message, ControlMsg::RequestFrame);
+        assert!(fds.is_empty());
     }
 
     #[tokio::test]

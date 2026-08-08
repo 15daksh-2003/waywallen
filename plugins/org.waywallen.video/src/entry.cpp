@@ -264,6 +264,8 @@ struct HostState {
     std::mutex              neg_mu;
     std::condition_variable neg_cv;
     bool                    neg_pending { false };
+    uint64_t                frame_request_revision { 0 };
+    uint64_t                served_frame_request_revision { 0 };
     ww_pool_directive_t     neg_directive {};
     std::mutex              send_mu;
 
@@ -490,10 +492,77 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
         host.neg_cv.notify_all();
         break;
     }
+    case WW_EVT_IN_REQUEST_FRAME: {
+        {
+            std::lock_guard<std::mutex> lk(host.neg_mu);
+            if (host.frame_request_revision == std::numeric_limits<uint64_t>::max()) {
+                host.frame_request_revision        = 1;
+                host.served_frame_request_revision = 0;
+            } else {
+                ++host.frame_request_revision;
+            }
+        }
+        host.neg_cv.notify_all();
+        break;
+    }
     default:
         rstd_warn("waywallen-video-renderer: unknown control op {}", static_cast<int>(c.op));
         break;
     }
+}
+
+uint64_t pending_frame_request(HostState& host) {
+    std::lock_guard<std::mutex> lk(host.neg_mu);
+    return host.frame_request_revision > host.served_frame_request_revision
+               ? host.frame_request_revision
+               : 0;
+}
+
+void complete_frame_request(HostState& host, uint64_t revision) {
+    if (revision == 0) return;
+    std::lock_guard<std::mutex> lk(host.neg_mu);
+    host.served_frame_request_revision = std::max(host.served_frame_request_revision, revision);
+}
+
+int cancel_republish_wait(void* userdata) {
+    auto& host = *static_cast<HostState*>(userdata);
+    if (host.shutdown.load(std::memory_order_acquire)) return 1;
+    std::lock_guard<std::mutex> lk(host.neg_mu);
+    return host.neg_pending ? 1 : 0;
+}
+
+bool republish_latest(HostState& host, uint64_t revision) {
+    std::lock_guard<std::mutex> send_lk(host.send_mu);
+    ww_pool_republish_result_t  result {};
+    const int                   rc = ww_bridge_pool_wait_republish_latest(
+        host.pool, host.sock, cancel_republish_wait, &host, &result);
+    if (rc != 0) {
+        rstd_error("waywallen-video-renderer: republish contract failed: {}", rc);
+        return false;
+    }
+    switch (result.status) {
+    case WW_POOL_REPUBLISH_PUBLISHED:
+        complete_frame_request(host, revision);
+        rstd_debug("waywallen-video-renderer: republished slot {} seq={}",
+                   result.slot_index,
+                   result.sequence);
+        return true;
+    case WW_POOL_REPUBLISH_CANCELLED: return true;
+    case WW_POOL_REPUBLISH_NO_CONTENT:
+    case WW_POOL_REPUBLISH_BUSY:
+        rstd_error("waywallen-video-renderer: current frame cannot be republished "
+                   "(status={}, error={})",
+                   static_cast<int>(result.status),
+                   result.error_code);
+        return false;
+    case WW_POOL_REPUBLISH_SESSION_LOST:
+    case WW_POOL_REPUBLISH_ERROR:
+        rstd_error("waywallen-video-renderer: republish failed (status={}, error={})",
+                   static_cast<int>(result.status),
+                   result.error_code);
+        return false;
+    }
+    return false;
 }
 
 void apply_audio_scale(wavsen::audio::AvPlayer* av_player, AudioRuntime& audio, float scale,
@@ -1174,8 +1243,9 @@ int run(int argc, char** argv) {
                                      audio_runtime.volume_pct);
             presenter.reset();
         }
-        const bool paused_now = host.paused.load(std::memory_order_acquire);
-        const bool muted_now  = host.muted.load(std::memory_order_acquire);
+        const bool     paused_now    = host.paused.load(std::memory_order_acquire);
+        const bool     muted_now     = host.muted.load(std::memory_order_acquire);
+        const uint64_t frame_request = pending_frame_request(host);
         sync_audio_state(current_av_player(),
                          audio_runtime,
                          paused_now,
@@ -1234,10 +1304,18 @@ int run(int argc, char** argv) {
         }
 
         if (paused_now && submitted_since_negotiate) {
+            if (frame_request != 0) {
+                if (! republish_latest(host, frame_request)) {
+                    signal_shutdown(host);
+                    break;
+                }
+                continue;
+            }
             std::unique_lock<std::mutex> lk(host.neg_mu);
             auto                         wake = [&] {
                 return host.shutdown.load(std::memory_order_acquire) || host.neg_pending ||
-                       ! host.paused.load(std::memory_order_acquire);
+                       ! host.paused.load(std::memory_order_acquire) ||
+                       host.frame_request_revision > host.served_frame_request_revision;
             };
             if (audio_runtime.pause_pending) {
                 host.neg_cv.wait_until(lk, audio_runtime.pause_at, wake);
@@ -1269,11 +1347,19 @@ int run(int argc, char** argv) {
         }
         const auto fs = std::move(fs_res).unwrap();
         if (fs == wavsen::video::NextFrame::Eof) {
+            if (frame_request != 0 && submitted_since_negotiate) {
+                if (! republish_latest(host, frame_request)) {
+                    signal_shutdown(host);
+                    break;
+                }
+                continue;
+            }
             rstd_info("waywallen-video-renderer: clean EOF (loop=off); idling until shutdown");
             std::unique_lock<std::mutex> lk(host.neg_mu);
             host.neg_cv.wait(lk, [&] {
                 return host.shutdown.load(std::memory_order_acquire) || host.neg_pending ||
-                       host.loop_pending.load(std::memory_order_acquire);
+                       host.loop_pending.load(std::memory_order_acquire) ||
+                       host.frame_request_revision > host.served_frame_request_revision;
             });
             continue;
         }
@@ -1408,6 +1494,7 @@ int run(int argc, char** argv) {
             break;
         }
         submitted_since_negotiate = true;
+        complete_frame_request(host, frame_request);
     }
 
     if (reader.joinable()) {

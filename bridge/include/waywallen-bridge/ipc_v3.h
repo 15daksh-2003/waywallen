@@ -344,6 +344,7 @@ typedef enum ww_event_in_op {
     WW_EVT_IN_MPRIS = 12,
     WW_EVT_IN_EVENT_SUBSCRIPTIONS_APPLIED = 13,
     WW_EVT_IN_AUDIO_WINDOW = 14,
+    WW_EVT_IN_REQUEST_FRAME = 15,
 } ww_event_in_op_t;
 
 typedef enum ww_event_op {
@@ -414,6 +415,10 @@ typedef struct ww_evt_in_event_subscriptions_applied_t {
 typedef struct ww_evt_in_audio_window_t {
     waywallen_audio_window_t window;
 } ww_evt_in_audio_window_t;
+
+typedef struct ww_evt_in_request_frame_t {
+    int _empty; /* C forbids empty structs */
+} ww_evt_in_request_frame_t;
 
 typedef struct ww_evt_ready_t {
     waywallen_drm_node_t drm_node;
@@ -531,6 +536,11 @@ int  ww_evt_in_audio_window_encode(const ww_evt_in_audio_window_t *m, ww_buf_t *
 int  ww_evt_in_audio_window_decode(const uint8_t *buf, size_t len, ww_evt_in_audio_window_t *out);
 void ww_evt_in_audio_window_free(ww_evt_in_audio_window_t *m);
 uint32_t ww_evt_in_audio_window_expected_fds(const ww_evt_in_audio_window_t *m);
+
+int  ww_evt_in_request_frame_encode(const ww_evt_in_request_frame_t *m, ww_buf_t *out);
+int  ww_evt_in_request_frame_decode(const uint8_t *buf, size_t len, ww_evt_in_request_frame_t *out);
+void ww_evt_in_request_frame_free(ww_evt_in_request_frame_t *m);
+uint32_t ww_evt_in_request_frame_expected_fds(const ww_evt_in_request_frame_t *m);
 
 int  ww_evt_ready_encode(const ww_evt_ready_t *m, ww_buf_t *out);
 int  ww_evt_ready_decode(const uint8_t *buf, size_t len, ww_evt_ready_t *out);

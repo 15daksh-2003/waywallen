@@ -301,6 +301,10 @@
     <arg name="window" type="audio_window"/>
   </event_in>
 
+  <!-- Ask the renderer to publish its current content once. Requests
+       may be coalesced and never imply content-time advancement. -->
+  <event_in name="request_frame" opcode="15"/>
+
   <!-- renderer -> daemon -->
 
   <event name="ready" opcode="1">
