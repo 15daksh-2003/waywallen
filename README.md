@@ -50,6 +50,10 @@ It started life as a Wallpaper Engine plugin for KDE.
 ## Known issue
 
 - Web wallpapers on NVIDIA GPUs require `shared_texture_enabled` to be disabled in the web renderer settings.
+- Flatpak requires the `--talk-name=org.mpris.MediaPlayer2.*` D-Bus permission to read information about the currently playing track. Grant it for the current user with:
+  ```bash
+  flatpak override --user --talk-name='org.mpris.MediaPlayer2.*' org.waywallen.waywallen
+  ```
 
 ## Wallpaper plugins
 

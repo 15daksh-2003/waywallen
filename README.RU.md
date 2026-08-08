@@ -50,6 +50,10 @@ Waywallen — решение для динамических обоев на р�
 ## Известная проблема
 
 - Для веб-обоев на видеокартах NVIDIA необходимо отключить параметр `shared_texture_enabled` в настройках веб-рендерера.
+- Flatpak требует разрешение D-Bus `--talk-name=org.mpris.MediaPlayer2.*` для получения информации о текущей композиции. Добавьте его для текущего пользователя командой:
+  ```bash
+  flatpak override --user --talk-name='org.mpris.MediaPlayer2.*' org.waywallen.waywallen
+  ```
 
 ## Плагины обоев
 

@@ -50,6 +50,10 @@ Waywallen 是一个为 Linux 桌面打造的动态壁纸解决方案。<br>
 ## 已知问题
 
 - NVIDIA GPU 运行网页壁纸时，需要在网页渲染器设置中关闭 `shared_texture_enabled`。
+- Flatpak 需要 `--talk-name=org.mpris.MediaPlayer2.*` D-Bus 权限才能获取当前播放的歌曲信息。可使用以下命令为当前用户添加：
+  ```bash
+  flatpak override --user --talk-name='org.mpris.MediaPlayer2.*' org.waywallen.waywallen
+  ```
 
 ## 壁纸插件
 
