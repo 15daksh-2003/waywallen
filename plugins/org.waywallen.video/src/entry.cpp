@@ -49,8 +49,9 @@ struct ClearColor {
     float a { 1.0f };
 };
 
-constexpr const char* kSchemeColorKey = "waywallen.scheme_color";
-constexpr const char* kEnableAudioKey = "waywallen.enable_audio";
+constexpr const char* kSchemeColorKey   = "waywallen.scheme_color";
+constexpr const char* kEnableAudioKey   = "waywallen.enable_audio";
+constexpr const char* kPlaybackSpeedKey = "waywallen.playback_speed";
 
 [[noreturn]] void die(const std::string& msg) {
     rstd_error("waywallen-video-renderer: {}", msg);
@@ -150,6 +151,22 @@ bool parse_bool_wire(const char* raw, bool& out) {
         return true;
     }
     return false;
+}
+
+bool playback_rate_from_percent(double pct, float& out) {
+    if (! std::isfinite(pct) || pct < 10.0 || pct > 200.0) return false;
+    out = static_cast<float>(pct / 100.0);
+    return true;
+}
+
+bool parse_playback_rate_wire(const char* raw, float& out) {
+    if (! raw || ! *raw) return false;
+    errno      = 0;
+    char*  end = nullptr;
+    double pct = std::strtod(raw, &end);
+    if (end == raw || errno == ERANGE) return false;
+    while (*end && std::isspace(static_cast<unsigned char>(*end))) ++end;
+    return ! *end && playback_rate_from_percent(pct, out);
 }
 
 // SPAWN_VERSION 3: video path arrives via `--path`; everything else
@@ -283,6 +300,8 @@ struct HostState {
     std::atomic<uint32_t> pending_volume { 100 };
     std::atomic<bool>     volume_pending { false };
     std::atomic<bool>     enable_audio_pending { false };
+    std::atomic<float>    playback_rate { 1.0f };
+    std::atomic<bool>     playback_rate_pending { false };
     std::atomic<uint32_t> mute_fade_ms { 0 };
     std::atomic<uint32_t> pause_fade_ms { 0 };
     ClearColor            scheme_color {};
@@ -380,26 +399,48 @@ void apply_user_properties(HostState& host, const char* json) {
         }
     }
 
-    auto audio = parsed.get("waywallen.enable_audio"_str);
-    if (audio.is_none()) return;
-    const auto& audio_value = **audio;
-    bool        enabled     = true;
-    if (audio_value.is_boolean()) {
-        enabled = *audio_value.as_bool();
-    } else if (audio_value.is_string()) {
-        const auto value = rstd::cppstd::to_string(*audio_value.as_str());
-        if (! parse_bool_wire(value.c_str(), enabled)) {
-            rstd_warn("waywallen-video-renderer: invalid {} value '{}'; ignoring",
-                      static_cast<const char*>(kEnableAudioKey),
-                      value.c_str());
-            return;
+    if (auto audio = parsed.get("waywallen.enable_audio"_str); audio.is_some()) {
+        const auto& audio_value = **audio;
+        bool        enabled     = true;
+        bool        valid       = false;
+        if (audio_value.is_boolean()) {
+            enabled = *audio_value.as_bool();
+            valid   = true;
+        } else if (audio_value.is_string()) {
+            const auto value = rstd::cppstd::to_string(*audio_value.as_str());
+            if (! parse_bool_wire(value.c_str(), enabled)) {
+                rstd_warn("waywallen-video-renderer: invalid {} value '{}'; ignoring",
+                          static_cast<const char*>(kEnableAudioKey),
+                          value.c_str());
+            } else {
+                valid = true;
+            }
+        } else {
+            rstd_warn("waywallen-video-renderer: {} is not a bool/string; ignored",
+                      static_cast<const char*>(kEnableAudioKey));
         }
-    } else {
-        rstd_warn("waywallen-video-renderer: {} is not a bool/string; ignored",
-                  static_cast<const char*>(kEnableAudioKey));
-        return;
+        if (valid) {
+            host.property_enable_audio.store(enabled, std::memory_order_release);
+        }
     }
-    host.property_enable_audio.store(enabled, std::memory_order_release);
+
+    if (auto speed = parsed.get("waywallen.playback_speed"_str); speed.is_some()) {
+        float rate  = 1.0f;
+        bool  valid = false;
+        if ((**speed).is_string()) {
+            const auto value = rstd::cppstd::to_string(*(**speed).as_str());
+            valid            = parse_playback_rate_wire(value.c_str(), rate);
+        } else if ((**speed).is_number()) {
+            auto pct = (**speed).as_f64();
+            valid    = pct.is_some() && playback_rate_from_percent(pct->to_primitive(), rate);
+        }
+        if (! valid) {
+            rstd_warn("waywallen-video-renderer: invalid {} initial value; ignoring",
+                      static_cast<const char*>(kPlaybackSpeedKey));
+        } else {
+            host.playback_rate.store(rate, std::memory_order_release);
+        }
+    }
 }
 
 void set_property_enable_audio(HostState& host, const char* value) {
@@ -412,6 +453,18 @@ void set_property_enable_audio(HostState& host, const char* value) {
     }
     host.property_enable_audio.store(enabled, std::memory_order_release);
     host.enable_audio_pending.store(true, std::memory_order_release);
+}
+
+void set_property_playback_rate(HostState& host, const char* value) {
+    float rate = 1.0f;
+    if (! parse_playback_rate_wire(value, rate)) {
+        rstd_warn("waywallen-video-renderer: invalid {} value '{}'; ignoring",
+                  static_cast<const char*>(kPlaybackSpeedKey),
+                  static_cast<const char*>(value ? value : ""));
+        return;
+    }
+    host.playback_rate.store(rate, std::memory_order_release);
+    host.playback_rate_pending.store(true, std::memory_order_release);
 }
 
 void apply_control(HostState& host, ww_bridge_control_t& c) {
@@ -473,6 +526,8 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
                 set_scheme_color(host, val, true);
             } else if (std::strcmp(key, kEnableAudioKey) == 0) {
                 set_property_enable_audio(host, val);
+            } else if (std::strcmp(key, kPlaybackSpeedKey) == 0) {
+                set_property_playback_rate(host, val);
             } else {
                 rstd_warn("waywallen-video-renderer: ApplySettings: unknown key '{}'; ignoring",
                           static_cast<const char*>(key));
@@ -1061,7 +1116,12 @@ int run(int argc, char** argv) {
                 rstd_warn("waywallen-video-renderer: audio open failed: {}",
                           std::move(p_res).unwrap_err().message);
             } else {
-                auto player = rstd::move(p_res).unwrap();
+                auto       player = rstd::move(p_res).unwrap();
+                const auto rate   = host.playback_rate.load(std::memory_order_acquire);
+                if (! player->set_playback_rate(rstd::f64(static_cast<double>(rate)))) {
+                    rstd_warn("waywallen-video-renderer: invalid initial playback rate {}",
+                              rstd::f32(rate));
+                }
                 player->set_volume(rstd::f32(volume_pct / 100.0f));
                 av_player.insert(rstd::move(player));
                 rstd_info("waywallen-video-renderer: audio decoder attached (volume={}%)",
@@ -1184,6 +1244,8 @@ int run(int argc, char** argv) {
 
     /* --- Main loop ----------------------------------------------------- */
     wavsen::video::Presenter presenter; // PTS-driven pacing.
+    (void)presenter.set_playback_rate(
+        rstd::f64(static_cast<double>(host.playback_rate.load(std::memory_order_acquire))));
     if (auto* player = current_av_player()) {
         presenter.set_external_clock([p = player] {
             return p->current_time_seconds();
@@ -1226,12 +1288,24 @@ int run(int argc, char** argv) {
             presenter.reset();
         }
 
-        /* Audio settings — applied to AvPlayer atomically without rebuild. */
+        /* Runtime audio controls do not reopen the media decoder. */
         if (host.volume_pending.exchange(false, std::memory_order_acq_rel)) {
             audio_runtime.volume_pct = host.pending_volume.load(std::memory_order_acquire);
             if (auto* player = current_av_player()) {
                 player->set_volume(
                     rstd::f32(static_cast<float>(audio_runtime.volume_pct) / 100.0f));
+            }
+        }
+        if (host.playback_rate_pending.exchange(false, std::memory_order_acq_rel)) {
+            const auto rate  = host.playback_rate.load(std::memory_order_acquire);
+            const auto value = rstd::f64(static_cast<double>(rate));
+            if (auto* player = current_av_player(); player && ! player->set_playback_rate(value)) {
+                rstd_warn("waywallen-video-renderer: failed to apply audio playback rate {}",
+                          rstd::f32(rate));
+            }
+            if (! presenter.set_playback_rate(value)) {
+                rstd_warn("waywallen-video-renderer: failed to apply playback rate {}",
+                          rstd::f32(rate));
             }
         }
         if (host.enable_audio_pending.exchange(false, std::memory_order_acq_rel)) {
@@ -1315,6 +1389,7 @@ int run(int argc, char** argv) {
             auto                         wake = [&] {
                 return host.shutdown.load(std::memory_order_acquire) || host.neg_pending ||
                        ! host.paused.load(std::memory_order_acquire) ||
+                       host.playback_rate_pending.load(std::memory_order_acquire) ||
                        host.frame_request_revision > host.served_frame_request_revision;
             };
             if (audio_runtime.pause_pending) {
@@ -1359,6 +1434,7 @@ int run(int argc, char** argv) {
             host.neg_cv.wait(lk, [&] {
                 return host.shutdown.load(std::memory_order_acquire) || host.neg_pending ||
                        host.loop_pending.load(std::memory_order_acquire) ||
+                       host.playback_rate_pending.load(std::memory_order_acquire) ||
                        host.frame_request_revision > host.served_frame_request_revision;
             });
             continue;

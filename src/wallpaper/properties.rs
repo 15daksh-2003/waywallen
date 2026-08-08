@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 const SCHEME_COLOR_KEY: &str = "waywallen.scheme_color";
 const ENABLE_AUDIO_KEY: &str = "waywallen.enable_audio";
+const PLAYBACK_SPEED_KEY: &str = "waywallen.playback_speed";
 const FILL_MODE_KEY: &str = "waywallen.fill_mode";
 const ROTATION_KEY: &str = "waywallen.rotation";
 const LOCATION_X_KEY: &str = "waywallen.location_x";
@@ -97,7 +98,7 @@ pub fn is_daemon_display_property_key(key: &str) -> bool {
 pub fn is_daemon_predefined_property_key(key: &str) -> bool {
     matches!(
         canonical_user_property_key(key),
-        SCHEME_COLOR_KEY | ENABLE_AUDIO_KEY
+        SCHEME_COLOR_KEY | ENABLE_AUDIO_KEY | PLAYBACK_SPEED_KEY
     )
 }
 
@@ -333,6 +334,7 @@ mod tests {
         let raw = r#"{
             "waywallen.scheme_color": { "type": "color", "value": [0.1, 0.2, 0.3] },
             "waywallen.enable_audio": { "type": "bool", "value": true },
+            "waywallen.playback_speed": { "type": "slider", "value": 100 },
             "ui_browse_properties_scheme_color": { "type": "color" },
             "schemecolor": { "type": "color", "value": [0.9, 0.8, 0.7] },
             "waywallen.fill_mode": { "type": "combo" },
@@ -343,6 +345,7 @@ mod tests {
         let obj = value.as_object().unwrap();
         assert!(obj.contains_key("waywallen.scheme_color"));
         assert!(obj.contains_key("waywallen.enable_audio"));
+        assert!(obj.contains_key("waywallen.playback_speed"));
         assert!(!obj.contains_key("schemecolor"));
         assert!(!obj.contains_key("waywallen.fill_mode"));
         assert!(obj.contains_key("ui_browse_properties_scheme_color"));
@@ -358,7 +361,11 @@ mod tests {
     #[test]
     fn classifies_enable_audio_as_predefined_renderer_property() {
         assert!(is_daemon_predefined_property_key("waywallen.enable_audio"));
+        assert!(is_daemon_predefined_property_key(
+            "waywallen.playback_speed"
+        ));
         assert!(!is_daemon_display_property_key("waywallen.enable_audio"));
+        assert!(!is_daemon_display_property_key("waywallen.playback_speed"));
 
         let raw = r#"{
             "waywallen.enable_audio": "false",
@@ -416,6 +423,7 @@ mod tests {
     fn reads_default_wire_values_from_property_schema() {
         let raw = r#"{
             "waywallen.scheme_color": { "type": "color", "value": [0.1, 0.2, 0.3, 1.0] },
+            "waywallen.playback_speed": { "type": "slider", "value": 100 },
             "speed": { "type": "slider", "value": 1.5 },
             "enabled": { "type": "bool", "value": true },
             "mode": { "type": "combo", "value": "pulse" },
@@ -424,6 +432,10 @@ mod tests {
         assert_eq!(
             user_property_default_wire_value(raw, "waywallen.scheme_color").as_deref(),
             Some("0.1000 0.2000 0.3000 1.0000")
+        );
+        assert_eq!(
+            user_property_default_wire_value(raw, "waywallen.playback_speed").as_deref(),
+            Some("100")
         );
         assert_eq!(
             user_property_default_wire_value(raw, "speed").as_deref(),

@@ -12,6 +12,13 @@ function M.properties()
             type = "bool",
             value = true,
         },
+        ["waywallen.playback_speed"] = {
+            text = "Playback speed (%)",
+            type = "slider",
+            min = 10,
+            max = 200,
+            value = 100,
+        },
     }
 end
 

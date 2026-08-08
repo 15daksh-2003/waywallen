@@ -22,9 +22,10 @@ QString builtinKind() { return QStringLiteral("property"); }
 QString userKind() { return QStringLiteral("user"); }
 QString schemeColorKey() { return QStringLiteral("waywallen.scheme_color"); }
 QString enableAudioKey() { return QStringLiteral("waywallen.enable_audio"); }
+QString playbackSpeedKey() { return QStringLiteral("waywallen.playback_speed"); }
 
 bool isPredefinedKey(const QString& key) {
-    return key == schemeColorKey() || key == enableAudioKey();
+    return key == schemeColorKey() || key == enableAudioKey() || key == playbackSpeedKey();
 }
 
 QString jsonValueToWireString(const QJsonValue& v) {
@@ -44,6 +45,7 @@ QString jsonValueToWireString(const QJsonValue& v) {
 }
 
 QString coerceDefaultWireString(const QJsonValue& def, const QString& type) {
+    if (def.isUndefined() || def.isNull()) return {};
     // For colors WE may emit the default either as `"r g b"` string or as
     // a JSON array; normalise to space-separated floats either way.
     if (type == QLatin1String("color")) {
@@ -227,37 +229,53 @@ void UserPropertyListModel::rebuildEntries_() {
 }
 
 void UserPropertyListModel::appendPredefinedEntries_(const QJsonObject& schema) {
-    auto make = [](QString key, QString label, QString type, QString value) {
+    auto make = [](QString            key,
+                   const QJsonObject& value,
+                   QString            label,
+                   QString            type,
+                   QString            default_wire) {
         Entry e;
-        e.key          = std::move(key);
-        e.label        = std::move(label);
-        e.type         = std::move(type);
-        e.section      = propertiesSection();
-        e.kind         = builtinKind();
-        e.supported    = true;
-        e.default_wire = std::move(value);
+        e.key     = std::move(key);
+        e.label   = value.value(QStringLiteral("text")).toString();
+        e.type    = value.value(QStringLiteral("type")).toString().toLower();
+        e.section = propertiesSection();
+        e.kind    = builtinKind();
+        if (e.label.isEmpty()) e.label = std::move(label);
+        if (e.type.isEmpty()) e.type = std::move(type);
+        e.supported    = isSupported(e.type, false);
+        e.min_val      = value.value(QStringLiteral("min")).toDouble(0.0);
+        e.max_val      = value.value(QStringLiteral("max")).toDouble(1.0);
+        e.default_wire = coerceDefaultWireString(value.value(QStringLiteral("value")), e.type);
+        if (e.default_wire.isEmpty()) e.default_wire = std::move(default_wire);
         return e;
     };
 
     const auto scheme_schema = schema.value(schemeColorKey()).toObject();
-    auto       scheme_label  = scheme_schema.value(QStringLiteral("text")).toString();
-    if (scheme_label.isEmpty()) scheme_label = QStringLiteral("Scheme color");
-    auto scheme_default = coerceDefaultWireString(scheme_schema.value(QStringLiteral("value")),
-                                                  QStringLiteral("color"));
-    if (scheme_default.isEmpty()) scheme_default = QStringLiteral("0.0000 0.0000 0.0000 1.0000");
-    auto scheme =
-        make(schemeColorKey(), std::move(scheme_label), QStringLiteral("color"), scheme_default);
+    auto       scheme        = make(schemeColorKey(),
+                                    scheme_schema,
+                                    QStringLiteral("Scheme color"),
+                                    QStringLiteral("color"),
+                                    QStringLiteral("0.0000 0.0000 0.0000 1.0000"));
     m_entries.append(std::move(scheme));
 
     if (schema.contains(enableAudioKey())) {
         const auto audio_schema = schema.value(enableAudioKey()).toObject();
-        auto       audio_label  = audio_schema.value(QStringLiteral("text")).toString();
-        if (audio_label.isEmpty()) audio_label = QStringLiteral("Enable audio");
-        auto audio_default = coerceDefaultWireString(audio_schema.value(QStringLiteral("value")),
-                                                     QStringLiteral("bool"));
-        auto audio =
-            make(enableAudioKey(), std::move(audio_label), QStringLiteral("bool"), audio_default);
+        auto       audio        = make(enableAudioKey(),
+                                       audio_schema,
+                                       QStringLiteral("Enable audio"),
+                                       QStringLiteral("bool"),
+                                       QStringLiteral("true"));
         m_entries.append(std::move(audio));
+    }
+
+    if (schema.contains(playbackSpeedKey())) {
+        const auto speed_schema = schema.value(playbackSpeedKey()).toObject();
+        auto       speed        = make(playbackSpeedKey(),
+                                       speed_schema,
+                                       QStringLiteral("Playback speed (%)"),
+                                       QStringLiteral("slider"),
+                                       QStringLiteral("100"));
+        m_entries.append(std::move(speed));
     }
 }
 
