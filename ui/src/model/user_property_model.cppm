@@ -41,6 +41,8 @@ public:
         SupportedRole,
         MinValRole,
         MaxValRole,
+        StepValRole,
+        ValueSuffixRole,
         CurrentValueRole,
         HasAlphaRole,
         OptionLabelsRole,
@@ -99,6 +101,8 @@ private:
         bool        supported { false };
         double      min_val { 0.0 };
         double      max_val { 1.0 };
+        double      step_val { 0.0 };
+        QString     value_suffix;
         QString     default_wire;
         QStringList option_labels;
         QStringList option_values;

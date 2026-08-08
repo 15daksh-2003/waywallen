@@ -790,6 +790,8 @@ Item {
                 required property bool supported
                 required property real minVal
                 required property real maxVal
+                required property real stepVal
+                required property string valueSuffix
                 required property string currentValue
                 required property bool hasAlpha
                 required property var optionLabels
@@ -838,7 +840,7 @@ Item {
                     Layout.fillWidth: true
                     from: m_prop_delegate.minVal
                     to: m_prop_delegate.maxVal
-                    stepSize: m_prop_delegate.maxVal > 10 ? 1 : 0
+                    stepSize: m_prop_delegate.stepVal > 0 ? m_prop_delegate.stepVal : (m_prop_delegate.maxVal > 10 ? 1 : 0)
                     valueText: displayValue(value)
                     valueMaxText: {
                         const minText = displayValue(from);
@@ -847,14 +849,19 @@ Item {
                     }
                     valueTypescale: MD.Token.typescale.body_small
                     function displayValue(v) {
-                        return Number(v).toFixed(m_prop_delegate.maxVal > 10 ? 0 : 3);
+                        return Number(v).toFixed(m_prop_delegate.maxVal > 10 ? 0 : 3) + m_prop_delegate.valueSuffix;
                     }
                     onMoved: propertyModel.setValue(m_prop_delegate.key, String(value))
                 }
                 Binding {
                     target: m_slider
                     property: "value"
-                    value: Number(m_prop_delegate.currentValue)
+                    value: {
+                        const minimum = Math.min(m_slider.from, m_slider.to);
+                        const maximum = Math.max(m_slider.from, m_slider.to);
+                        const current = Number(m_prop_delegate.currentValue);
+                        return Number.isFinite(current) ? Math.max(minimum, Math.min(maximum, current)) : minimum;
+                    }
                 }
 
                 MD.ColorPickerButton {

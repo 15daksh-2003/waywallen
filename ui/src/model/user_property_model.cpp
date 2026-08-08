@@ -84,6 +84,8 @@ QHash<int, QByteArray> UserPropertyListModel::roleNames() const {
         { SupportedRole, "supported" },
         { MinValRole, "minVal" },
         { MaxValRole, "maxVal" },
+        { StepValRole, "stepVal" },
+        { ValueSuffixRole, "valueSuffix" },
         { CurrentValueRole, "currentValue" },
         { HasAlphaRole, "hasAlpha" },
         { OptionLabelsRole, "optionLabels" },
@@ -105,6 +107,8 @@ QVariant UserPropertyListModel::data(const QModelIndex& index, int role) const {
     case SupportedRole: return e.supported;
     case MinValRole: return e.min_val;
     case MaxValRole: return e.max_val;
+    case StepValRole: return e.step_val;
+    case ValueSuffixRole: return e.value_suffix;
     case CurrentValueRole: return currentValueFor_(row);
     case OptionLabelsRole: return e.option_labels;
     case OptionValuesRole: return e.option_values;
@@ -214,6 +218,8 @@ void UserPropertyListModel::rebuildEntries_() {
             e.supported    = isSupported(e.type, ! e.option_values.isEmpty());
             e.min_val      = v.value(QStringLiteral("min")).toDouble(0.0);
             e.max_val      = v.value(QStringLiteral("max")).toDouble(1.0);
+            e.step_val     = v.value(QStringLiteral("step")).toDouble(0.0);
+            e.value_suffix = v.value(QStringLiteral("suffix")).toString();
             e.default_wire = coerceDefaultWireString(v.value(QStringLiteral("value")), e.type);
             e.order        = v.value(QStringLiteral("order")).toDouble(0.0);
             user_entries.append(std::move(e));
@@ -245,6 +251,8 @@ void UserPropertyListModel::appendPredefinedEntries_(const QJsonObject& schema) 
         e.supported    = isSupported(e.type, false);
         e.min_val      = value.value(QStringLiteral("min")).toDouble(0.0);
         e.max_val      = value.value(QStringLiteral("max")).toDouble(1.0);
+        e.step_val     = value.value(QStringLiteral("step")).toDouble(0.0);
+        e.value_suffix = value.value(QStringLiteral("suffix")).toString();
         e.default_wire = coerceDefaultWireString(value.value(QStringLiteral("value")), e.type);
         if (e.default_wire.isEmpty()) e.default_wire = std::move(default_wire);
         return e;
@@ -272,7 +280,7 @@ void UserPropertyListModel::appendPredefinedEntries_(const QJsonObject& schema) 
         const auto speed_schema = schema.value(playbackSpeedKey()).toObject();
         auto       speed        = make(playbackSpeedKey(),
                                        speed_schema,
-                                       QStringLiteral("Playback speed (%)"),
+                                       QStringLiteral("Playback speed"),
                                        QStringLiteral("slider"),
                                        QStringLiteral("100"));
         m_entries.append(std::move(speed));

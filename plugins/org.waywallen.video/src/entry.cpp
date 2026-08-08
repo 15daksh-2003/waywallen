@@ -154,7 +154,7 @@ bool parse_bool_wire(const char* raw, bool& out) {
 }
 
 bool playback_rate_from_percent(double pct, float& out) {
-    if (! std::isfinite(pct) || pct < 10.0 || pct > 200.0) return false;
+    if (! std::isfinite(pct) || pct < 10.0 || pct > 400.0) return false;
     out = static_cast<float>(pct / 100.0);
     return true;
 }
