@@ -56,7 +56,7 @@ function M.info()
                 filters = api.filters,
             },
             wallpaper = {
-                extras = true,
+                apply = true,
             },
         },
     }

@@ -19,7 +19,7 @@ function M.info()
             },
             wallpaper = {
                 properties = true,
-                extras = true,
+                apply = true,
             },
         },
     }

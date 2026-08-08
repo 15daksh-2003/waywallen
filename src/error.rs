@@ -96,10 +96,10 @@ pub enum Error {
     #[error("source plugin '{0}' not found")]
     SourcePluginNotFound(String),
 
-    /// Source plugin's `extras(entry)` Lua callback raised.
+    /// Source plugin's `apply(entry, ctx)` Lua callback raised.
     /// The stringified Lua error rides in `message`.
-    #[error("source_plugin '{plugin}'.extras() failed: {message}")]
-    SourceExtrasFailed { plugin: String, message: String },
+    #[error("source_plugin '{plugin}'.apply() failed: {message}")]
+    SourceApplyFailed { plugin: String, message: String },
 
     /// Source plugin does not export `source.remove(ctx, item)`.
     #[error("source plugin '{0}' does not support item remove")]
@@ -217,7 +217,7 @@ impl Error {
             Self::RendererControlFailed(_) => E::RendererControlFailed,
             Self::RendererFrameFailed(_) => E::RendererFrameFailed,
             Self::SourcePluginNotFound(_) => E::SourcePluginNotFound,
-            Self::SourceExtrasFailed { .. } => E::SourceExtrasFailed,
+            Self::SourceApplyFailed { .. } => E::SourceApplyFailed,
             Self::SourceItemRemoveUnsupported(_) => E::SourceItemRemoveUnsupported,
             Self::SourceItemRemoveFailed { .. } => E::SourceItemRemoveFailed,
             Self::SourceItemUnsubscribeUnsupported(_) => E::SourceItemUnsubscribeUnsupported,
@@ -267,7 +267,7 @@ impl Error {
             | E::RendererSpawnFailed
             | E::RendererControlFailed
             | E::RendererFrameFailed
-            | E::SourceExtrasFailed
+            | E::SourceApplyFailed
             | E::SourceItemRemoveFailed
             | E::PluginInstallFailed
             | E::PluginDeleteFailed

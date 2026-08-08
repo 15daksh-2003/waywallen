@@ -1041,20 +1041,21 @@ pub async fn apply_wallpaper_with_options(
 
     let renderer = resolve_renderer(app, &entry, options.renderer_name.as_deref())?;
     let renderer_plugin_name = renderer.name.clone();
-    let extras = app
+    let apply = app
         .source_manager
-        .call_extras(&entry.plugin_name, &entry)
+        .call_apply(&entry.plugin_name, &entry)
         .await?;
     let spawn_settings = app.settings.resolved_renderer_settings(&renderer);
-    let (user_properties_json, wallpaper_layout_override) =
+    let (user_property_overrides, wallpaper_layout_override) =
         repo::get_wallpaper_render_properties(&app.db, entry.item_id).await?;
     let spawn_req = renderer_manager::SpawnRequest {
         wp_type: entry.wp_type.clone(),
-        extras,
+        extras: apply.extras,
         settings: spawn_settings,
         test_pattern: false,
         renderer_name: Some(renderer_plugin_name.clone()),
-        user_properties_json,
+        user_property_overrides,
+        default_user_properties: apply.default_user_properties,
     };
     let target = options.display_ids.as_deref();
     let target_ids = app.router.registered_display_ids(target).await;

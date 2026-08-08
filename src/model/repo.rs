@@ -969,8 +969,26 @@ pub async fn list_tags_of_item(db: &DatabaseConnection, item_id: i64) -> Result<
         .with_context(|| format!("select tags of item={item_id}"))
 }
 
-/// Read the user-property override map for an item. Empty map when
-/// the column is NULL or holds an unreadable blob.
+/// Parse the persisted user-property map. Empty when the column is NULL or
+/// holds an unreadable blob.
+fn parse_user_property_overrides(item_id: i64, raw: Option<&str>) -> HashMap<String, String> {
+    let Some(raw) = raw else {
+        return HashMap::new();
+    };
+    match serde_json::from_str::<HashMap<String, String>>(raw) {
+        Ok(properties) => {
+            crate::wallpaper::properties::normalize_user_property_overrides(properties)
+        }
+        Err(error) => {
+            log::warn!(
+                "item {item_id}: user_property_overrides JSON unparseable ({error}); treating as empty"
+            );
+            HashMap::new()
+        }
+    }
+}
+
+/// Read the user-property override map for an item.
 pub async fn get_user_property_overrides(
     db: &DatabaseConnection,
     item_id: i64,
@@ -982,18 +1000,10 @@ pub async fn get_user_property_overrides(
     let Some(item) = row else {
         return Ok(HashMap::new());
     };
-    let Some(raw) = item.user_property_overrides else {
-        return Ok(HashMap::new());
-    };
-    match serde_json::from_str::<HashMap<String, String>>(&raw) {
-        Ok(m) => Ok(crate::wallpaper::properties::normalize_user_property_overrides(m)),
-        Err(e) => {
-            log::warn!(
-                "item {item_id}: user_property_overrides JSON unparseable ({e}); treating as empty"
-            );
-            Ok(HashMap::new())
-        }
-    }
+    Ok(parse_user_property_overrides(
+        item_id,
+        item.user_property_overrides.as_deref(),
+    ))
 }
 
 /// Read the raw `user_property_overrides` column as JSON text after
@@ -1032,7 +1042,7 @@ pub async fn get_wallpaper_render_properties(
     db: &DatabaseConnection,
     item_id: i64,
 ) -> Result<(
-    Option<String>,
+    HashMap<String, String>,
     crate::wallpaper::properties::WallpaperLayoutOverride,
 )> {
     let row = item::Entity::find_by_id(item_id)
@@ -1040,18 +1050,16 @@ pub async fn get_wallpaper_render_properties(
         .await
         .with_context(|| format!("select item by id={item_id} for render properties"))?;
     let Some(item) = row else {
-        return Ok((None, Default::default()));
+        return Ok((HashMap::new(), Default::default()));
     };
-    let raw_user_properties = item
-        .user_property_overrides
-        .as_deref()
-        .map(crate::wallpaper::properties::normalize_user_property_overrides_json);
-    let (renderer_json, legacy_layout) =
-        crate::wallpaper::properties::split_renderer_properties(raw_user_properties.as_deref());
+    let user_properties =
+        parse_user_property_overrides(item_id, item.user_property_overrides.as_deref());
+    let (renderer_properties, legacy_layout) =
+        crate::wallpaper::properties::split_renderer_properties(user_properties);
     let layout =
         parse_wallpaper_layout_override_raw(item_id, item.wallpaper_layout_override.as_deref())
             .unwrap_or(legacy_layout);
-    Ok((renderer_json, layout))
+    Ok((renderer_properties, layout))
 }
 
 /// Same layout read as `get_wallpaper_render_properties`, without the

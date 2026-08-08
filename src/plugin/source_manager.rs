@@ -395,8 +395,14 @@ struct DiscoverCapability {
 
 #[derive(Debug, Clone, Default)]
 struct WallpaperCapability {
-    extras: bool,
+    apply: bool,
     properties: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WallpaperApply {
+    pub extras: HashMap<String, String>,
+    pub default_user_properties: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -439,7 +445,7 @@ struct PluginCallbacks {
     discover_details: Option<LuaRegistryKey>,
     discover_download: Option<LuaRegistryKey>,
     discover_resolve: Option<LuaRegistryKey>,
-    wallpaper_extras: Option<LuaRegistryKey>,
+    wallpaper_apply: Option<LuaRegistryKey>,
     wallpaper_properties: Option<LuaRegistryKey>,
     lifecycle_load: Option<LuaRegistryKey>,
     lifecycle_save: Option<LuaRegistryKey>,
@@ -1248,9 +1254,9 @@ impl LuaPluginRuntime {
             Self::optional_table(&caps_tbl, "wallpaper", "info().capabilities")?
         {
             let wallpaper_api = Self::require_module_table(module, "wallpaper")?;
-            wallpaper.extras = Self::optional_bool(
+            wallpaper.apply = Self::optional_bool(
                 &wallpaper_tbl,
-                "extras",
+                "apply",
                 "info().capabilities.wallpaper",
                 false,
             )?;
@@ -1260,10 +1266,10 @@ impl LuaPluginRuntime {
                 "info().capabilities.wallpaper",
                 false,
             )?;
-            if wallpaper.extras {
-                Self::require_table_function(&wallpaper_api, "extras", "module.wallpaper")?;
+            if wallpaper.apply {
+                Self::require_table_function(&wallpaper_api, "apply", "module.wallpaper")?;
             } else if entry_version == ENTRY_VERSION_V3 {
-                Self::require_field_absent(&wallpaper_api, "extras", "module.wallpaper")?;
+                Self::require_field_absent(&wallpaper_api, "apply", "module.wallpaper")?;
             }
             if wallpaper.properties {
                 Self::require_table_function(&wallpaper_api, "properties", "module.wallpaper")?;
@@ -1519,7 +1525,7 @@ impl LuaPluginRuntime {
             discover_details: self.callback_key(module, "discover", "details")?,
             discover_download: self.callback_key(module, "discover", "download")?,
             discover_resolve: self.callback_key(module, "discover", "resolve")?,
-            wallpaper_extras: self.callback_key(module, "wallpaper", "extras")?,
+            wallpaper_apply: self.callback_key(module, "wallpaper", "apply")?,
             wallpaper_properties: self.callback_key(module, "wallpaper", "properties")?,
             lifecycle_load: self.callback_key(module, "lifecycle", "load")?,
             lifecycle_save: self.callback_key(module, "lifecycle", "save")?,
@@ -2350,13 +2356,12 @@ impl LuaPluginRuntime {
         self.entries.iter().find(|e| e.item_id.to_string() == id)
     }
 
-    /// Ask the plugin that produced `entry` for the CLI `extras`
-    /// dictionary the daemon should pass to the renderer subprocess
-    pub async fn call_extras(
+    /// Resolve renderer resources and authored property defaults for `entry`.
+    pub async fn call_apply(
         &mut self,
         plugin_name: &str,
         entry: &WallpaperEntry,
-    ) -> Result<HashMap<String, String>> {
+    ) -> Result<WallpaperApply> {
         let callbacks = self
             .callbacks
             .get(plugin_name)
@@ -2364,40 +2369,42 @@ impl LuaPluginRuntime {
         let Some(info) = self.plugin_infos.get(plugin_name) else {
             return Err(Error::SourcePluginNotFound(plugin_name.to_string()));
         };
-        if !info.capabilities.wallpaper.extras {
-            log::warn!("source plugin '{plugin_name}' has no wallpaper.extras capability");
-            return Ok(HashMap::new());
+        if !info.capabilities.wallpaper.apply {
+            log::warn!("source plugin '{plugin_name}' has no wallpaper.apply capability");
+            return Ok(WallpaperApply::default());
         }
-        // Keep the Lua body in one block so failures map to one typed
-        // SourceExtrasFailed carrying the plugin name.
         let body = async {
-            let extras_fn: LuaFunction = self.lua.registry_value(
+            let apply_fn: LuaFunction = self.lua.registry_value(
                 callbacks
-                    .wallpaper_extras
+                    .wallpaper_apply
                     .as_ref()
-                    .ok_or_else(|| LuaError::external("module.wallpaper.extras required"))?,
+                    .ok_or_else(|| LuaError::external("module.wallpaper.apply required"))?,
             )?;
             let entry_tbl = self
                 .wallpaper_entry_table(entry)
                 .map_err(mlua::Error::external)?;
-            // Build the same ctx scan(ctx) sees; extras runs per item, so
+            // Build the same ctx scan(ctx) sees; apply runs per item, so
             // the libraries list is intentionally empty.
             let ctx = self
                 .build_ctx(Some(plugin_name), &[])
                 .map_err(mlua::Error::external)?;
             let result: LuaTable = self
-                .call_plugin_callback_async(plugin_name, &extras_fn, (entry_tbl, ctx))
+                .call_plugin_callback_async(plugin_name, &apply_fn, (entry_tbl, ctx))
                 .await?;
-            let mut out = HashMap::new();
-            for pair in result.pairs::<String, String>() {
-                let (k, v) = pair?;
-                out.insert(k, v);
-            }
-            Ok(out)
+            Ok(WallpaperApply {
+                extras: parse_lua_string_map(&result, "extras", "wallpaper.apply result")
+                    .map_err(mlua::Error::external)?,
+                default_user_properties: parse_lua_string_map(
+                    &result,
+                    "default_user_properties",
+                    "wallpaper.apply result",
+                )
+                .map_err(mlua::Error::external)?,
+            })
         };
         let result = body
             .await
-            .map_err(|e: mlua::Error| Error::SourceExtrasFailed {
+            .map_err(|e: mlua::Error| Error::SourceApplyFailed {
                 plugin: plugin_name.to_string(),
                 message: redact_secrets(&e.to_string()),
             })?;
@@ -3736,16 +3743,16 @@ impl LuaPluginRegistry {
             .cloned()
     }
 
-    pub async fn call_extras(
+    pub async fn call_apply(
         &self,
         plugin_name: &str,
         entry: &WallpaperEntry,
-    ) -> Result<HashMap<String, String>> {
+    ) -> Result<WallpaperApply> {
         self.handle(plugin_name)?
             .runtime
             .lock()
             .await
-            .call_extras(plugin_name, entry)
+            .call_apply(plugin_name, entry)
             .await
     }
 
@@ -5962,10 +5969,76 @@ return M
         assert_eq!(clip.name, "clip");
         assert_eq!(clip.resource, clip_path);
 
-        let extras = block_value(async { mgr.call_extras("video", &clip).await.unwrap() });
-        assert_eq!(extras.get("path"), Some(&clip.resource));
+        let apply = block_value(async { mgr.call_apply("video", &clip).await.unwrap() });
+        assert_eq!(apply.extras.get("path"), Some(&clip.resource));
+        assert!(apply.default_user_properties.is_empty());
 
         assert_eq!(mgr.list_by_type("video").len(), 2);
         assert!(mgr.list_by_type("image").is_empty());
+    }
+
+    #[test]
+    fn wallpaper_apply_returns_resources_and_authored_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_path = dir.path().join("main.lua");
+        std::fs::write(
+            &plugin_path,
+            r#"
+local M = {}
+function M.info()
+    return {
+        name = "apply_test",
+        capabilities = { wallpaper = { apply = true } },
+    }
+end
+M.wallpaper = {}
+function M.wallpaper.apply(entry, ctx)
+    return {
+        extras = { path = entry.resource, token = "resource" },
+        default_user_properties = {
+            ["waywallen.scheme_color"] = "0.1 0.2 0.3",
+        },
+    }
+end
+return M
+"#,
+        )
+        .unwrap();
+
+        let mgr = SourceManager::new().unwrap();
+        mgr.load_plugin(&plugin_path, "test.plugin", "1.0", ENTRY_VERSION_V3)
+            .unwrap();
+        let entry = WallpaperEntry {
+            item_id: 1,
+            name: "Wallpaper".into(),
+            wp_type: "video".into(),
+            resource: "/tmp/wallpaper.mp4".into(),
+            preview: None,
+            description: None,
+            tags: Vec::new(),
+            external_id: None,
+            size: None,
+            width: None,
+            height: None,
+            content_rating: None,
+            modified_at: None,
+            create_at: 0,
+            plugin_name: "apply_test".into(),
+            library_root: "/tmp".into(),
+        };
+
+        let apply = block_value(async { mgr.call_apply("apply_test", &entry).await.unwrap() });
+        assert_eq!(apply.extras.get("path"), Some(&entry.resource));
+        assert_eq!(
+            apply.extras.get("token").map(String::as_str),
+            Some("resource")
+        );
+        assert_eq!(
+            apply
+                .default_user_properties
+                .get("waywallen.scheme_color")
+                .map(String::as_str),
+            Some("0.1 0.2 0.3")
+        );
     }
 }

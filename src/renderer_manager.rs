@@ -507,9 +507,12 @@ pub struct SpawnRequest {
     /// Optional explicit renderer plugin name. `None` (default) lets
     /// `spawn` and `find_reusable` pick by type priority.
     pub renderer_name: Option<String>,
-    /// Renderer-owned subset of the DB row's `user_property_overrides`
-    /// column; daemon-owned layout keys are filtered out before spawn.
-    pub user_properties_json: Option<String>,
+    /// Persisted renderer-owned property overrides. Daemon-owned layout
+    /// keys are filtered out before spawn.
+    pub user_property_overrides: HashMap<String, String>,
+    /// Source-authored defaults for renderer-owned user properties.
+    /// Persisted overrides take precedence when the Init payload is built.
+    pub default_user_properties: HashMap<String, String>,
 }
 
 /// Immutable renderer publication created from one `BindBuffers` event.
@@ -723,6 +726,15 @@ impl RendererHandle {
 
     pub fn spawn_request(&self) -> SpawnRequest {
         self.spawn_request.clone()
+    }
+
+    pub fn default_user_property(&self, key: &str) -> Option<String> {
+        self.spawn_request
+            .default_user_properties
+            .get(crate::wallpaper::properties::canonical_user_property_key(
+                key,
+            ))
+            .cloned()
     }
 
     pub fn frame_ready_seen(&self) -> bool {
@@ -986,6 +998,10 @@ impl RendererManager {
     /// event, and return its id. Cleans up the child on failure.
     pub async fn spawn(&self, mut req: SpawnRequest) -> Result<RendererId> {
         let id: RendererId = Uuid::new_v4().to_string();
+        req.default_user_properties =
+            crate::wallpaper::properties::normalize_renderer_user_properties(
+                req.default_user_properties,
+            );
 
         // Create a listening UDS at a temp path; the child connects to
         // it shortly after exec().
@@ -1246,12 +1262,19 @@ impl RendererManager {
             return Vec::new();
         };
 
+        let default_user_properties =
+            crate::wallpaper::properties::normalize_renderer_user_properties(
+                req.default_user_properties.clone(),
+            );
         let inner = self.inner.lock().await;
         let mut ids: Vec<_> = inner
             .renderers
             .iter()
             .filter_map(|(id, h)| {
-                (h.wp_type == req.wp_type && h.name == def.name && h.extras == req.extras)
+                (h.wp_type == req.wp_type
+                    && h.name == def.name
+                    && h.extras == req.extras
+                    && h.spawn_request.default_user_properties == default_user_properties)
                     .then(|| id.clone())
             })
             .collect();
@@ -2043,7 +2066,10 @@ pub(crate) fn build_init_msg(req: &SpawnRequest, def: &RendererDef) -> ControlMs
             protocol_version: crate::ipc::proto::PROTOCOL_VERSION,
             spawn_version,
             settings,
-            user_properties: req.user_properties_json.clone().unwrap_or_default(),
+            user_properties: crate::wallpaper::properties::merge_renderer_user_properties(
+                &req.default_user_properties,
+                &req.user_property_overrides,
+            ),
         },
     }
 }
@@ -2549,7 +2575,8 @@ mod init_handshake_tests {
             settings: settings_in,
             test_pattern: false,
             renderer_name: None,
-            user_properties_json: None,
+            user_property_overrides: HashMap::new(),
+            default_user_properties: HashMap::new(),
         };
         let msg = build_init_msg(&req, &def_mpv_schema());
         match msg {
@@ -2564,6 +2591,35 @@ mod init_handshake_tests {
             }
             other => panic!("expected ControlMsg::Init, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn init_merges_authored_defaults_with_user_overrides() {
+        let req = SpawnRequest {
+            wp_type: "video".into(),
+            default_user_properties: HashMap::from([
+                (
+                    "waywallen.scheme_color".to_string(),
+                    "0.1 0.2 0.3".to_string(),
+                ),
+                ("speed".to_string(), "100".to_string()),
+            ]),
+            user_property_overrides: HashMap::from([(
+                "waywallen.scheme_color".to_string(),
+                "0.8 0.7 0.6".to_string(),
+            )]),
+            ..Default::default()
+        };
+        let ControlMsg::Init { config } = build_init_msg(&req, &def_mpv_schema()) else {
+            panic!("expected Init");
+        };
+        let properties: HashMap<String, String> =
+            serde_json::from_str(&config.user_properties).unwrap();
+        assert_eq!(
+            properties.get("waywallen.scheme_color").map(String::as_str),
+            Some("0.8 0.7 0.6")
+        );
+        assert_eq!(properties.get("speed").map(String::as_str), Some("100"));
     }
 
     #[test]
@@ -2606,7 +2662,8 @@ mod init_handshake_tests {
             settings,
             test_pattern: false,
             renderer_name: None,
-            user_properties_json: None,
+            user_property_overrides: HashMap::new(),
+            default_user_properties: HashMap::new(),
         };
         let init = build_init_msg(&req, &def_legacy("wescene-renderer"));
         let err =
@@ -2710,7 +2767,8 @@ mod reuse_tests {
             settings: HashMap::new(),
             test_pattern: false,
             renderer_name: None,
-            user_properties_json: None,
+            user_property_overrides: HashMap::new(),
+            default_user_properties: HashMap::new(),
         }
     }
 
@@ -2765,6 +2823,22 @@ mod reuse_tests {
             mgr.find_reusable(&req).await.is_none(),
             "different path must miss reuse",
         );
+    }
+
+    #[tokio::test]
+    async fn find_reusable_misses_on_different_authored_defaults() {
+        let mut registry = RendererRegistry::new();
+        registry.register(def_mpv());
+        let mgr = RendererManager::new(registry);
+
+        let extras = HashMap::from([("path".into(), "/clip.mp4".into())]);
+        let h = live_mpv_handle("h1", extras.clone());
+        mgr.register_test_handle(h).await;
+
+        let mut req = req_with_extras(extras);
+        req.default_user_properties
+            .insert("waywallen.scheme_color".into(), "0.1 0.2 0.3".into());
+        assert!(mgr.find_reusable(&req).await.is_none());
     }
 
     #[tokio::test]

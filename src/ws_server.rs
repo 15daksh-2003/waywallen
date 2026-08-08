@@ -28,8 +28,8 @@ use crate::routing::{
 use crate::settings::{SettingsStore, WallpaperFilterState, WallpaperSortRuleState};
 use crate::tasks;
 use crate::wallpaper::properties::{
-    dedupe_predefined_schema, is_daemon_display_property_key, user_property_default_wire_value,
-    WallpaperLayoutOverride,
+    canonical_user_property_key, dedupe_predefined_schema, is_daemon_display_property_key,
+    user_property_default_wire_value, WallpaperLayoutOverride,
 };
 use crate::wallpaper::sort::apply_wallpaper_sorts;
 use crate::AppState;
@@ -1381,7 +1381,8 @@ async fn dispatch_inner(
                 settings,
                 test_pattern: false,
                 renderer_name: Some(renderer_name),
-                user_properties_json: None,
+                user_property_overrides: Default::default(),
+                default_user_properties: Default::default(),
             };
             // renderer_manager returns typed spawn errors directly.
             let id = state.renderer_manager.spawn(spawn_req).await?;
@@ -1909,27 +1910,34 @@ async fn dispatch_inner(
                 // dispatch to accept or ignore.
                 if let Some(h) = live_renderer {
                     let effective_value = if value.is_none() {
-                        let schema = state
-                            .source_manager
-                            .call_properties(&entry.plugin_name, &entry)
-                            .await
-                            .ok()
-                            .flatten();
-                        schema
-                            .as_deref()
-                            .and_then(|schema| user_property_default_wire_value(schema, &r.key))
-                            .unwrap_or_else(|| {
-                                log::warn!(
-                                    "WallpaperPropertySet: reset {} on {} has no default value",
-                                    r.key,
-                                    r.wallpaper_id
-                                );
-                                String::new()
-                            })
+                        if let Some(default) = h.default_user_property(&r.key) {
+                            default
+                        } else {
+                            let schema = state
+                                .source_manager
+                                .call_properties(&entry.plugin_name, &entry)
+                                .await
+                                .ok()
+                                .flatten();
+                            schema
+                                .as_deref()
+                                .and_then(|schema| user_property_default_wire_value(schema, &r.key))
+                                .unwrap_or_else(|| {
+                                    log::warn!(
+                                        "WallpaperPropertySet: reset {} on {} has no default value",
+                                        r.key,
+                                        r.wallpaper_id
+                                    );
+                                    String::new()
+                                })
+                        }
                     } else {
                         value.clone().unwrap_or_default()
                     };
-                    let kv = vec![(r.key.clone(), effective_value)];
+                    let kv = vec![(
+                        canonical_user_property_key(&r.key).to_string(),
+                        effective_value,
+                    )];
                     let id = h.id.clone();
                     state
                         .renderer_manager

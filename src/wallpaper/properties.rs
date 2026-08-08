@@ -208,6 +208,25 @@ pub fn normalize_user_property_overrides(map: HashMap<String, String>) -> HashMa
     out
 }
 
+pub fn normalize_renderer_user_properties(map: HashMap<String, String>) -> HashMap<String, String> {
+    let mut out = normalize_user_property_overrides(map);
+    out.retain(|key, _| !is_daemon_display_property_key(key));
+    out
+}
+
+pub fn merge_renderer_user_properties(
+    defaults: &HashMap<String, String>,
+    overrides: &HashMap<String, String>,
+) -> String {
+    let mut merged = normalize_renderer_user_properties(defaults.clone());
+    merged.extend(normalize_renderer_user_properties(overrides.clone()));
+    if merged.is_empty() {
+        String::new()
+    } else {
+        serde_json::to_string(&merged).unwrap_or_default()
+    }
+}
+
 pub fn normalize_user_property_overrides_json(raw: &str) -> String {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -232,14 +251,9 @@ pub fn normalize_user_property_overrides_json(raw: &str) -> String {
     serde_json::to_string(&value).unwrap_or_else(|_| raw.to_string())
 }
 
-pub fn split_renderer_properties(raw: Option<&str>) -> (Option<String>, WallpaperLayoutOverride) {
-    let Some(raw) = raw.filter(|v| !v.trim().is_empty()) else {
-        return (None, WallpaperLayoutOverride::default());
-    };
-    let Ok(map) = serde_json::from_str::<HashMap<String, String>>(raw) else {
-        return (Some(raw.to_string()), WallpaperLayoutOverride::default());
-    };
-
+pub fn split_renderer_properties(
+    map: HashMap<String, String>,
+) -> (HashMap<String, String>, WallpaperLayoutOverride) {
     let mut renderer = HashMap::new();
     let mut fillmode = None;
     let mut rotation = None;
@@ -271,12 +285,7 @@ pub fn split_renderer_properties(raw: Option<&str>) -> (Option<String>, Wallpape
         location,
         rotation,
     };
-    let renderer_json = if renderer.is_empty() {
-        None
-    } else {
-        serde_json::to_string(&renderer).ok()
-    };
-    (renderer_json, layout)
+    (renderer, layout)
 }
 
 fn parse_fillmode(value: &str) -> Option<FillMode> {
@@ -323,10 +332,11 @@ mod tests {
             "waywallen.location_y": "75",
             "speed": "2"
         }"#;
-        let (renderer, layout) = split_renderer_properties(Some(raw));
+        let properties = serde_json::from_str(raw).unwrap();
+        let (renderer, layout) = split_renderer_properties(properties);
         assert_eq!(layout.fillmode, Some(FillMode::Centered));
         assert_eq!(layout.location, Some(Location::new(25, 75)));
-        assert_eq!(renderer.as_deref(), Some(r#"{"speed":"2"}"#));
+        assert_eq!(renderer.get("speed").map(String::as_str), Some("2"));
     }
 
     #[test]
@@ -371,16 +381,11 @@ mod tests {
             "waywallen.enable_audio": "false",
             "waywallen.fill_mode": "centered"
         }"#;
-        let (renderer, layout) = split_renderer_properties(Some(raw));
+        let properties = serde_json::from_str(raw).unwrap();
+        let (renderer, layout) = split_renderer_properties(properties);
         assert_eq!(layout.fillmode, Some(FillMode::Centered));
-        let renderer = renderer.unwrap();
-        let value: serde_json::Value = serde_json::from_str(&renderer).unwrap();
         assert_eq!(
-            value
-                .as_object()
-                .unwrap()
-                .get("waywallen.enable_audio")
-                .and_then(|v| v.as_str()),
+            renderer.get("waywallen.enable_audio").map(String::as_str),
             Some("false")
         );
     }
@@ -417,6 +422,33 @@ mod tests {
             Some("0.4 0.5 0.6")
         );
         assert!(!normalized.contains_key("schemecolor"));
+    }
+
+    #[test]
+    fn merges_authored_defaults_with_persisted_overrides() {
+        let defaults = HashMap::from([
+            ("schemecolor".to_string(), "0.1 0.2 0.3".to_string()),
+            ("speed".to_string(), "1".to_string()),
+            ("waywallen.fill_mode".to_string(), "centered".to_string()),
+        ]);
+        let merged = merge_renderer_user_properties(
+            &defaults,
+            &HashMap::from([
+                (
+                    "waywallen.scheme_color".to_string(),
+                    "0.8 0.7 0.6".to_string(),
+                ),
+                ("enabled".to_string(), "true".to_string()),
+            ]),
+        );
+        let value: HashMap<String, String> = serde_json::from_str(&merged).unwrap();
+        assert_eq!(
+            value.get("waywallen.scheme_color").map(String::as_str),
+            Some("0.8 0.7 0.6")
+        );
+        assert_eq!(value.get("speed").map(String::as_str), Some("1"));
+        assert_eq!(value.get("enabled").map(String::as_str), Some("true"));
+        assert!(!value.contains_key("waywallen.fill_mode"));
     }
 
     #[test]

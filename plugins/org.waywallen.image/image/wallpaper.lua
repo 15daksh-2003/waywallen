@@ -10,9 +10,12 @@ function M.properties()
     }
 end
 
-function M.extras(entry)
+function M.apply(entry)
     return {
-        path = entry.resource,
+        extras = {
+            path = entry.resource,
+        },
+        default_user_properties = {},
     }
 end
 
