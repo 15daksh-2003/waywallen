@@ -130,6 +130,11 @@ impl RoutingTable {
             let _ = self.remove_link(old);
         }
 
+        let clear_rgba = self
+            .renderers
+            .get(&renderer_id)
+            .map(|renderer| renderer.clear_rgba())
+            .unwrap_or([0.0, 0.0, 0.0, 1.0]);
         self.next_link_id += 1;
         let id = self.next_link_id;
         let link = Link {
@@ -140,7 +145,7 @@ impl RoutingTable {
             src_rect: FULL_SRC,
             dst_rect: FULL_DST,
             transform: 0,
-            clear_rgba: [0.0, 0.0, 0.0, 1.0],
+            clear_rgba,
             z_order: 0,
         };
         self.links.insert(id, link);
@@ -316,6 +321,21 @@ mod tests {
         assert_eq!(t.links_for_renderer("r1").len(), 1);
         // l2 still around
         assert_eq!(t.links_for_display(2)[0].id, l2);
+    }
+
+    #[test]
+    fn add_link_inherits_renderer_clear_color() {
+        let mut t = RoutingTable::new();
+        let renderer = RendererHandle::test_stub("r1", "image");
+        renderer.test_set_clear_rgba([0.1, 0.2, 0.3, 1.0]);
+        t.add_renderer(renderer);
+
+        let link_id = t.add_link("r1".into(), 1);
+
+        assert_eq!(
+            t.get_link(link_id).unwrap().clear_rgba,
+            [0.1, 0.2, 0.3, 1.0]
+        );
     }
 
     #[test]

@@ -2118,6 +2118,12 @@ impl RendererHandle {
             *guard = Some(frame);
         }
     }
+
+    pub(crate) fn test_set_clear_rgba(&self, clear_rgba: [f32; 4]) {
+        if let Ok(mut stored) = self.clear_rgba.lock() {
+            *stored = clear_rgba;
+        }
+    }
 }
 
 impl RendererHandle {
