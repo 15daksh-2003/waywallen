@@ -144,10 +144,7 @@ static int probe_caps(ww_pool_t* pool, uint32_t width, uint32_t height) {
 
     /* Walk every candidate fourcc, pull the modifier list per-format,
      * and keep only the modifiers whose tilingFeatures cover the
-     * producer's required feature set (`format_features`, populated
-     * from ww_pool_vulkan_init_t::format_feature_flags + bridge's
-     * unconditional TRANSFER_SRC for the consumer's import). Mirrors
-     * the consumer's local filter in waywallen-display. */
+     * producer and consumer usage contract. */
     const VkFormatFeatureFlags want_features = st->format_features;
 
     /* Worst-case sizing: every fourcc × every modifier. We grow the
@@ -361,17 +358,8 @@ static int alloc_slot(ww_pool_t* pool, uint32_t slot_index, ww_pool_slot_layout_
     img_ci.arrayLayers       = 1;
     img_ci.samples           = VK_SAMPLE_COUNT_1_BIT;
     img_ci.tiling            = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
-    /* Producer-configured usage. For VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT
-     * the modifier alone does not pin the DCC sub-layout — the driver
-     * also picks compression block size / metadata swizzle from the
-     * usage flags, and the chosen sub-layout must match what the
-     * consumer (waywallen-display/src/backend_vulkan.c) creates the
-     * shadow image with (currently TRANSFER_SRC-only). Mismatched
-     * usages produce tile-grid stripes on import. The default
-     * TRANSFER_DST | TRANSFER_SRC matches the consumer; producers that
-     * need anything else (e.g. SAMPLED for direct sampling, COLOR_ATTACHMENT
-     * for direct rendering without an intermediate) must coordinate the
-     * extra usage with the consumer side. */
+    /* Producer and consumer must use the same modifier usage contract;
+     * mismatches can select incompatible compressed sub-layouts. */
     img_ci.usage         = st->image_usage;
     img_ci.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
     img_ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -624,16 +612,13 @@ static int backend_init(ww_pool_t* pool, const void* init_data) {
     st->device       = (VkDevice)init->device;
     st->queue        = (VkQueue)init->queue;
     st->queue_family = init->queue_family_index;
-    /* Default to TRANSFER_DST when caller passed 0; force TRANSFER_SRC
-     * unconditionally because the consumer (waywallen-display) imports
-     * the dma-buf as TRANSFER_SRC-only and the modifier sub-layout must
-     * match on both sides. */
+    /* Every slot can be copied or sampled by a display consumer. */
     st->image_usage =
         (init->image_usage_flags ? init->image_usage_flags : VK_IMAGE_USAGE_TRANSFER_DST_BIT) |
-        VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     st->format_features = (init->format_feature_flags ? init->format_feature_flags
                                                       : VK_FORMAT_FEATURE_TRANSFER_DST_BIT) |
-                          VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+                          VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
 
     /* See pool_egl_gbm: function-pointer-vs-object-pointer trick. */
     union {

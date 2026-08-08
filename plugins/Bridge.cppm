@@ -107,9 +107,11 @@ export using ::WW_RESOLUTION_CAP_ALLOW_UPSCALE;
 export using ::WW_RESOLUTION_CUSTOM;
 export using ::WW_RESOLUTION_ORIGIN;
 export using ::VK_FORMAT_FEATURE_BLIT_DST_BIT;
+export using ::VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
 export using ::VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
 export using ::VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
 export using ::VK_IMAGE_USAGE_STORAGE_BIT;
+export using ::VK_IMAGE_USAGE_SAMPLED_BIT;
 export using ::VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
 export using ::ww_bridge_close;
