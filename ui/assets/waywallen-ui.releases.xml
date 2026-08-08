@@ -1,3 +1,19 @@
+<release version="0.3.2" date="2026-08-08">
+  <description>
+    <p>Added:</p>
+    <ul>
+      <li>Playback speed controls for video wallpapers. #167</li>
+      <li>An option to hide the tray icon without restarting. #149 by @OctaNebula</li>
+      <li>Source plugin support apply with user property defaults.</li>
+    </ul>
+    <p>Fixes:</p>
+    <ul>
+      <li>Displays refresh frame after layout changes.</li>
+      <li>Renderer clear colors are preserved when display links are created.</li>
+      <li>Vulkan bridge buffers support sampled display imports.</li>
+    </ul>
+  </description>
+</release>
 <release version="0.3.1" date="2026-08-05">
   <description>
     <ul>
