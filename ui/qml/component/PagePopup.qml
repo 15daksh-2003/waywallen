@@ -17,7 +17,7 @@ MD.Popup {
     MD.Presentation.ready: false
     readyForOpen: MD.Presentation.ready
     parent: T.Overlay.overlay
-    width: Math.min(400, parent.width)
+    width: Math.min(Math.max(400, implicitWidth), parent.width)
     height: Math.min(implicitHeight, parent.height * 0.8)
 
     mdState.textColor: MD.MProp.color.on_surface
@@ -62,13 +62,18 @@ MD.Popup {
                 return;
 
             if (attach.status === T.StackView.Active) {
+                m_stack.lastImplicitWidth = 0;
                 m_stack.lastImplicitHeight = 0;
             } else if (attach.status === T.StackView.Deactivating) {
+                m_stack.lastImplicitWidth = Qt.binding(function () {
+                    return item.implicitWidth;
+                });
                 m_stack.lastImplicitHeight = Qt.binding(function () {
                     return item.implicitHeight;
                 });
             }
         });
+        m_stack.lastImplicitWidth = m_stack.implicitWidth;
         m_stack.lastImplicitHeight = m_stack.implicitHeight;
         return item;
     }
@@ -190,7 +195,9 @@ MD.Popup {
 
     contentItem: MD.StackView {
         id: m_stack
+        property real lastImplicitWidth: 0
         property real lastImplicitHeight: 0
+        implicitWidth: Math.max(lastImplicitWidth, currentItem?.implicitWidth ?? 0)
         implicitHeight: Math.max(lastImplicitHeight, currentItem?.implicitHeight ?? 0)
 
         MD.MProp.page: m_page_context
