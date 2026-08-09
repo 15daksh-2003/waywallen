@@ -228,7 +228,15 @@ git -C "$WAYWALLEN_DISPLAY_SRC" fetch --tags origin "$WAYWALLEN_DISPLAY_REF" \
     || git -C "$WAYWALLEN_DISPLAY_SRC" fetch --tags origin
 git -C "$WAYWALLEN_DISPLAY_SRC" checkout --detach "$WAYWALLEN_DISPLAY_REF"
 pushd "$WAYWALLEN_DISPLAY_SRC"
-cargo build \
+RUST_HOST_TARGET="$(rustc -vV | awk '/^host: / { print $2; exit }')"
+[[ -n "$RUST_HOST_TARGET" ]] || fail "could not read the rustc host target"
+[[ -n "${CC:-}" ]] || fail "Conda C compiler is unavailable"
+RUST_LINKER_ENV="CARGO_TARGET_${RUST_HOST_TARGET^^}_LINKER"
+RUST_LINKER_ENV="${RUST_LINKER_ENV//-/_}"
+
+# Cargo otherwise starts the system `cc` driver inside the activated Conda
+# environment, mixing its libc search paths with the Conda linker and sysroot.
+env "${RUST_LINKER_ENV}=${CC}" cargo build \
     --bin waywallen-layer-shell \
     --release \
     --locked
