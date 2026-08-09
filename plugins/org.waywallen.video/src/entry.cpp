@@ -836,7 +836,7 @@ int run_selftest(const Options& opt) {
         auto                       fs_res = decoder->next_vk_frame(vkv);
         if (fs_res.is_err()) {
             rstd_error("selftest next_vk_frame: {}",
-                       std::move(fs_res).unwrap_err().message.as_str());
+                       rstd::move(fs_res).unwrap_err().message.as_str());
             return 1;
         }
         if (std::move(fs_res).unwrap() != wavsen::video::NextFrame::Ok) return 1;
@@ -868,14 +868,15 @@ int run_selftest(const Options& opt) {
             sync_fd = std::move(cv_res).unwrap();
         }
     } else if (kind == wavsen::video::FrameKind::VaapiDrm) {
-        wavsen::video::DrmFrameView drmv {};
-        auto                        fs_res = decoder->next_drm_frame(drmv);
+        auto fs_res = decoder->next_drm_frame();
         if (fs_res.is_err()) {
             rstd_error("selftest next_drm_frame: {}",
                        std::move(fs_res).unwrap_err().message.as_str());
             return 1;
         }
-        if (std::move(fs_res).unwrap() != wavsen::video::NextFrame::Ok) return 1;
+        auto pull = rstd::move(fs_res).unwrap();
+        if (pull.status != wavsen::video::NextFrame::Ok || pull.frame.is_none()) return 1;
+        const auto& drmv = pull.frame->view();
         rstd_info("selftest drm_prime: {}x{}, modifier=0x{:x}, objects={}, layers={}",
                   drmv.width,
                   drmv.height,
@@ -885,14 +886,24 @@ int run_selftest(const Options& opt) {
         const auto cm = wavsen::video::make_color_matrix(
             static_cast<wavsen::video::ColorSpace>(drmv.colorspace.to_primitive()),
             static_cast<wavsen::video::ColorRange>(drmv.color_range.to_primitive()));
-        auto cv_res =
-            yuv->convert_drm_prime(drmv, dst_img, rstd::u32(even_w), rstd::u32(even_h), cm);
+        auto reserved = yuv->try_reserve_drm(wavsen::video::ConvertTarget::BridgeForeign);
+        if (reserved.is_err() || reserved->is_none()) return 1;
+        auto cv_res = yuv->submit_drm_prime(rstd::move(**reserved),
+                                            rstd::move(*pull.frame),
+                                            {
+                                                .image  = dst_img,
+                                                .width  = rstd::u32(even_w),
+                                                .height = rstd::u32(even_h),
+                                                .kind = wavsen::video::ConvertTarget::BridgeForeign,
+                                            },
+                                            cm);
         if (cv_res.is_err()) {
             rstd_error("selftest convert (drm): {}",
-                       std::move(cv_res).unwrap_err().message.as_str());
+                       rstd::move(cv_res).unwrap_err().message.as_str());
             sync_fd = -1;
         } else {
-            sync_fd = std::move(cv_res).unwrap();
+            auto submitted = rstd::move(cv_res).unwrap();
+            sync_fd        = submitted.is_some() ? submitted->sync_fd : -1;
         }
     } else {
         wavsen::video::Nv12Frame frame;
@@ -921,6 +932,8 @@ int run_selftest(const Options& opt) {
         ::close(sync_fd);
     }
     vkDeviceWaitIdle(producer->device());
+    (void)yuv->reclaim_drm_submissions();
+    (void)yuv->invalidate_drm_targets();
     vkDestroyImage(producer->device(), dst_img, nullptr);
     vkFreeMemory(producer->device(), dst_mem, nullptr);
 
@@ -1157,9 +1170,30 @@ int run(int argc, char** argv) {
                                                     rstd::u32(even_w),
                                                     rstd::u32(even_h));
     if (yuv_res.is_err()) {
-        die("yuv_to_rgba: " + to_std_string(std::move(yuv_res).unwrap_err().message));
+        die("yuv_to_rgba: " + to_std_string(rstd::move(yuv_res).unwrap_err().message));
     }
-    auto yuv = std::move(yuv_res).unwrap();
+    auto yuv                      = rstd::move(yuv_res).unwrap();
+    auto prepare_pool_reconfigure = [&](uint32_t slot_count) {
+        auto drained = yuv->drain_drm_submissions(rstd::u64(1'000'000'000));
+        if (drained.is_err()) {
+            rstd_error("waywallen-video-renderer: drain DRM submissions: {}",
+                       rstd::move(drained).unwrap_err().message.as_str());
+            return false;
+        }
+        auto invalidated = yuv->invalidate_drm_targets();
+        if (invalidated.is_err()) {
+            rstd_error("waywallen-video-renderer: invalidate DRM targets: {}",
+                       rstd::move(invalidated).unwrap_err().message.as_str());
+            return false;
+        }
+        auto configured = yuv->configure_drm_pipeline(rstd::u32(slot_count), rstd::u32(32));
+        if (configured.is_err()) {
+            rstd_error("waywallen-video-renderer: configure DRM pipeline: {}",
+                       rstd::move(configured).unwrap_err().message.as_str());
+            return false;
+        }
+        return true;
+    };
 
     /* --- Bridge pool --- */
     ww_pool_vulkan_init_t pool_init {};
@@ -1226,16 +1260,21 @@ int run(int argc, char** argv) {
             ww_pool_directive_t d = host.neg_directive;
             host.neg_pending      = false;
             lk.unlock();
-            int rc = 0;
-            {
-                std::lock_guard<std::mutex> send_lk(host.send_mu);
-                rc = ww_bridge_pool_apply_directive(host.pool, host.sock, &d);
-            }
-            if (rc != 0) {
-                rstd_error("waywallen-video-renderer: pool_apply_directive (initial) rc={}", rc);
+            if (! prepare_pool_reconfigure(d.count)) {
                 signal_shutdown(host);
             } else {
-                host.negotiated.store(true, std::memory_order_release);
+                int rc = 0;
+                {
+                    std::lock_guard<std::mutex> send_lk(host.send_mu);
+                    rc = ww_bridge_pool_apply_directive(host.pool, host.sock, &d);
+                }
+                if (rc != 0) {
+                    rstd_error("waywallen-video-renderer: pool_apply_directive (initial) rc={}",
+                               rc);
+                    signal_shutdown(host);
+                } else {
+                    host.negotiated.store(true, std::memory_order_release);
+                }
             }
         }
     }
@@ -1251,11 +1290,10 @@ int run(int argc, char** argv) {
             return p->current_time_seconds();
         });
     }
-    wavsen::video::Nv12Frame    frame;
-    wavsen::video::VkFrameView  vkv {};
-    wavsen::video::DrmFrameView drmv {};
-    rstd::f64                   prev_pts { -1.0 }; // for loop-boundary detection (PTS regression)
-    uint32_t stall_warn_counter        = 0;        // throttle ETIME log spam during backpressure
+    wavsen::video::Nv12Frame   frame;
+    wavsen::video::VkFrameView vkv {};
+    rstd::f64                  prev_pts { -1.0 }; // for loop-boundary detection (PTS regression)
+    uint32_t stall_warn_counter        = 0;       // throttle ETIME log spam during backpressure
     bool     submitted_since_negotiate = false;
 
     while (! host.shutdown.load(std::memory_order_acquire)) {
@@ -1265,6 +1303,10 @@ int run(int argc, char** argv) {
                 ww_pool_directive_t d = host.neg_directive;
                 host.neg_pending      = false;
                 lk.unlock();
+                if (! prepare_pool_reconfigure(d.count)) {
+                    signal_shutdown(host);
+                    break;
+                }
                 int rc = 0;
                 {
                     std::lock_guard<std::mutex> send_lk(host.send_mu);
@@ -1348,6 +1390,13 @@ int run(int argc, char** argv) {
                     rstd_info("waywallen-video-renderer: hwdec change {} → {}, reopening decoder",
                               hwdec_label(hwaccel),
                               hwdec_label(new_h));
+                    auto drained = yuv->drain_drm_submissions(rstd::u64(1'000'000'000));
+                    if (drained.is_err()) {
+                        rstd_error("waywallen-video-renderer: drain before decoder reopen: {}",
+                                   rstd::move(drained).unwrap_err().message.as_str());
+                        signal_shutdown(host);
+                        break;
+                    }
                     (void)decoder.take();
                     wavsen::video::OpenOpts new_opts {
                         new_h, rstd::string::String::make(as_rstd_str(opt.render_node))
@@ -1402,15 +1451,24 @@ int run(int argc, char** argv) {
 
         rstd::f64                                                    frame_pts { -1.0 };
         const auto                                                   fkind = decoder->get()->kind();
+        rstd::Option<wavsen::video::DrmFrameLease>                   drm_frame;
         rstd::Result<wavsen::video::NextFrame, wavsen::video::Error> fs_res =
             rstd::Ok(wavsen::video::NextFrame::Ok);
         switch (fkind) {
         case wavsen::video::FrameKind::VulkanShared:
             fs_res = decoder->get()->next_vk_frame(vkv);
             break;
-        case wavsen::video::FrameKind::VaapiDrm:
-            fs_res = decoder->get()->next_drm_frame(drmv);
+        case wavsen::video::FrameKind::VaapiDrm: {
+            auto pulled = decoder->get()->next_drm_frame();
+            if (pulled.is_err()) {
+                fs_res = rstd::Err(rstd::move(pulled).unwrap_err());
+            } else {
+                auto value = rstd::move(pulled).unwrap();
+                fs_res     = rstd::Ok(value.status);
+                drm_frame  = rstd::move(value.frame);
+            }
             break;
+        }
         case wavsen::video::FrameKind::Sw: fs_res = decoder->get()->next_frame(frame); break;
         }
         if (fs_res.is_err()) {
@@ -1442,7 +1500,14 @@ int run(int argc, char** argv) {
         const bool decoder_looped = fs == wavsen::video::NextFrame::Looped;
         switch (fkind) {
         case wavsen::video::FrameKind::VulkanShared: frame_pts = vkv.pts_seconds; break;
-        case wavsen::video::FrameKind::VaapiDrm: frame_pts = drmv.pts_seconds; break;
+        case wavsen::video::FrameKind::VaapiDrm:
+            if (drm_frame.is_none()) {
+                rstd_error("waywallen-video-renderer: VAAPI decode returned no frame lease");
+                signal_shutdown(host);
+                continue;
+            }
+            frame_pts = drm_frame->view().pts_seconds;
+            break;
         case wavsen::video::FrameKind::Sw: frame_pts = frame.pts_seconds; break;
         }
 
@@ -1454,8 +1519,22 @@ int run(int argc, char** argv) {
         }
         prev_pts = frame_pts;
 
-        // PTS pacing: sleep until this frame is due. Drop if too late.
-        if (! presenter.present_frame(frame_pts)) continue;
+        const auto presentation = presenter.schedule_frame(frame_pts);
+        if (! presentation.present) continue;
+
+        rstd::Option<wavsen::video::ConversionReservation> drm_reservation;
+        if (fkind == wavsen::video::FrameKind::VaapiDrm) {
+            auto reserved = yuv->try_reserve_drm(wavsen::video::ConvertTarget::BridgeForeign);
+            if (reserved.is_err()) {
+                rstd_error("waywallen-video-renderer: reserve DRM conversion: {}",
+                           rstd::move(reserved).unwrap_err().message.as_str());
+                signal_shutdown(host);
+                break;
+            }
+            auto value = rstd::move(reserved).unwrap();
+            if (value.is_none()) continue;
+            drm_reservation = rstd::move(value);
+        }
 
         ww_pool_slot_acquire_result_t acquired {};
         int acquire_rc = ww_bridge_pool_try_acquire_any_for_render(host.pool, &acquired);
@@ -1496,8 +1575,8 @@ int run(int argc, char** argv) {
             cr_id = vkv.color_range;
             break;
         case wavsen::video::FrameKind::VaapiDrm:
-            cs_id = drmv.colorspace;
-            cr_id = drmv.color_range;
+            cs_id = drm_frame->view().colorspace;
+            cr_id = drm_frame->view().color_range;
             break;
         case wavsen::video::FrameKind::Sw:
             cs_id = frame.colorspace;
@@ -1533,13 +1612,29 @@ int run(int argc, char** argv) {
                                                     color_matrix);
             break;
         }
-        case wavsen::video::FrameKind::VaapiDrm:
-            cv_res = yuv->convert_drm_prime(drmv,
-                                            reinterpret_cast<VkImage>(s.vk_image),
-                                            rstd::u32(s.width),
-                                            rstd::u32(s.height),
-                                            color_matrix);
+        case wavsen::video::FrameKind::VaapiDrm: {
+            auto converted =
+                yuv->submit_drm_prime(rstd::move(*drm_reservation),
+                                      rstd::move(*drm_frame),
+                                      {
+                                          .image  = reinterpret_cast<VkImage>(s.vk_image),
+                                          .width  = rstd::u32(s.width),
+                                          .height = rstd::u32(s.height),
+                                          .kind   = wavsen::video::ConvertTarget::BridgeForeign,
+                                      },
+                                      color_matrix);
+            if (converted.is_err()) {
+                cv_res = rstd::Err(rstd::move(converted).unwrap_err());
+                break;
+            }
+            auto submission = rstd::move(converted).unwrap();
+            if (submission.is_none()) {
+                ww_bridge_pool_abort_acquired_slot(host.pool, &acquired.identity);
+                continue;
+            }
+            cv_res = rstd::Ok(submission->sync_fd);
             break;
+        }
         case wavsen::video::FrameKind::Sw:
             cv_res = yuv->convert_nv12(reinterpret_cast<VkImage>(s.vk_image),
                                        rstd::u32(s.width),
@@ -1557,6 +1652,7 @@ int run(int argc, char** argv) {
             break;
         }
         sync_fd = std::move(cv_res).unwrap();
+        wavsen::video::Presenter::wait_until(presentation);
         std::lock_guard<std::mutex>  send_lk(host.send_mu);
         ww_pool_slot_submit_result_t submitted {};
         int                          submit_rc = ww_bridge_pool_submit_acquired_slot(
@@ -1576,6 +1672,16 @@ int run(int argc, char** argv) {
     if (reader.joinable()) {
         ::shutdown(host.sock, SHUT_RD);
         reader.join();
+    }
+    if (auto drained = yuv->drain_drm_submissions(rstd::u64(1'000'000'000)); drained.is_err()) {
+        rstd_warn("waywallen-video-renderer: final DRM drain failed: {}",
+                  rstd::move(drained).unwrap_err().message.as_str());
+        (void)vkDeviceWaitIdle(producer->device());
+        (void)yuv->reclaim_drm_submissions();
+    }
+    if (auto invalidated = yuv->invalidate_drm_targets(); invalidated.is_err()) {
+        rstd_warn("waywallen-video-renderer: final DRM target invalidation failed: {}",
+                  rstd::move(invalidated).unwrap_err().message.as_str());
     }
     if (host.pool) ww_bridge_pool_destroy(host.pool);
     ww_bridge_close(host.sock);
