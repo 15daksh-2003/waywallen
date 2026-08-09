@@ -298,7 +298,9 @@ typedef struct waywallen_rgba_color {
 } waywallen_rgba_color_t;
 
 typedef struct waywallen_renderer_state {
+    uint32_t fields;
     waywallen_rgba_color_t clear_color;
+    ww_kv_list_t runtime_tags;
 } waywallen_renderer_state_t;
 
 #endif /* WAYWALLEN_PROTOCOL_NAMED_TYPES_DEFINED */

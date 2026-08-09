@@ -40,4 +40,16 @@ auto runtimeConditionsFromPb(const QList<proto::RuntimeCondition>& conditions) -
     }
     return out;
 }
+
+auto runtimeTagsFromPb(const QList<proto::RendererRuntimeTag>& tags) -> QVariantList {
+    QVariantList out;
+    out.reserve(tags.size());
+    for (const auto& tag : tags) {
+        QVariantMap value;
+        value[u"key"_s]   = tag.key();
+        value[u"value"_s] = tag.value();
+        out.append(value);
+    }
+    return out;
+}
 } // namespace waywallen

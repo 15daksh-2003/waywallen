@@ -242,7 +242,11 @@
   </struct>
 
   <struct name="renderer_state">
+    <!-- Bit set describing which fields this atomic patch updates. -->
+    <field name="fields" type="u32"/>
     <field name="clear_color" type="rgba_color"/>
+    <!-- Ordered runtime facts. When selected by fields, replaces the full list. -->
+    <field name="runtime_tags" type="kv_list"/>
   </struct>
 
   <!-- daemon -> renderer -->

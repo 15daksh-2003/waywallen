@@ -31,7 +31,8 @@ Renderer::Renderer(const proto::RendererInstance& info, QObject* parent)
       m_texture_height(info.textureHeight()),
       m_drm_render_major(info.drmRenderMajor()),
       m_drm_render_minor(info.drmRenderMinor()),
-      m_runtime_conditions(runtimeConditionsFromPb(info.conditions())) {}
+      m_runtime_conditions(runtimeConditionsFromPb(info.conditions())),
+      m_runtime_tags(runtimeTagsFromPb(info.runtimeTags())) {}
 
 void Renderer::updateFrom(const proto::RendererInstance& info) {
     rstd_assert(info.rendererId() == m_id, "Renderer::updateFrom id mismatch");
@@ -61,6 +62,11 @@ void Renderer::updateFrom(const proto::RendererInstance& info) {
     if (m_runtime_conditions != conditions) {
         m_runtime_conditions = std::move(conditions);
         Q_EMIT runtimeConditionsChanged();
+    }
+    auto tags = runtimeTagsFromPb(info.runtimeTags());
+    if (m_runtime_tags != tags) {
+        m_runtime_tags = std::move(tags);
+        Q_EMIT runtimeTagsChanged();
     }
 }
 

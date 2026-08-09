@@ -285,6 +285,7 @@ struct HostState {
     uint64_t                served_frame_request_revision { 0 };
     ww_pool_directive_t     neg_directive {};
     std::mutex              send_mu;
+    std::string             reported_hwdec;
 
     std::atomic<bool> loop_pending { false };
     std::atomic<bool> loop_value { true };
@@ -352,6 +353,15 @@ const char* kind_label(wavsen::video::FrameKind k) {
     return "?";
 }
 
+const char* runtime_hwdec_label(wavsen::video::FrameKind kind) {
+    switch (kind) {
+    case wavsen::video::FrameKind::Sw: return "sw";
+    case wavsen::video::FrameKind::VulkanShared: return "vulkan";
+    case wavsen::video::FrameKind::VaapiDrm: return "vaapi";
+    }
+    return "unknown";
+}
+
 void signal_shutdown(HostState& s) {
     s.shutdown.store(true, std::memory_order_release);
     s.neg_cv.notify_all();
@@ -362,6 +372,26 @@ void publish_clear_color(HostState& host, const ClearColor& c) {
     if (int rc = ww_bridge_send_report_state_clear_color(host.sock, c.r, c.g, c.b, c.a); rc != 0) {
         rstd_warn("waywallen-video-renderer: report_state(clear_color) failed ({})", rc);
     }
+}
+
+void publish_hwdec_tag(HostState& host, wavsen::video::FrameKind kind) {
+    const char*                 value = runtime_hwdec_label(kind);
+    std::lock_guard<std::mutex> send_lk(host.send_mu);
+    if (host.reported_hwdec == value) return;
+
+    ww_kv_t tag {
+        .key   = const_cast<char*>("hwdec"),
+        .value = const_cast<char*>(value),
+    };
+    ww_kv_list_t tags {
+        .count = 1,
+        .data  = &tag,
+    };
+    if (int rc = ww_bridge_send_report_state_tags(host.sock, &tags); rc != 0) {
+        rstd_warn("waywallen-video-renderer: report_state(runtime_tags) failed ({})", rc);
+        return;
+    }
+    host.reported_hwdec = value;
 }
 
 void set_scheme_color(HostState& host, const char* value, bool publish) {
@@ -1290,6 +1320,7 @@ int run(int argc, char** argv) {
         die("ww_bridge_pool_advertise_caps failed: " + std::to_string(rc));
 
     publish_clear_color(host, host.scheme_color);
+    publish_hwdec_tag(host, decoder->get()->kind());
     rstd_info("waywallen-video-renderer: ready ({}x{}, loop={}, GPU YUV→RGB), "
               "waiting for NegotiateBuffers",
               even_w,
@@ -1470,6 +1501,7 @@ int run(int argc, char** argv) {
                     // Video reopened at PTS 0 — keep audio aligned.
                     if (auto* player = current_av_player()) player->seek_to_start();
                     prev_pts = rstd::f64(-1.0);
+                    publish_hwdec_tag(host, decoder->get()->kind());
                     rstd_info("waywallen-video-renderer: reopened, kind={}",
                               kind_label(decoder->get()->kind()));
                 }

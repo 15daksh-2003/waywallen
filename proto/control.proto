@@ -288,6 +288,11 @@ message RuntimeCondition {
   uint64 related_display_id = 5;
 }
 
+message RendererRuntimeTag {
+  string key = 1;
+  string value = 2;
+}
+
 message RendererInstance {
   string renderer_id = 1;
   uint32 fps         = 2;
@@ -305,6 +310,7 @@ message RendererInstance {
   uint32 texture_width  = 8;
   uint32 texture_height = 9;
   repeated RuntimeCondition conditions = 10;
+  repeated RendererRuntimeTag runtime_tags = 11;
 }
 
 message RendererPlayRequest  { string renderer_id = 1; }

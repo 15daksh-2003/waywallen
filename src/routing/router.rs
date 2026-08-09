@@ -20,10 +20,13 @@ const RUNTIME_PROGRESS_HARD: Duration = Duration::from_secs(10);
 const RUNTIME_HEALTH_POLL: Duration = Duration::from_millis(500);
 
 use crate::display::layout::{FillMode, LayoutInput};
-use crate::ipc::proto::{ControlMsg, ControlTransition, EventMsg};
+use crate::ipc::proto::{
+    ControlMsg, ControlTransition, EventMsg, RENDERER_STATE_FIELD_CLEAR_COLOR,
+    RENDERER_STATE_FIELD_RUNTIME_TAGS,
+};
 use crate::plugin::renderer_registry::RendererActivityMode;
 use crate::renderer_manager::{
-    DrmNode, PublishedPool, RendererHandle, RendererId, RendererManager,
+    DrmNode, PublishedPool, RendererHandle, RendererId, RendererManager, RendererRuntimeTag,
 };
 use crate::scheduler::{CompositionConfig, DisplayId, DisplayInfo, DisplayMetrics};
 use crate::settings::{
@@ -331,6 +334,7 @@ pub struct RendererSnapshot {
     pub drm_render_minor: u32,
     pub texture_width: u32,
     pub texture_height: u32,
+    pub runtime_tags: Vec<RendererRuntimeTag>,
     pub conditions: Vec<RuntimeCondition>,
 }
 
@@ -964,7 +968,12 @@ impl Router {
                                             .await;
                                     }
                                     EventMsg::ReportState { .. } => {
-                                        router.on_renderer_state_changed(&rid).await;
+                                        router
+                                            .on_renderer_state_changed(
+                                                &rid,
+                                                event.state_changed_fields,
+                                            )
+                                            .await;
                                     }
                                     _ => {}
                                 },
@@ -1338,38 +1347,54 @@ impl Router {
     }
 
     /// Renderer published a `ReportState` event. The reader thread
-    /// already merged recognised keys onto the handle.
-    pub async fn on_renderer_state_changed(self: &Arc<Self>, renderer_id: &str) {
-        let new_clear = {
-            let inner = self.inner.lock().await;
-            let Some(renderer) = inner.table.get_renderer(renderer_id) else {
-                return;
+    /// already committed the validated fields onto the handle.
+    pub async fn on_renderer_state_changed(
+        self: &Arc<Self>,
+        renderer_id: &str,
+        changed_fields: u32,
+    ) {
+        if changed_fields & RENDERER_STATE_FIELD_CLEAR_COLOR != 0 {
+            let new_clear = {
+                let inner = self.inner.lock().await;
+                let Some(renderer) = inner.table.get_renderer(renderer_id) else {
+                    return;
+                };
+                renderer.clear_rgba()
             };
-            renderer.clear_rgba()
-        };
-        let affected: Vec<DisplayId> = {
-            let mut inner = self.inner.lock().await;
-            let link_ids: Vec<LinkId> = inner
-                .table
-                .links_for_renderer(renderer_id)
-                .into_iter()
-                .map(|l| l.id)
-                .collect();
-            let mut affected = Vec::new();
-            for lid in link_ids {
-                let changed =
-                    inner
-                        .table
-                        .update_link_geometry(lid, None, None, None, Some(new_clear), None);
-                if changed {
-                    if let Some(link) = inner.table.get_link(lid) {
-                        affected.push(link.display_id);
+            let affected: Vec<DisplayId> = {
+                let mut inner = self.inner.lock().await;
+                let link_ids: Vec<LinkId> = inner
+                    .table
+                    .links_for_renderer(renderer_id)
+                    .into_iter()
+                    .map(|link| link.id)
+                    .collect();
+                let mut affected = Vec::new();
+                for link_id in link_ids {
+                    let changed = inner.table.update_link_geometry(
+                        link_id,
+                        None,
+                        None,
+                        None,
+                        Some(new_clear),
+                        None,
+                    );
+                    if changed {
+                        if let Some(link) = inner.table.get_link(link_id) {
+                            affected.push(link.display_id);
+                        }
                     }
                 }
+                affected
+            };
+            self.resync_display_compositions(affected).await;
+        }
+
+        if changed_fields & RENDERER_STATE_FIELD_RUNTIME_TAGS != 0 {
+            if let Some(snapshot) = self.snapshot_renderer(renderer_id).await {
+                self.emit(RouterEvent::RendererUpsert(snapshot));
             }
-            affected
-        };
-        self.resync_display_compositions(affected).await;
+        }
     }
 
     pub async fn set_display_metrics(
@@ -2194,6 +2219,7 @@ impl Router {
             drm_render_minor: handle.gpu.minor,
             texture_width: tw,
             texture_height: th,
+            runtime_tags: handle.runtime_tags(),
             conditions: inner
                 .renderer_conditions
                 .get(id)
@@ -2227,6 +2253,7 @@ impl Router {
                     drm_render_minor: handle.gpu.minor,
                     texture_width: tw,
                     texture_height: th,
+                    runtime_tags: handle.runtime_tags(),
                     conditions: inner
                         .renderer_conditions
                         .get(&id)
@@ -3881,6 +3908,38 @@ mod tests {
                 assert_eq!(snap.name, "test-stub");
             }
             other => panic!("expected RendererUpsert, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_tag_change_emits_renderer_upsert() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        let handle = RendererHandle::test_stub("R1", "video");
+        mgr.register_test_handle(handle.clone()).await;
+        router.register_renderer(handle.clone()).await;
+        let mut rx = router.subscribe_events();
+
+        handle.test_set_runtime_tags(vec![crate::renderer_manager::RendererRuntimeTag {
+            key: "hwdec".to_string(),
+            value: "vulkan".to_string(),
+        }]);
+
+        let snapshots = router.snapshot_renderers().await;
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].runtime_tags[0].value, "vulkan");
+
+        router
+            .on_renderer_state_changed("R1", RENDERER_STATE_FIELD_RUNTIME_TAGS)
+            .await;
+
+        match recv_event(&mut rx).await.expect("no runtime-tag upsert") {
+            RouterEvent::RendererUpsert(snapshot) => {
+                assert_eq!(snapshot.runtime_tags.len(), 1);
+                assert_eq!(snapshot.runtime_tags[0].key, "hwdec");
+                assert_eq!(snapshot.runtime_tags[0].value, "vulkan");
+            }
+            event => panic!("expected RendererUpsert, got {event:?}"),
         }
     }
 

@@ -1,5 +1,5 @@
 use crate::error::{Error, Result, ResultExt};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::PathBuf;
@@ -15,7 +15,9 @@ use uuid::Uuid;
 use crate::ipc::proto::{
     AudioWindow, BufferDirective, BufferFormat, BufferMemorySource, BufferPath, ControlMsg,
     EventMsg, EventSubscriptionResult, EventSubscriptionStatus, MediaPlaybackState, PointerAxis,
-    PointerButton, PointerMotion, RendererInit, WireMprisSnapshot,
+    PointerButton, PointerMotion, RendererInit, RendererState, WireMprisSnapshot,
+    RENDERER_STATE_FIELD_CLEAR_COLOR, RENDERER_STATE_FIELD_RUNTIME_TAGS,
+    RENDERER_STATE_KNOWN_FIELDS,
 };
 use crate::ipc::uds::{recv_event, send_control};
 
@@ -32,9 +34,18 @@ use crate::wallpaper::types::WallpaperType;
 
 pub type RendererId = String;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RendererRuntimeTag {
+    pub key: String,
+    pub value: String,
+}
+
 const MAX_EVENT_SUBSCRIPTIONS: usize = 16;
 const MAX_EVENT_KIND_BYTES: usize = 64;
 const MAX_EVENT_KIND_TOTAL_BYTES: usize = 512;
+const MAX_RUNTIME_TAGS: usize = 8;
+const MAX_RUNTIME_TAG_KEY_BYTES: usize = 32;
+const MAX_RUNTIME_TAG_VALUE_BYTES: usize = 64;
 const WRITER_QUEUE_CAPACITY: usize = 64;
 const RENDERER_FAILED_EXIT_GRACE: Duration = Duration::from_millis(250);
 
@@ -597,6 +608,22 @@ impl RendererProgress {
 pub struct RendererEvent {
     pub message: EventMsg,
     pub pool_generation: Option<u64>,
+    pub state_changed_fields: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RendererReportedState {
+    clear_rgba: [f32; 4],
+    runtime_tags: Vec<RendererRuntimeTag>,
+}
+
+impl Default for RendererReportedState {
+    fn default() -> Self {
+        Self {
+            clear_rgba: [0.0, 0.0, 0.0, 1.0],
+            runtime_tags: Vec::new(),
+        }
+    }
 }
 
 /// Bit 0 of `PublishedPool::flags` / `ControlMsg::ConfigureBuffers.flags`:
@@ -692,9 +719,9 @@ pub struct RendererHandle {
     /// The child process. Kept alive so dropping the manager reaps it.
     child: Arc<TokioMutex<Option<Child>>>,
 
-    /// Renderer-published clear color (RGBA, 0..=1, sRGB straight
-    /// alpha). Sole source for outbound display clear color.
-    clear_rgba: Arc<StdMutex<[f32; 4]>>,
+    /// Renderer-published state. Clear color and runtime tags are committed
+    /// together so readers never observe a partially applied ReportState.
+    reported_state: Arc<StdMutex<RendererReportedState>>,
 }
 
 impl RendererHandle {
@@ -848,10 +875,17 @@ impl RendererHandle {
     /// Renderer-published clear color (RGBA, 0..=1). Defaults to
     /// opaque black until the renderer reports state.
     pub fn clear_rgba(&self) -> [f32; 4] {
-        self.clear_rgba
+        self.reported_state
             .lock()
-            .map(|g| *g)
+            .map(|state| state.clear_rgba)
             .unwrap_or([0.0, 0.0, 0.0, 1.0])
+    }
+
+    pub fn runtime_tags(&self) -> Vec<RendererRuntimeTag> {
+        self.reported_state
+            .lock()
+            .map(|state| state.runtime_tags.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -1135,7 +1169,7 @@ impl RendererManager {
         let format_caps: Arc<StdMutex<Option<crate::dma::negotiate::PeerCaps>>> =
             Arc::new(StdMutex::new(None));
         let pending_configure: Arc<StdMutex<Option<u32>>> = Arc::new(StdMutex::new(None));
-        let clear_rgba: Arc<StdMutex<[f32; 4]>> = Arc::new(StdMutex::new([0.0, 0.0, 0.0, 1.0]));
+        let reported_state = Arc::new(StdMutex::new(RendererReportedState::default()));
         let progress = Arc::new(StdMutex::new(RendererProgress::new()));
 
         let reader_stream = std_stream
@@ -1157,7 +1191,7 @@ impl RendererManager {
         let reader_release_syncobj = release_syncobj.clone();
         let reader_format_caps = format_caps.clone();
         let reader_pending = pending_configure.clone();
-        let reader_clear_rgba = clear_rgba.clone();
+        let reader_reported_state = Arc::clone(&reported_state);
         let reader_progress = Arc::clone(&progress);
         let reader_id = id.clone();
         let reader_reap_tx = self.reap_tx.clone();
@@ -1201,7 +1235,7 @@ impl RendererManager {
             frame_record_tx,
             pending_configure,
             child: Arc::new(TokioMutex::new(Some(child))),
-            clear_rgba,
+            reported_state,
         });
 
         if handle.frame_record_tx.is_some() {
@@ -1236,7 +1270,7 @@ impl RendererManager {
                 reader_release_syncobj,
                 reader_format_caps,
                 reader_pending,
-                reader_clear_rgba,
+                reader_reported_state,
                 reader_progress,
                 reader_reap_tx,
             );
@@ -1740,6 +1774,87 @@ impl RendererManager {
 // ---------------------------------------------------------------------------
 // Reader thread
 
+fn runtime_tag_key_valid(key: &str) -> bool {
+    let bytes = key.as_bytes();
+    bytes.len() <= MAX_RUNTIME_TAG_KEY_BYTES
+        && bytes.first().is_some_and(|byte| byte.is_ascii_lowercase())
+        && bytes[1..].iter().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(*byte, b'.' | b'_' | b'-')
+        })
+}
+
+fn validate_runtime_tags(
+    tags: &[(String, String)],
+) -> std::result::Result<Vec<RendererRuntimeTag>, String> {
+    if tags.len() > MAX_RUNTIME_TAGS {
+        return Err(format!(
+            "runtime_tags contains {} entries; maximum is {MAX_RUNTIME_TAGS}",
+            tags.len()
+        ));
+    }
+    let mut seen = HashSet::with_capacity(tags.len());
+    let mut validated = Vec::with_capacity(tags.len());
+    for (index, (key, value)) in tags.iter().enumerate() {
+        if !runtime_tag_key_valid(key) {
+            return Err(format!("runtime_tags[{index}] has invalid key {key:?}"));
+        }
+        if value.is_empty()
+            || value.len() > MAX_RUNTIME_TAG_VALUE_BYTES
+            || value.chars().any(char::is_control)
+        {
+            return Err(format!(
+                "runtime_tags[{index}] has an invalid value for key {key:?}"
+            ));
+        }
+        if !seen.insert(key.as_str()) {
+            return Err(format!("runtime_tags contains duplicate key {key:?}"));
+        }
+        validated.push(RendererRuntimeTag {
+            key: key.clone(),
+            value: value.clone(),
+        });
+    }
+    Ok(validated)
+}
+
+fn apply_renderer_state_patch(
+    current: &mut RendererReportedState,
+    patch: &RendererState,
+) -> std::result::Result<u32, String> {
+    if patch.fields == 0 {
+        return Err("fields is empty".to_string());
+    }
+    let unknown = patch.fields & !RENDERER_STATE_KNOWN_FIELDS;
+    if unknown != 0 {
+        return Err(format!("fields contains unknown bits 0x{unknown:x}"));
+    }
+
+    let mut next = current.clone();
+    if patch.fields & RENDERER_STATE_FIELD_CLEAR_COLOR != 0 {
+        let color = patch.clear_color;
+        let rgba = [color.r, color.g, color.b, color.a];
+        if !rgba.iter().all(|component| component.is_finite()) {
+            return Err("clear_color contains a non-finite value".to_string());
+        }
+        next.clear_rgba = rgba.map(|component| component.clamp(0.0, 1.0));
+    }
+    if patch.fields & RENDERER_STATE_FIELD_RUNTIME_TAGS != 0 {
+        next.runtime_tags = validate_runtime_tags(&patch.runtime_tags)?;
+    }
+
+    let mut changed = 0;
+    if next.clear_rgba != current.clear_rgba {
+        changed |= RENDERER_STATE_FIELD_CLEAR_COLOR;
+    }
+    if next.runtime_tags != current.runtime_tags {
+        changed |= RENDERER_STATE_FIELD_RUNTIME_TAGS;
+    }
+    *current = next;
+    Ok(changed)
+}
+
 fn run_reader(
     id: RendererId,
     read_stream: StdUnixStream,
@@ -1752,7 +1867,7 @@ fn run_reader(
     release_syncobj: Arc<StdMutex<Option<OwnedFd>>>,
     format_caps: Arc<StdMutex<Option<crate::dma::negotiate::PeerCaps>>>,
     pending_configure: Arc<StdMutex<Option<u32>>>,
-    clear_rgba: Arc<StdMutex<[f32; 4]>>,
+    reported_state: Arc<StdMutex<RendererReportedState>>,
     progress: Arc<StdMutex<RendererProgress>>,
     reap_tx: tokio::sync::mpsc::UnboundedSender<RendererId>,
 ) {
@@ -1773,6 +1888,7 @@ fn run_reader(
         };
         let (msg, fds) = received;
         let mut event_pool_generation = None;
+        let mut state_changed_fields = 0;
 
         if let EventMsg::SetEventSubscriptions { ref subscription } = msg {
             let applied = subscriptions.prepare(&id, subscription.revision, &subscription.kinds);
@@ -1992,14 +2108,14 @@ fn run_reader(
                 failure.message,
             );
         } else if let EventMsg::ReportState { ref state } = msg {
-            let color = state.clear_color;
-            let rgba = [color.r, color.g, color.b, color.a];
-            if rgba.iter().all(|component| component.is_finite()) {
-                if let Ok(mut stored) = clear_rgba.lock() {
-                    *stored = rgba.map(|component| component.clamp(0.0, 1.0));
+            match reported_state.lock() {
+                Ok(mut stored) => match apply_renderer_state_patch(&mut stored, state) {
+                    Ok(changed) => state_changed_fields = changed,
+                    Err(error) => log::warn!("renderer {id}: invalid ReportState: {error}"),
+                },
+                Err(_) => {
+                    log::error!("renderer {id}: reported state mutex poisoned");
                 }
-            } else {
-                log::warn!("renderer {id}: ReportState clear_color contains a non-finite value");
             }
         } else if !fds.is_empty() {
             log::warn!("renderer {id}: unexpected fds on event {msg:?}, dropping");
@@ -2010,6 +2126,7 @@ fn run_reader(
         let _ = events.send(RendererEvent {
             message: msg,
             pool_generation: event_pool_generation,
+            state_changed_fields,
         });
     }
 }
@@ -2146,8 +2263,14 @@ impl RendererHandle {
     }
 
     pub(crate) fn test_set_clear_rgba(&self, clear_rgba: [f32; 4]) {
-        if let Ok(mut stored) = self.clear_rgba.lock() {
-            *stored = clear_rgba;
+        if let Ok(mut state) = self.reported_state.lock() {
+            state.clear_rgba = clear_rgba;
+        }
+    }
+
+    pub(crate) fn test_set_runtime_tags(&self, runtime_tags: Vec<RendererRuntimeTag>) {
+        if let Ok(mut state) = self.reported_state.lock() {
+            state.runtime_tags = runtime_tags;
         }
     }
 }
@@ -2223,7 +2346,7 @@ impl RendererHandle {
             frame_record_tx,
             pending_configure: Arc::new(StdMutex::new(None)),
             child: Arc::new(TokioMutex::new(None)),
-            clear_rgba: Arc::new(StdMutex::new([0.0, 0.0, 0.0, 1.0])),
+            reported_state: Arc::new(StdMutex::new(RendererReportedState::default())),
         });
         (handle, b)
     }
@@ -2247,7 +2370,7 @@ impl RendererManager {
 #[cfg(test)]
 mod subscription_tests {
     use super::*;
-    use crate::ipc::proto::AudioStreamFormat;
+    use crate::ipc::proto::{AudioStreamFormat, RgbaColor};
     use crate::ipc::uds::{recv_control, CodecError};
 
     #[tokio::test]
@@ -2260,6 +2383,106 @@ mod subscription_tests {
 
         let status = failed_renderer_process_status(&mut child).await;
         assert_eq!(status, "process_status=exit status: 23");
+    }
+
+    fn state_patch(fields: u32, tags: Vec<(String, String)>) -> RendererState {
+        RendererState {
+            fields,
+            clear_color: RgbaColor {
+                r: 0.25,
+                g: 0.5,
+                b: 0.75,
+                a: 1.0,
+            },
+            runtime_tags: tags,
+        }
+    }
+
+    #[test]
+    fn renderer_state_patches_preserve_unselected_fields() {
+        let mut current = RendererReportedState::default();
+        let tags = vec![("hwdec".to_string(), "vulkan".to_string())];
+        let changed = apply_renderer_state_patch(
+            &mut current,
+            &state_patch(RENDERER_STATE_FIELD_RUNTIME_TAGS, tags),
+        )
+        .unwrap();
+        assert_eq!(changed, RENDERER_STATE_FIELD_RUNTIME_TAGS);
+        assert_eq!(current.clear_rgba, [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(
+            current.runtime_tags,
+            vec![RendererRuntimeTag {
+                key: "hwdec".to_string(),
+                value: "vulkan".to_string(),
+            }]
+        );
+
+        let changed = apply_renderer_state_patch(
+            &mut current,
+            &state_patch(
+                RENDERER_STATE_FIELD_RUNTIME_TAGS,
+                vec![("hwdec".to_string(), "vulkan".to_string())],
+            ),
+        )
+        .unwrap();
+        assert_eq!(changed, 0);
+
+        let changed = apply_renderer_state_patch(
+            &mut current,
+            &state_patch(RENDERER_STATE_FIELD_CLEAR_COLOR, Vec::new()),
+        )
+        .unwrap();
+        assert_eq!(changed, RENDERER_STATE_FIELD_CLEAR_COLOR);
+        assert_eq!(current.clear_rgba, [0.25, 0.5, 0.75, 1.0]);
+        assert_eq!(current.runtime_tags[0].value, "vulkan");
+
+        let changed = apply_renderer_state_patch(
+            &mut current,
+            &state_patch(RENDERER_STATE_FIELD_RUNTIME_TAGS, Vec::new()),
+        )
+        .unwrap();
+        assert_eq!(changed, RENDERER_STATE_FIELD_RUNTIME_TAGS);
+        assert!(current.runtime_tags.is_empty());
+    }
+
+    #[test]
+    fn invalid_renderer_state_patch_is_atomic() {
+        let mut current = RendererReportedState {
+            clear_rgba: [0.0, 0.0, 0.0, 1.0],
+            runtime_tags: vec![RendererRuntimeTag {
+                key: "hwdec".to_string(),
+                value: "vaapi".to_string(),
+            }],
+        };
+        let before = current.clone();
+        let invalid = state_patch(
+            RENDERER_STATE_FIELD_CLEAR_COLOR | RENDERER_STATE_FIELD_RUNTIME_TAGS,
+            vec![
+                ("hwdec".to_string(), "vulkan".to_string()),
+                ("hwdec".to_string(), "sw".to_string()),
+            ],
+        );
+        assert!(apply_renderer_state_patch(&mut current, &invalid).is_err());
+        assert_eq!(current, before);
+
+        let unknown = state_patch(1 << 31, Vec::new());
+        assert!(apply_renderer_state_patch(&mut current, &unknown).is_err());
+        assert_eq!(current, before);
+    }
+
+    #[test]
+    fn runtime_tag_constraints_reject_invalid_lists() {
+        let too_many = (0..=MAX_RUNTIME_TAGS)
+            .map(|index| (format!("tag{index}"), "value".to_string()))
+            .collect::<Vec<_>>();
+        assert!(validate_runtime_tags(&too_many).is_err());
+        assert!(validate_runtime_tags(&[("Hwdec".to_string(), "vulkan".to_string())]).is_err());
+        assert!(validate_runtime_tags(&[("hwdec".to_string(), "bad\nvalue".to_string())]).is_err());
+        assert!(validate_runtime_tags(&[(
+            "hwdec".to_string(),
+            "x".repeat(MAX_RUNTIME_TAG_VALUE_BYTES + 1),
+        )])
+        .is_err());
     }
 
     #[tokio::test]
@@ -2756,7 +2979,7 @@ mod reuse_tests {
             frame_record_tx: None,
             pending_configure: Arc::new(StdMutex::new(None)),
             child: Arc::new(TokioMutex::new(None)),
-            clear_rgba: Arc::new(StdMutex::new([0.0, 0.0, 0.0, 1.0])),
+            reported_state: Arc::new(StdMutex::new(RendererReportedState::default())),
         })
     }
 
@@ -2902,7 +3125,7 @@ mod reuse_tests {
             frame_record_tx: None,
             pending_configure: Arc::new(StdMutex::new(None)),
             child: Arc::new(TokioMutex::new(None)),
-            clear_rgba: Arc::new(StdMutex::new([0.0, 0.0, 0.0, 1.0])),
+            reported_state: Arc::new(StdMutex::new(RendererReportedState::default())),
         });
         mgr.register_test_handle(Arc::clone(&h)).await;
 

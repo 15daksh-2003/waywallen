@@ -36,6 +36,7 @@ class Renderer : public QObject {
     Q_PROPERTY(quint32 textureHeight READ textureHeight NOTIFY textureSizeChanged FINAL)
     Q_PROPERTY(
         QVariantList runtimeConditions READ runtimeConditions NOTIFY runtimeConditionsChanged FINAL)
+    Q_PROPERTY(QVariantList runtimeTags READ runtimeTags NOTIFY runtimeTagsChanged FINAL)
     // DRM render-node id of the GPU this renderer is on. Populated from
     // the renderer's `Ready` event during the synchronous spawn handshake,
     // so by the time UI sees this object the value is already final.
@@ -55,6 +56,7 @@ public:
     auto drmRenderMajor() const -> quint32 { return m_drm_render_major; }
     auto drmRenderMinor() const -> quint32 { return m_drm_render_minor; }
     auto runtimeConditions() const -> const QVariantList& { return m_runtime_conditions; }
+    auto runtimeTags() const -> const QVariantList& { return m_runtime_tags; }
 
     /// Diff-update from a freshly-received `RendererInstance`. Only emits
     /// the signals for properties that actually changed.
@@ -66,6 +68,7 @@ public:
     Q_SIGNAL void pidChanged();
     Q_SIGNAL void textureSizeChanged();
     Q_SIGNAL void runtimeConditionsChanged();
+    Q_SIGNAL void runtimeTagsChanged();
 
 private:
     QString      m_id;
@@ -78,6 +81,7 @@ private:
     quint32      m_drm_render_major;
     quint32      m_drm_render_minor;
     QVariantList m_runtime_conditions;
+    QVariantList m_runtime_tags;
 };
 
 /// Singleton model for all currently-registered renderers. Fed by:

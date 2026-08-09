@@ -379,12 +379,26 @@ static float clamp01_(float v) {
 
 int ww_bridge_send_report_state_clear_color(int sock, float r, float g, float b, float a) {
     waywallen_renderer_state_t state = {
+        .fields = WW_RENDERER_STATE_FIELD_CLEAR_COLOR,
         .clear_color = {
             .r = clamp01_(r),
             .g = clamp01_(g),
             .b = clamp01_(b),
             .a = clamp01_(a),
         },
+    };
+    return ww_bridge_send_report_state(sock, &state);
+}
+
+int ww_bridge_send_report_state_tags(int sock, const ww_kv_list_t* tags) {
+    if (! tags || tags->count > WW_BRIDGE_MAX_RUNTIME_TAGS) return -EINVAL;
+    if (tags->count > 0 && ! tags->data) return -EINVAL;
+    for (uint32_t i = 0; i < tags->count; ++i) {
+        if (! tags->data[i].key || ! tags->data[i].value) return -EINVAL;
+    }
+    waywallen_renderer_state_t state = {
+        .fields       = WW_RENDERER_STATE_FIELD_RUNTIME_TAGS,
+        .runtime_tags = *tags,
     };
     return ww_bridge_send_report_state(sock, &state);
 }

@@ -178,12 +178,17 @@ int ww_bridge_send_bind_failed(int sock, const waywallen_bind_failure_t* failure
 /* Emit an `Error` event with a text message. */
 int ww_bridge_send_error(int sock, const char* msg);
 
-/* Emit typed renderer state. The caller retains all storage. */
+/* Emit an atomic typed renderer-state patch. The caller retains all storage. */
 int ww_bridge_send_report_state(int sock, const waywallen_renderer_state_t* state);
 
 /* Convenience: publish a typed clear color. Components are clamped to
  * `[0, 1]`; callers should deduplicate unchanged values. */
 int ww_bridge_send_report_state_clear_color(int sock, float r, float g, float b, float a);
+
+/* Convenience: replace the complete ordered runtime-tag list. An empty
+ * list clears all tags. The caller retains every key/value string. */
+#define WW_BRIDGE_MAX_RUNTIME_TAGS 8u
+int ww_bridge_send_report_state_tags(int sock, const ww_kv_list_t* tags);
 
 /* Replace the complete runtime optional-event subscription set. `revision`
  * starts at 1 and increases monotonically for this connection. The daemon

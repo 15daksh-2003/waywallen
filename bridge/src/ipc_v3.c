@@ -1126,18 +1126,23 @@ void waywallen_rgba_color_free(waywallen_rgba_color_t *value) {
 
 static int w_renderer_state(ww_buf_t *b, const waywallen_renderer_state_t *v) {
     int rc;
+    if ((rc = w_u32(b, v->fields))) return rc;
     if ((rc = w_rgba_color(b, &v->clear_color))) return rc;
+    if ((rc = w_kv_list(b, &v->runtime_tags))) return rc;
     return WW_OK;
 }
 
 static int rd_renderer_state(ww_rd_t *r, waywallen_renderer_state_t *v) {
     int rc;
+    if ((rc = rd_u32(r, &v->fields))) return rc;
     if ((rc = rd_rgba_color(r, &v->clear_color))) return rc;
+    if ((rc = rd_kv_list(r, &v->runtime_tags))) return rc;
     return WW_OK;
 }
 
 static void free_renderer_state(waywallen_renderer_state_t *v) {
     free_rgba_color(&v->clear_color);
+    free_kv_list(&v->runtime_tags);
 }
 
 void waywallen_renderer_state_free(waywallen_renderer_state_t *value) {

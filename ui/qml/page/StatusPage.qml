@@ -318,13 +318,13 @@ MD.Page {
                         model: W.App.rendererManager.renderers
 
                         delegate: MD.ListItem {
+                            id: rendererItem
                             required property var modelData
 
                             width: ListView.view.width
                             radius: 12
                             text: root.rendererLabel(modelData)
                             font.family: "monospace"
-                            supportText: (modelData.status || "") + " · " + (modelData.fps || 0) + " fps" + (modelData.textureWidth ? " · " + modelData.textureWidth + "×" + modelData.textureHeight : "")
                             leader: MD.Icon {
                                 name: modelData.status === "paused" ? MD.Token.icon.pause : MD.Token.icon.play_arrow
                                 size: 24
@@ -340,11 +340,6 @@ MD.Page {
                                         condition: modelData
                                     }
                                 }
-                                W.GpuTag {
-                                    Layout.alignment: Qt.AlignVCenter
-                                    drmRenderMajor: modelData.drmRenderMajor || 0
-                                    drmRenderMinor: modelData.drmRenderMinor || 0
-                                }
                                 MD.IconButton {
                                     icon.name: MD.Token.icon.close
                                     onClicked: {
@@ -352,6 +347,35 @@ MD.Page {
                                         killDialog.label = root.rendererLabel(modelData);
                                         killDialog.open();
                                     }
+                                }
+                            }
+                            supporting: Flow {
+                                spacing: 6
+                                topPadding: 4
+
+                                W.Tag {
+                                    visible: !!rendererItem.modelData.status
+                                    text: rendererItem.modelData.status || ""
+                                }
+                                W.Tag {
+                                    text: (rendererItem.modelData.fps || 0) + " fps"
+                                }
+                                W.Tag {
+                                    visible: rendererItem.modelData.textureWidth > 0
+                                        && rendererItem.modelData.textureHeight > 0
+                                    text: rendererItem.modelData.textureWidth
+                                        + "×" + rendererItem.modelData.textureHeight
+                                }
+                                Repeater {
+                                    model: rendererItem.modelData.runtimeTags || []
+                                    delegate: W.RendererRuntimeTag {
+                                        required property var modelData
+                                        runtimeTag: modelData
+                                    }
+                                }
+                                W.GpuTag {
+                                    drmRenderMajor: rendererItem.modelData.drmRenderMajor || 0
+                                    drmRenderMinor: rendererItem.modelData.drmRenderMinor || 0
                                 }
                             }
                         }

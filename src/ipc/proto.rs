@@ -7,3 +7,8 @@ pub use crate::ipc::generated::{
     PointerButton, PointerButtonState, PointerMotion, ProducerCapabilities, RendererInit,
     RendererState, RgbaColor, PROTOCOL_NAME, PROTOCOL_VERSION,
 };
+
+pub const RENDERER_STATE_FIELD_CLEAR_COLOR: u32 = 1 << 0;
+pub const RENDERER_STATE_FIELD_RUNTIME_TAGS: u32 = 1 << 1;
+pub const RENDERER_STATE_KNOWN_FIELDS: u32 =
+    RENDERER_STATE_FIELD_CLEAR_COLOR | RENDERER_STATE_FIELD_RUNTIME_TAGS;

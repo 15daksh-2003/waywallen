@@ -25,6 +25,15 @@ fn protocol_xml() -> PathBuf {
         .join("protocol/waywallen_display_v1.xml")
 }
 
+fn renderer_protocol_xml() -> PathBuf {
+    manifest_dir()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("protocol/waywallen_ipc_v3.xml")
+}
+
 #[test]
 fn generated_c_compiles_cleanly() {
     if !gcc_available() {
@@ -413,4 +422,100 @@ int main(void) {
 
     // Clean up.
     let _ = std::fs::remove_file(&bin_path);
+}
+
+#[test]
+fn roundtrip_renderer_state_runtime_tags() {
+    if !gcc_available() {
+        eprintln!("skipping: gcc not found on PATH");
+        return;
+    }
+    let xml_path = renderer_protocol_xml();
+    let xml = std::fs::read_to_string(&xml_path).unwrap();
+    let header = wayproto_gen::emit_c_header_from_xml(&xml).expect("codegen header");
+    let source = wayproto_gen::emit_c_source_from_xml(&xml).expect("codegen source");
+
+    let tmp = std::env::temp_dir().join(format!(
+        "wayproto-gen-renderer-state-{}",
+        std::process::id()
+    ));
+    let include_dir = tmp.join("waywallen-bridge");
+    std::fs::create_dir_all(&include_dir).unwrap();
+    let h_path = include_dir.join("ipc_v3.h");
+    let c_path = tmp.join("ipc_v3.c");
+    let rt_c_path = tmp.join("roundtrip.c");
+    let bin_path = tmp.join("roundtrip");
+    std::fs::write(&h_path, header).unwrap();
+    std::fs::write(&c_path, source).unwrap();
+    std::fs::write(
+        &rt_c_path,
+        r#"
+#include "waywallen-bridge/ipc_v3.h"
+#include <assert.h>
+#include <string.h>
+
+int main(void) {
+    ww_kv_t tags[] = {{ .key = "hwdec", .value = "vulkan" }};
+    ww_evt_report_state_t in = {0};
+    in.state.fields = 3;
+    in.state.clear_color.r = 0.25f;
+    in.state.clear_color.g = 0.5f;
+    in.state.clear_color.b = 0.75f;
+    in.state.clear_color.a = 1.0f;
+    in.state.runtime_tags.count = 1;
+    in.state.runtime_tags.data = tags;
+
+    ww_buf_t buf;
+    ww_buf_init(&buf);
+    assert(ww_evt_report_state_encode(&in, &buf) == WW_OK);
+
+    ww_evt_report_state_t out;
+    assert(ww_evt_report_state_decode(buf.data, buf.len, &out) == WW_OK);
+    assert(out.state.fields == 3);
+    assert(out.state.clear_color.b == 0.75f);
+    assert(out.state.runtime_tags.count == 1);
+    assert(strcmp(out.state.runtime_tags.data[0].key, "hwdec") == 0);
+    assert(strcmp(out.state.runtime_tags.data[0].value, "vulkan") == 0);
+
+    ww_evt_report_state_free(&out);
+    ww_buf_free(&buf);
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new("gcc")
+        .args([
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-Wpedantic",
+            "-std=c11",
+            "-I",
+        ])
+        .arg(&tmp)
+        .arg(&c_path)
+        .arg(&rt_c_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .expect("gcc spawn");
+    if !out.status.success() {
+        panic!(
+            "gcc failed building renderer-state roundtrip:\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let run = Command::new(&bin_path).output().expect("run roundtrip");
+    assert!(
+        run.status.success(),
+        "renderer-state roundtrip failed: {}\nstdout: {}\nstderr: {}",
+        run.status,
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
 }

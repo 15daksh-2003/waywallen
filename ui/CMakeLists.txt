@@ -163,6 +163,7 @@ set(QML_FILES
   qml/component/PagePopup.qml
   qml/component/Tag.qml
   qml/component/GpuTag.qml
+  qml/component/RendererRuntimeTag.qml
   qml/component/RuntimeConditionTag.qml
   qml/component/KdeDisplaysHelp.qml
   qml/component/GnomeDisplaysHelp.qml

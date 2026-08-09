@@ -240,7 +240,8 @@ mod tests {
     use crate::ipc::generated::{
         AudioStreamFormat, AudioWindow, BufferFormat, BufferPool, ControlTransition, Event,
         EventIn, EventSubscription, EventSubscriptionResult, EventSubscriptionStatus, Extent,
-        Frame, MediaPlaybackState, MprisSnapshot, RendererInit, PROTOCOL_VERSION,
+        Frame, MediaPlaybackState, MprisSnapshot, RendererInit, RendererState, RgbaColor,
+        PROTOCOL_VERSION,
     };
     use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
     use std::ffi::CString;
@@ -404,6 +405,28 @@ mod tests {
         send_control(&a, &audio, &[]).unwrap();
         let (got, fds) = recv_control(&b).unwrap();
         assert_eq!(audio, got);
+        assert!(fds.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_renderer_state_with_runtime_tags() {
+        let (a, b) = pair();
+        let sent = Event::ReportState {
+            state: RendererState {
+                fields: crate::ipc::proto::RENDERER_STATE_FIELD_CLEAR_COLOR
+                    | crate::ipc::proto::RENDERER_STATE_FIELD_RUNTIME_TAGS,
+                clear_color: RgbaColor {
+                    r: 0.1,
+                    g: 0.2,
+                    b: 0.3,
+                    a: 1.0,
+                },
+                runtime_tags: vec![("hwdec".into(), "vulkan".into())],
+            },
+        };
+        send_event(&a, &sent, &[]).unwrap();
+        let (got, fds) = recv_event(&b).unwrap();
+        assert_eq!(sent, got);
         assert!(fds.is_empty());
     }
 

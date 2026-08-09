@@ -30,6 +30,7 @@ using proto::RendererListResponse;
 using proto::RendererMouseRequest;
 using proto::RendererPauseRequest;
 using proto::RendererPlayRequest;
+using proto::RendererRuntimeTag;
 using proto::RendererSpawnRequest;
 using proto::RendererSpawnResponse;
 using proto::RuntimeCondition;
@@ -213,4 +214,5 @@ using proto::WallpaperSortKeyGadget::WallpaperSortKey;
 export namespace waywallen
 {
 auto runtimeConditionsFromPb(const QList<proto::RuntimeCondition>& conditions) -> QVariantList;
+auto runtimeTagsFromPb(const QList<proto::RendererRuntimeTag>& tags) -> QVariantList;
 } // namespace waywallen

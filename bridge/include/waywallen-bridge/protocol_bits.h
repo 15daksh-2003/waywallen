@@ -46,6 +46,11 @@ extern "C" {
  * (GTT) so a foreign GPU can PRIME-import it. */
 #define WW_BUF_HOST_VISIBLE (1u << 0)
 
+/* `fields` on `waywallen_renderer_state_t`. Each ReportState is an
+ * atomic patch; fields whose bits are absent retain their current value. */
+#define WW_RENDERER_STATE_FIELD_CLEAR_COLOR  (1u << 0)
+#define WW_RENDERER_STATE_FIELD_RUNTIME_TAGS (1u << 1)
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

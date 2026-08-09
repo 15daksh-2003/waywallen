@@ -791,6 +791,14 @@ fn renderer_snapshot_to_pb(s: RendererSnapshot, settings: &SettingsStore) -> pb:
         drm_render_minor: s.drm_render_minor,
         texture_width: s.texture_width,
         texture_height: s.texture_height,
+        runtime_tags: s
+            .runtime_tags
+            .into_iter()
+            .map(|tag| pb::RendererRuntimeTag {
+                key: tag.key,
+                value: tag.value,
+            })
+            .collect(),
         conditions: s
             .conditions
             .into_iter()

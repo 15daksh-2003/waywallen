@@ -21,6 +21,8 @@ enum : uint32_t
     OWE_WW_BRIDGE_SUPPORTED_SPAWN_VERSION    = WW_BRIDGE_SUPPORTED_SPAWN_VERSION,
     OWE_WW_MEM_HINT_DEVICE_LOCAL             = WW_MEM_HINT_DEVICE_LOCAL,
     OWE_WW_MEM_HINT_HOST_VISIBLE             = WW_MEM_HINT_HOST_VISIBLE,
+    OWE_WW_RENDERER_STATE_FIELD_CLEAR_COLOR  = WW_RENDERER_STATE_FIELD_CLEAR_COLOR,
+    OWE_WW_RENDERER_STATE_FIELD_RUNTIME_TAGS = WW_RENDERER_STATE_FIELD_RUNTIME_TAGS,
     OWE_WW_DRM_FORMAT_ABGR8888               = WW_DRM_FORMAT_ABGR8888,
     OWE_WW_DRM_FORMAT_XBGR8888               = WW_DRM_FORMAT_XBGR8888,
     OWE_WW_DRM_FORMAT_ARGB8888               = WW_DRM_FORMAT_ARGB8888,
@@ -35,6 +37,8 @@ enum : uint32_t
 #undef WW_BRIDGE_SUPPORTED_SPAWN_VERSION
 #undef WW_MEM_HINT_DEVICE_LOCAL
 #undef WW_MEM_HINT_HOST_VISIBLE
+#undef WW_RENDERER_STATE_FIELD_CLEAR_COLOR
+#undef WW_RENDERER_STATE_FIELD_RUNTIME_TAGS
 #undef WW_DRM_FORMAT_ABGR8888
 #undef WW_DRM_FORMAT_XBGR8888
 #undef WW_DRM_FORMAT_ARGB8888
@@ -65,6 +69,10 @@ export inline constexpr const char* WAYWALLEN_AUDIO_STREAM_PREFIX  = WW_BRIDGE_A
 
 export inline constexpr uint32_t WW_MEM_HINT_DEVICE_LOCAL = OWE_WW_MEM_HINT_DEVICE_LOCAL;
 export inline constexpr uint32_t WW_MEM_HINT_HOST_VISIBLE = OWE_WW_MEM_HINT_HOST_VISIBLE;
+export inline constexpr uint32_t WW_RENDERER_STATE_FIELD_CLEAR_COLOR =
+    OWE_WW_RENDERER_STATE_FIELD_CLEAR_COLOR;
+export inline constexpr uint32_t WW_RENDERER_STATE_FIELD_RUNTIME_TAGS =
+    OWE_WW_RENDERER_STATE_FIELD_RUNTIME_TAGS;
 
 export inline constexpr uint32_t WW_DRM_FORMAT_ABGR8888 = OWE_WW_DRM_FORMAT_ABGR8888;
 export inline constexpr uint32_t WW_DRM_FORMAT_XBGR8888 = OWE_WW_DRM_FORMAT_XBGR8888;
@@ -143,6 +151,7 @@ export using ::ww_bridge_recv_init;
 export using ::ww_bridge_send_bind_failed;
 export using ::ww_bridge_send_init_nack;
 export using ::ww_bridge_send_report_state_clear_color;
+export using ::ww_bridge_send_report_state_tags;
 export using ::ww_bridge_set_log_callback;
 export using ::ww_bridge_vk_dt_load;
 export using ::ww_bridge_vk_dt_t;
