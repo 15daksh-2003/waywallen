@@ -118,6 +118,8 @@ MD.ApplicationWindow {
         id: m_snake
         parent: T.Overlay.overlay
         anchors.fill: parent
+        anchors.leftMargin: 24
+        anchors.rightMargin: 24
     }
 
     Connections {
