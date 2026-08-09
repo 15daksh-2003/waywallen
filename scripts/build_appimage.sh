@@ -228,7 +228,7 @@ git -C "$WAYWALLEN_DISPLAY_SRC" fetch --tags origin "$WAYWALLEN_DISPLAY_REF" \
     || git -C "$WAYWALLEN_DISPLAY_SRC" fetch --tags origin
 git -C "$WAYWALLEN_DISPLAY_SRC" checkout --detach "$WAYWALLEN_DISPLAY_REF"
 pushd "$WAYWALLEN_DISPLAY_SRC"
-RUST_HOST_TARGET="$(rustc -vV | awk '/^host: / { print $2; exit }')"
+RUST_HOST_TARGET="$(rustc -vV | awk '/^host: / { print $2 }')"
 [[ -n "$RUST_HOST_TARGET" ]] || fail "could not read the rustc host target"
 [[ -n "${CC:-}" ]] || fail "Conda C compiler is unavailable"
 RUST_LINKER_ENV="CARGO_TARGET_${RUST_HOST_TARGET^^}_LINKER"
