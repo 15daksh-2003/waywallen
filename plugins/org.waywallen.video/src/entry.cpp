@@ -868,28 +868,36 @@ int run_selftest(const Options& opt) {
             sync_fd = std::move(cv_res).unwrap();
         }
     } else if (kind == wavsen::video::FrameKind::VaapiDrm) {
-        auto fs_res = decoder->next_drm_frame();
+        auto fs_res = decoder->next_vaapi_frame();
         if (fs_res.is_err()) {
-            rstd_error("selftest next_drm_frame: {}",
+            rstd_error("selftest next_vaapi_frame: {}",
                        std::move(fs_res).unwrap_err().message.as_str());
             return 1;
         }
         auto pull = rstd::move(fs_res).unwrap();
         if (pull.status != wavsen::video::NextFrame::Ok || pull.frame.is_none()) return 1;
-        const auto& drmv = pull.frame->view();
+        const auto& vaapi = pull.frame->view();
+        const auto  cm    = wavsen::video::make_color_matrix(
+            static_cast<wavsen::video::ColorSpace>(vaapi.colorspace.to_primitive()),
+            static_cast<wavsen::video::ColorRange>(vaapi.color_range.to_primitive()));
+        auto reserved = yuv->try_reserve_drm(wavsen::video::ConvertTarget::BridgeForeign);
+        if (reserved.is_err() || reserved->is_none()) return 1;
+        auto mapped = rstd::move(*pull.frame).into_drm();
+        if (mapped.is_err()) {
+            rstd_error("selftest VAAPI DRM mapping: {}",
+                       rstd::move(mapped).unwrap_err().message.as_str());
+            return 1;
+        }
+        auto        drm_frame = rstd::move(mapped).unwrap();
+        const auto& drmv      = drm_frame.view();
         rstd_info("selftest drm_prime: {}x{}, modifier=0x{:x}, objects={}, layers={}",
                   drmv.width,
                   drmv.height,
                   drmv.objects[0].format_modifier,
                   drmv.object_count,
                   drmv.layer_count);
-        const auto cm = wavsen::video::make_color_matrix(
-            static_cast<wavsen::video::ColorSpace>(drmv.colorspace.to_primitive()),
-            static_cast<wavsen::video::ColorRange>(drmv.color_range.to_primitive()));
-        auto reserved = yuv->try_reserve_drm(wavsen::video::ConvertTarget::BridgeForeign);
-        if (reserved.is_err() || reserved->is_none()) return 1;
         auto cv_res = yuv->submit_drm_prime(rstd::move(**reserved),
-                                            rstd::move(*pull.frame),
+                                            rstd::move(drm_frame),
                                             {
                                                 .image  = dst_img,
                                                 .width  = rstd::u32(even_w),
@@ -1451,7 +1459,7 @@ int run(int argc, char** argv) {
 
         rstd::f64                                                    frame_pts { -1.0 };
         const auto                                                   fkind = decoder->get()->kind();
-        rstd::Option<wavsen::video::DrmFrameLease>                   drm_frame;
+        rstd::Option<wavsen::video::VaapiFrameLease>                 vaapi_frame;
         rstd::Result<wavsen::video::NextFrame, wavsen::video::Error> fs_res =
             rstd::Ok(wavsen::video::NextFrame::Ok);
         switch (fkind) {
@@ -1459,13 +1467,13 @@ int run(int argc, char** argv) {
             fs_res = decoder->get()->next_vk_frame(vkv);
             break;
         case wavsen::video::FrameKind::VaapiDrm: {
-            auto pulled = decoder->get()->next_drm_frame();
+            auto pulled = decoder->get()->next_vaapi_frame();
             if (pulled.is_err()) {
                 fs_res = rstd::Err(rstd::move(pulled).unwrap_err());
             } else {
-                auto value = rstd::move(pulled).unwrap();
-                fs_res     = rstd::Ok(value.status);
-                drm_frame  = rstd::move(value.frame);
+                auto value  = rstd::move(pulled).unwrap();
+                fs_res      = rstd::Ok(value.status);
+                vaapi_frame = rstd::move(value.frame);
             }
             break;
         }
@@ -1501,12 +1509,12 @@ int run(int argc, char** argv) {
         switch (fkind) {
         case wavsen::video::FrameKind::VulkanShared: frame_pts = vkv.pts_seconds; break;
         case wavsen::video::FrameKind::VaapiDrm:
-            if (drm_frame.is_none()) {
-                rstd_error("waywallen-video-renderer: VAAPI decode returned no frame lease");
+            if (vaapi_frame.is_none()) {
+                rstd_error("waywallen-video-renderer: VAAPI decode returned no surface lease");
                 signal_shutdown(host);
                 continue;
             }
-            frame_pts = drm_frame->view().pts_seconds;
+            frame_pts = vaapi_frame->view().pts_seconds;
             break;
         case wavsen::video::FrameKind::Sw: frame_pts = frame.pts_seconds; break;
         }
@@ -1575,8 +1583,8 @@ int run(int argc, char** argv) {
             cr_id = vkv.color_range;
             break;
         case wavsen::video::FrameKind::VaapiDrm:
-            cs_id = drm_frame->view().colorspace;
-            cr_id = drm_frame->view().color_range;
+            cs_id = vaapi_frame->view().colorspace;
+            cr_id = vaapi_frame->view().color_range;
             break;
         case wavsen::video::FrameKind::Sw:
             cs_id = frame.colorspace;
@@ -1613,9 +1621,14 @@ int run(int argc, char** argv) {
             break;
         }
         case wavsen::video::FrameKind::VaapiDrm: {
+            auto mapped = rstd::move(*vaapi_frame).into_drm();
+            if (mapped.is_err()) {
+                cv_res = rstd::Err(rstd::move(mapped).unwrap_err());
+                break;
+            }
             auto converted =
                 yuv->submit_drm_prime(rstd::move(*drm_reservation),
-                                      rstd::move(*drm_frame),
+                                      rstd::move(mapped).unwrap(),
                                       {
                                           .image  = reinterpret_cast<VkImage>(s.vk_image),
                                           .width  = rstd::u32(s.width),
