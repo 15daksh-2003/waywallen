@@ -1154,7 +1154,7 @@ message DisplayConnectionFailed {
   // Same code as the wire `error` event (see error_code in
   // waywallen_display_v1.xml): 1=PROTO_NAME_MISMATCH, 2=VERSION_UNSUPPORTED.
   uint32 error_code               = 3;
-  // One-line human-readable reason — same string sent on the wire.
+  // One-line human-readable reason with daemon-side recovery guidance.
   string reason                   = 4;
 }
 

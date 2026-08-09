@@ -367,7 +367,8 @@ mod lifecycle {
             settings: std::collections::HashMap::new(),
             test_pattern: false,
             renderer_name: None,
-            user_properties_json: None,
+            user_property_overrides: std::collections::HashMap::new(),
+            default_user_properties: std::collections::HashMap::new(),
         };
         let id = mgr.spawn(req).await.expect("spawn");
         assert!(!id.is_empty());

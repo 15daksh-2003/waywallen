@@ -730,6 +730,8 @@ fn pointer_values_valid(values: &[f32], modifiers: u32) -> bool {
     values.iter().all(|value| value.is_finite()) && modifiers & !0x0f == 0
 }
 
+const DISPLAY_UPDATE_HINT: &str = "You may need to update waywallen-display.";
+
 fn report_connection_failure(
     events_tx: &tokio::sync::broadcast::Sender<GlobalEvent>,
     client_name: String,
@@ -741,7 +743,7 @@ fn report_connection_failure(
         client_name,
         client_protocol_version,
         error_code: error_code as u32,
-        reason,
+        reason: format!("{reason}. {DISPLAY_UPDATE_HINT}"),
     });
 }
 
@@ -1165,6 +1167,7 @@ mod tests {
                 assert_eq!(error_code, wire::DisplayErrorCode::ProtocolViolation as u32);
                 assert!(reason.contains("incompatible or malformed display hello"));
                 assert!(reason.contains("trailing bytes after decode"));
+                assert!(reason.contains(DISPLAY_UPDATE_HINT));
             }
             event => panic!("unexpected event: {event:?}"),
         }

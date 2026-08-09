@@ -345,6 +345,10 @@ mod handshake {
                     assert_eq!(client_protocol_version, probe);
                     assert_eq!(code, DisplayErrorCode::VersionUnsupported as u32);
                     assert!(reason.contains("not supported"), "reason={reason:?}");
+                    assert!(
+                        reason.contains("You may need to update waywallen-display."),
+                        "reason={reason:?}"
+                    );
                 }
                 other => panic!("unexpected global event: {other:?}"),
             }
@@ -491,7 +495,8 @@ mod sync_fd_fanout {
                 settings: std::collections::HashMap::new(),
                 test_pattern: false,
                 renderer_name: None,
-                user_properties_json: None,
+                user_property_overrides: std::collections::HashMap::new(),
+                default_user_properties: std::collections::HashMap::new(),
             })
             .await;
         let renderer_id = match spawn_res {
@@ -593,7 +598,8 @@ mod sync_fd_single {
                 settings: std::collections::HashMap::new(),
                 test_pattern: false,
                 renderer_name: None,
-                user_properties_json: None,
+                user_property_overrides: std::collections::HashMap::new(),
+                default_user_properties: std::collections::HashMap::new(),
             })
             .await;
         let renderer_id = match spawn_res {
