@@ -13,6 +13,7 @@
       <li>Displays refresh frame after layout changes.</li>
       <li>Renderer clear colors are preserved when display links are created.</li>
       <li>Vulkan bridge buffers support sampled display imports.</li>
+      <li>Renderer spawn version mismatches fail immediately.</li>
     </ul>
     <p>Improved:</p>
     <ul>

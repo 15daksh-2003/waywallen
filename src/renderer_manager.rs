@@ -1037,6 +1037,16 @@ impl RendererManager {
                 req.default_user_properties,
             );
 
+        let renderer_def = match req.renderer_name.as_deref() {
+            Some(name) => self
+                .with_registry(|registry| registry.resolve_by_name(name).cloned())
+                .ok_or_else(|| Error::RendererNotFound(name.to_string()))?,
+            None => self
+                .with_registry(|registry| registry.resolve(&req.wp_type).cloned())
+                .ok_or_else(|| Error::NoRendererForType(req.wp_type.clone()))?,
+        };
+        validate_renderer_spawn_version(&renderer_def)?;
+
         // Create a listening UDS at a temp path; the child connects to
         // it shortly after exec().
         let sock_path = temp_sock_path(&id);
@@ -1047,15 +1057,6 @@ impl RendererManager {
         // Best-effort cleanup of the socket file at the end of spawn —
         // the connection survives unlink(2).
         let _cleanup = TempUnlink(sock_path.clone());
-
-        let renderer_def = match req.renderer_name.as_deref() {
-            Some(name) => self
-                .with_registry(|registry| registry.resolve_by_name(name).cloned())
-                .ok_or_else(|| Error::RendererNotFound(name.to_string()))?,
-            None => self
-                .with_registry(|registry| registry.resolve(&req.wp_type).cloned())
-                .ok_or_else(|| Error::NoRendererForType(req.wp_type.clone()))?,
-        };
 
         // Translate the user's GPU choice into a render-node path before
         // settings reach the subprocess.
@@ -1081,8 +1082,7 @@ impl RendererManager {
             }
         }
 
-        // Build the Init message *before* spawning the child (no
-        // orphan socket file lingers if validation fails here).
+        // Build the Init message before spawning the child.
         let init_msg = build_init_msg(&req, &renderer_def);
 
         let mut cmd = Command::new(&renderer_def.bin);
@@ -2167,8 +2167,6 @@ impl Drop for TempUnlink {
 /// Build the typed `Init` control message the daemon emits right
 /// after a renderer subprocess connects back.
 pub(crate) fn build_init_msg(req: &SpawnRequest, def: &RendererDef) -> ControlMsg {
-    let spawn_version = def.spawn_version.unwrap_or(SPAWN_VERSION);
-
     let mut settings_kv: HashMap<String, String> = req.settings.clone();
 
     if def.settings.contains_key("test_pattern") && req.test_pattern {
@@ -2181,7 +2179,7 @@ pub(crate) fn build_init_msg(req: &SpawnRequest, def: &RendererDef) -> ControlMs
     ControlMsg::Init {
         config: RendererInit {
             protocol_version: crate::ipc::proto::PROTOCOL_VERSION,
-            spawn_version,
+            spawn_version: SPAWN_VERSION,
             settings,
             user_properties: crate::wallpaper::properties::merge_renderer_user_properties(
                 &req.default_user_properties,
@@ -2189,6 +2187,17 @@ pub(crate) fn build_init_msg(req: &SpawnRequest, def: &RendererDef) -> ControlMs
             ),
         },
     }
+}
+
+fn validate_renderer_spawn_version(def: &RendererDef) -> Result<()> {
+    let declared = def.spawn_version.unwrap_or(SPAWN_VERSION);
+    if declared == SPAWN_VERSION {
+        return Ok(());
+    }
+    Err(Error::RendererSpawnFailed(format!(
+        "renderer spawn version mismatch: plugin '{}' renderer '{}' declares {declared}, daemon requires {SPAWN_VERSION}; update the plugin",
+        def.plugin_id, def.name
+    )))
 }
 
 /// Run the post-accept handshake on a blocking std `UnixStream`:
@@ -2750,7 +2759,7 @@ mod init_handshake_tests {
             types: vec!["scene".into()],
             priority: 100,
             activity: RendererActivityMode::Continuous,
-            spawn_version: Some(1),
+            spawn_version: Some(SPAWN_VERSION),
             extras: vec!["assets".into(), "external_id".into()],
             settings: Default::default(),
             legacy_events: None,
@@ -2776,7 +2785,7 @@ mod init_handshake_tests {
             types: vec!["video".into()],
             priority: 100,
             activity: RendererActivityMode::Continuous,
-            spawn_version: Some(1),
+            spawn_version: Some(SPAWN_VERSION),
             extras: Vec::new(),
             settings: ps,
             legacy_events: None,
@@ -2805,7 +2814,7 @@ mod init_handshake_tests {
         match msg {
             ControlMsg::Init { config } => {
                 assert_eq!(config.protocol_version, crate::ipc::proto::PROTOCOL_VERSION);
-                assert_eq!(config.spawn_version, 1); // pulled from def_mpv_schema
+                assert_eq!(config.spawn_version, SPAWN_VERSION);
                 assert_eq!(
                     config.settings,
                     vec![("loop_file".to_string(), "inf".to_string())]
@@ -2814,6 +2823,38 @@ mod init_handshake_tests {
             }
             other => panic!("expected ControlMsg::Init, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_incompatible_manifest_before_exec() {
+        let mut def = def_legacy("old-renderer");
+        def.bin = PathBuf::from("/path/that/must/not/be/executed");
+        def.spawn_version = Some(SPAWN_VERSION - 1);
+        let mut registry = RendererRegistry::new();
+        registry.register(def);
+        let manager = RendererManager::new(registry);
+        let error = manager
+            .spawn(SpawnRequest {
+                wp_type: "scene".to_string(),
+                renderer_name: Some("old-renderer".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect_err("old spawn version must be rejected");
+        let message = error.to_string();
+        assert!(
+            message.contains("renderer spawn version mismatch"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("declares {}", SPAWN_VERSION - 1)),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("daemon requires {SPAWN_VERSION}")),
+            "{message}"
+        );
+        assert!(message.contains("update the plugin"), "{message}");
     }
 
     #[test]
@@ -2940,7 +2981,7 @@ mod reuse_tests {
             types: vec!["video".into()],
             priority: 100,
             activity: RendererActivityMode::Continuous,
-            spawn_version: Some(1),
+            spawn_version: Some(SPAWN_VERSION),
             extras: Vec::new(),
             settings: ps,
             legacy_events: None,

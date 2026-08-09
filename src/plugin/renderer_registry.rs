@@ -163,8 +163,8 @@ pub struct RendererDef {
     /// manifests default to on-demand for backward compatibility.
     #[serde(default)]
     pub activity: RendererActivityMode,
-    /// Wire-protocol `Init.spawn_version` to emit for this renderer.
-    /// `None` means use the daemon compile-time default.
+    /// Renderer spawn contract version declared by the plugin.
+    /// `None` means the plugin accepts the daemon compile-time version.
     #[serde(default)]
     pub spawn_version: Option<u32>,
     /// Allow-listed metadata keys forwarded as `Init.resource_extras`.
