@@ -74,13 +74,23 @@ Waywallen 是一个为 Linux 桌面打造的动态壁纸解决方案。<br>
 
 ## FAQ
 
-- 如何获取日志<br>
+- 硬件视频解码如何工作？<br>
+  默认 `auto` 模式使用以下回退顺序：
+
+  `vulkan -> vaapi -> sw`
+
+  可以在 `waywallen-video` 的设置中选择 `hwdec` 模式，而不使用 `auto`。
+
+  我们不计划添加独立的 NVDEC 后端。
+
+  NVIDIA 用户应使用 [nvidia-vaapi-driver](https://github.com/elFarto/nvidia-vaapi-driver)，通过 VA-API 暴露 NVDEC。
+- 如何获取日志？<br>
   首先需要退出正在运行的 Waywallen 守护进程。
   ```bash
   export RSTD_LOG=debug RUST_LOG=debug,zbus=warn
   ./waywallen
   ```
-- 如何在 flatpak 中调试
+- 如何在 flatpak 中调试？
   ```bash
   flatpak install org.waywallen.waywallen.Debug
   flatpak run --devel --command=bash org.waywallen.waywallen

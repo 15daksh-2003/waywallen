@@ -74,13 +74,23 @@ It started life as a Wallpaper Engine plugin for KDE.
 
 ## FAQ
 
-- How to get logs<br>
+- How does hardware video decoding work?<br>
+  The default `auto` mode uses the following fallback order:
+
+  `vulkan -> vaapi -> sw`
+
+  You can select the `hwdec` mode in the `waywallen-video` settings instead of using `auto`.
+
+  We do not plan to add a dedicated NVDEC backend.
+
+  NVIDIA users should use [nvidia-vaapi-driver](https://github.com/elFarto/nvidia-vaapi-driver) to expose NVDEC through VA-API.
+- How to get logs?<br>
   First, stop the running Waywallen daemon.
   ```bash
   export RSTD_LOG=debug RUST_LOG=debug,zbus=warn
   ./waywallen
   ```
-- How to debug in Flatpak
+- How to debug in Flatpak?
   ```bash
   flatpak install org.waywallen.waywallen.Debug
   flatpak run --devel --command=bash org.waywallen.waywallen

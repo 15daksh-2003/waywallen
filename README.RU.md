@@ -74,13 +74,23 @@ Waywallen — решение для динамических обоев на р�
 
 ## Часто задаваемые вопросы
 
-- Как получить логи<br>
+- Как работает аппаратное декодирование видео?<br>
+  В режиме `auto` по умолчанию используется следующий порядок отката:
+
+  `vulkan -> vaapi -> sw`
+
+  Вместо `auto` режим `hwdec` можно выбрать в настройках `waywallen-video`.
+
+  Мы не планируем добавлять отдельный бэкенд NVDEC.
+
+  Пользователям NVIDIA следует использовать [nvidia-vaapi-driver](https://github.com/elFarto/nvidia-vaapi-driver), чтобы использовать NVDEC через VA-API.
+- Как получить логи?<br>
   Сначала завершите работающий демон Waywallen.
   ```bash
   export RSTD_LOG=debug RUST_LOG=debug,zbus=warn
   ./waywallen
   ```
-- Как выполнить отладку во Flatpak
+- Как выполнить отладку во Flatpak?
   ```bash
   flatpak install org.waywallen.waywallen.Debug
   flatpak run --devel --command=bash org.waywallen.waywallen
