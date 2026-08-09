@@ -27,6 +27,10 @@
         <source>Donate</source>
         <translation>Поддержать</translation>
     </message>
+    <message>
+        <source>Changelog</source>
+        <translation>Журнал изменений</translation>
+    </message>
 </context>
 <context>
     <name>AddLibraryPage</name>

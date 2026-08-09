@@ -216,6 +216,7 @@ set(QML_FILES
 )
 set(RESOURCES
   assets/waywallen-ui.svg
+  assets/waywallen-ui.releases.xml
 )
 
 set_source_files_properties(qml/Global.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)

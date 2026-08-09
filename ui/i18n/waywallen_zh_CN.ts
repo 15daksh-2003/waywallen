@@ -27,6 +27,10 @@
         <source>Donate</source>
         <translation>捐赠</translation>
     </message>
+    <message>
+        <source>Changelog</source>
+        <translation>更新日志</translation>
+    </message>
 </context>
 <context>
     <name>AddLibraryPage</name>
