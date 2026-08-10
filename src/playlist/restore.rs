@@ -1,10 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::playlist::engine::Engine;
 use crate::routing::RouterEvent;
 use crate::scheduler::DisplayId;
 use crate::AppState;
+
+const SETTLE: Duration = Duration::from_secs(2);
+const IDLE_PARK: Duration = Duration::from_secs(3600);
 
 fn resolve_pid(app: &Arc<AppState>, key: &str) -> Option<i64> {
     app.settings
@@ -13,9 +17,11 @@ fn resolve_pid(app: &Arc<AppState>, key: &str) -> Option<i64> {
         .or_else(|| app.settings.global().auto_attach_playlist_id)
 }
 
-// Displays resolving to the same playlist are activated together so shuffle stays in sync.
 async fn activate_groups(app: &Arc<AppState>, groups: HashMap<i64, Vec<DisplayId>>) {
     for (pid, display_ids) in groups {
+        if display_ids.is_empty() {
+            continue;
+        }
         if let Err(e) = Engine::activate_resuming_with_first_frame_timeout(
             app,
             &display_ids,
@@ -27,6 +33,76 @@ async fn activate_groups(app: &Arc<AppState>, groups: HashMap<i64, Vec<DisplayId
             log::warn!("restore playlist {pid} on displays {display_ids:?} failed: {e:#}");
         }
     }
+}
+
+fn queue_pending(
+    pending: &mut HashMap<i64, (tokio::time::Instant, Vec<DisplayId>)>,
+    pid: i64,
+    display_id: DisplayId,
+    settle: Duration,
+) {
+    let entry = pending
+        .entry(pid)
+        .or_insert_with(|| (tokio::time::Instant::now() + settle, Vec::new()));
+    if !entry.1.contains(&display_id) {
+        entry.1.push(display_id);
+    }
+}
+
+fn remove_pending_display(
+    pending: &mut HashMap<i64, (tokio::time::Instant, Vec<DisplayId>)>,
+    display_id: DisplayId,
+) {
+    pending.retain(|_, (_, ids)| {
+        ids.retain(|d| *d != display_id);
+        !ids.is_empty()
+    });
+}
+
+async fn collect_playlist_targets(app: &Arc<AppState>, pid: i64) -> Vec<DisplayId> {
+    let status = app.playlists.status().await;
+    let owned_other: HashSet<DisplayId> = status
+        .iter()
+        .filter(|s| s.active_id != pid)
+        .map(|s| s.display_id)
+        .collect();
+    let owned_same: HashSet<DisplayId> = status
+        .iter()
+        .filter(|s| s.active_id == pid)
+        .map(|s| s.display_id)
+        .collect();
+
+    let mut out = Vec::new();
+    for d in app.router.snapshot_displays().await {
+        if owned_other.contains(&d.id) {
+            continue;
+        }
+        if owned_same.contains(&d.id) {
+            out.push(d.id);
+            continue;
+        }
+        let key = d.instance_id.clone().unwrap_or_else(|| d.name.clone());
+        if resolve_pid(app, &key) == Some(pid) {
+            out.push(d.id);
+        }
+    }
+    out
+}
+
+async fn flush_pending(
+    app: &Arc<AppState>,
+    pending: &mut HashMap<i64, (tokio::time::Instant, Vec<DisplayId>)>,
+    due: impl IntoIterator<Item = i64>,
+) {
+    let mut groups = HashMap::new();
+    for pid in due {
+        pending.remove(&pid);
+        let targets = collect_playlist_targets(app, pid).await;
+        if !targets.is_empty() {
+            groups.insert(pid, targets);
+        }
+    }
+    activate_groups(app, groups).await;
 }
 
 pub async fn restore_all(app: &Arc<AppState>) {
@@ -66,8 +142,17 @@ pub async fn watch_hotplug(app: Arc<AppState>) {
         .into_iter()
         .map(|d| d.id)
         .collect();
+    let mut pending: HashMap<i64, (tokio::time::Instant, Vec<DisplayId>)> = HashMap::new();
 
     loop {
+        let next_deadline = pending
+            .values()
+            .map(|(d, _)| *d)
+            .min()
+            .unwrap_or_else(|| tokio::time::Instant::now() + IDLE_PARK);
+        let sleep = tokio::time::sleep_until(next_deadline);
+        tokio::pin!(sleep);
+
         tokio::select! {
             ev = rx.recv() => {
                 match ev {
@@ -82,50 +167,53 @@ pub async fn watch_hotplug(app: Arc<AppState>) {
                         } else {
                             app.settings.display_prefs(&key).and_then(|p| p.active_playlist_id)
                         };
-                        if let Some(pid) = pid {
-                            match Engine::attach_shared(&app, s.id, pid).await {
-                                Ok(true) => {}
-                                Ok(false) => {
-                                    if let Err(e) =
-                                        Engine::activate_resuming_with_first_frame_timeout(
-                                            &app,
-                                            &[s.id],
-                                            pid,
-                                            crate::control::APPLY_FIRST_FRAME_TIMEOUT,
-                                        )
-                                        .await
-                                    {
-                                        log::warn!("hotplug activate playlist {pid} failed: {e:#}");
-                                    }
-                                }
-                                Err(e) => {
-                                    log::warn!("hotplug attach playlist {pid} failed: {e:#}");
-                                }
+                        let Some(pid) = pid else { continue };
+                        match Engine::attach_shared(&app, s.id, pid).await {
+                            Ok(true) => {}
+                            Ok(false) => queue_pending(&mut pending, pid, s.id, SETTLE),
+                            Err(e) => {
+                                log::warn!("hotplug attach playlist {pid} failed: {e:#}");
                             }
                         }
                     }
                     Ok(RouterEvent::DisplayRemoved(id)) => {
                         app.playlists.drop_display(id).await;
                         known.remove(&id);
+                        remove_pending_display(&mut pending, id);
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         log::warn!("playlist hotplug watcher lagged {n} events; re-snapshotting");
-                        let displays = app.router.snapshot_displays().await;
-                        let mut groups: HashMap<i64, Vec<DisplayId>> = HashMap::new();
-                        for d in displays {
+                        pending.clear();
+                        known.clear();
+                        let mut pids = HashSet::new();
+                        for d in app.router.snapshot_displays().await {
                             known.insert(d.id);
-                            if app.playlists.is_owned(d.id).await {
-                                continue;
-                            }
                             let key = d.instance_id.clone().unwrap_or_else(|| d.name.clone());
                             if let Some(pid) = resolve_pid(&app, &key) {
-                                groups.entry(pid).or_default().push(d.id);
+                                pids.insert(pid);
+                            }
+                        }
+                        let mut groups = HashMap::new();
+                        for pid in pids {
+                            let targets = collect_playlist_targets(&app, pid).await;
+                            if !targets.is_empty() {
+                                groups.insert(pid, targets);
                             }
                         }
                         activate_groups(&app, groups).await;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            _ = &mut sleep => {
+                let now = tokio::time::Instant::now();
+                let due: Vec<i64> = pending
+                    .iter()
+                    .filter_map(|(pid, (d, _))| (*d <= now).then_some(*pid))
+                    .collect();
+                if !due.is_empty() {
+                    flush_pending(&app, &mut pending, due).await;
                 }
             }
             changed = shutdown.changed() => {

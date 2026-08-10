@@ -61,7 +61,12 @@ public:
     auto id() const -> quint64 { return m_id; }
     auto name() const -> const QString& { return m_name; }
     auto alias() const -> const QString& { return m_alias; }
-    auto displayLabel() const -> QString { return m_alias.isEmpty() ? m_name : m_alias; }
+    auto displayLabel() const -> QString {
+        const QString base = m_alias.isEmpty() ? m_name : m_alias;
+        if (base.isEmpty())
+            return QString("Display #%1").arg(m_id);
+        return QString("%1 (#%2)").arg(base).arg(m_id);
+    }
     auto width() const -> quint32 { return m_width; }
     auto height() const -> quint32 { return m_height; }
     auto refreshMhz() const -> quint32 { return m_refresh_mhz; }

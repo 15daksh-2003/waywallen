@@ -705,11 +705,12 @@ MD.Page {
     function displayLabel(display) {
         if (!display)
             return qsTr("Display");
-        const alias = display.displayLabel || "";
-        if (alias.length > 0)
-            return alias;
-        const name = (display.name || "").replace(/^waywallen-[a-z]+-[a-z]+-/, "");
-        return name.length > 0 ? name : qsTr("Display %1").arg(display.id);
+        let base = display.alias || "";
+        if (!base.length)
+            base = (display.name || "").replace(/^waywallen-[a-z]+-[a-z]+-/, "");
+        if (!base.length)
+            return qsTr("Display #%1").arg(display.id);
+        return base + " (#" + display.id + ")";
     }
 
     function selectedPlaylistDisplay() {
