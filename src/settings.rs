@@ -1171,6 +1171,34 @@ duplicate_renderers_for_same_wallpaper = true
     }
 
     #[test]
+    fn auto_attach_playlist_id_roundtrip() {
+        let src = r#"
+[global]
+auto_attach_playlist_id = 42
+"#;
+        let s: Settings = toml::from_str(src).unwrap();
+        assert_eq!(s.global.auto_attach_playlist_id, Some(42));
+        assert!(toml::to_string(&s)
+            .unwrap()
+            .contains("auto_attach_playlist_id = 42"));
+    }
+
+    #[tokio::test]
+    async fn auto_attach_clears_to_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let store = SettingsStore::load_or_default(path).await;
+        store.update(|s| {
+            s.global.auto_attach_playlist_id = Some(7);
+        });
+        assert_eq!(store.global().auto_attach_playlist_id, Some(7));
+        store.update(|s| {
+            s.global.auto_attach_playlist_id = None;
+        });
+        assert_eq!(store.global().auto_attach_playlist_id, None);
+    }
+
+    #[test]
     fn manual_muted_roundtrip() {
         let src = r#"
 [global]

@@ -965,7 +965,14 @@ Item {
                         MD.FilterChip {
                             required property var modelData
                             width: Math.min(implicitWidth, 220)
-                            text: (modelData?.displayLabel ?? "") || (modelData?.name ?? "").replace(/^waywallen-[a-z]+-[a-z]+-/, "") || qsTr("Display %1").arg(modelData?.id)
+                            text: {
+                                const alias = modelData?.alias || "";
+                                const name = (modelData?.name || "").replace(/^waywallen-[a-z]+-[a-z]+-/, "");
+                                const base = alias.length > 0 ? alias : name;
+                                if (!base.length)
+                                    return qsTr("Display #%1").arg(modelData?.id);
+                                return base + " (#" + modelData?.id + ")";
+                            }
                             checked: root.applyTargetIds.indexOf(modelData?.id) >= 0
                             onClicked: root.toggleTarget(modelData?.id)
                         }

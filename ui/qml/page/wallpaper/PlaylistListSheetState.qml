@@ -1,4 +1,5 @@
 pragma ComponentBehavior: Bound
+import QtCore
 import QtQml
 
 QtObject {
@@ -8,6 +9,13 @@ QtObject {
     required property var playlistListQuery
     required property var playlistMutation
     required property var playlistPlaybackMutation
+
+    property bool shareAllDisplays: false
+
+    readonly property Settings settings: Settings {
+        category: "PlaylistListSheet"
+        property alias shareAllDisplays: root.shareAllDisplays
+    }
 
     readonly property bool listLoading: page.playlistListLoading
     readonly property var playlists: playlistListQuery.playlists || []
@@ -25,6 +33,7 @@ QtObject {
         return displays[0];
     }
     readonly property var selectedDisplayId: selectedDisplay ? selectedDisplay.id : null
+    readonly property bool hasPlayTarget: shareAllDisplays ? playDisplays.length > 0 : selectedDisplay !== null
 
     function displayLabel(display) {
         return page.displayLabel(display);
@@ -34,12 +43,16 @@ QtObject {
         page.playlistPlayDisplayId = display.id;
     }
 
+    function setShareAllDisplays(shared) {
+        root.shareAllDisplays = !!shared;
+    }
+
     function isEditingPlaylist(playlist) {
         return page.isEditingPlaylist(playlist);
     }
 
     function playlistIsPlayingOnSelectedDisplay(playlist) {
-        return page.playlistIsPlayingOnSelectedDisplay(playlist);
+        return root.shareAllDisplays ? page.playlistIsSharedActive(playlist) : page.playlistIsPlayingOnSelectedDisplay(playlist);
     }
 
     function playlistDisplayLabels(playlist) {
@@ -47,7 +60,7 @@ QtObject {
     }
 
     function togglePlayback(playlist) {
-        page.togglePlaylistPlayback(playlist);
+        page.togglePlaylistPlayback(playlist, root.shareAllDisplays);
     }
 
     function editSelection(playlist) {
