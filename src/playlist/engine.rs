@@ -111,6 +111,13 @@ impl Engine {
             display_ids.to_vec()
         };
 
+        // Shared across all targets so displays activated together shuffle in sync.
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(1)
+            .max(1);
+
         for did in targets {
             Self::activate_one(
                 app,
@@ -121,6 +128,7 @@ impl Engine {
                 items.clone(),
                 resume,
                 first_frame_timeout,
+                seed,
             )
             .await?;
             persist_assignment(app, did, Some(playlist_id)).await;
@@ -139,15 +147,11 @@ impl Engine {
         items: Vec<String>,
         resume: bool,
         first_frame_timeout: Option<std::time::Duration>,
+        seed: u64,
     ) -> Result<()> {
         {
             app.playlists.inner.lock().await.remove(&display_id);
         }
-        let entropy = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(1);
-        let seed = (entropy ^ display_id.wrapping_mul(0x9E3779B97F4A7C15)).max(1);
         let resume_id = if resume && mode != Mode::Random {
             match display_settings_key(app, display_id).await {
                 Some(key) => app

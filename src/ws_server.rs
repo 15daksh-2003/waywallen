@@ -2503,6 +2503,21 @@ async fn dispatch_inner(
         }
 
         Req::WallpaperApply(r) => {
+            let target = (!r.display_ids.is_empty()).then_some(r.display_ids.as_slice());
+            let target_ids = state.router.registered_display_ids(target).await;
+            let mut playlist_running = false;
+            for did in &target_ids {
+                if state.playlists.is_owned(*did).await {
+                    playlist_running = true;
+                    break;
+                }
+            }
+            if playlist_running {
+                return Err(Error::FailedPrecondition(
+                    "pause the playlist on this display before applying a new wallpaper".into(),
+                ));
+            }
+
             let _ = crate::playlist::engine::Engine::deactivate(&state, &r.display_ids).await;
             let res = control::apply_wallpaper_with_options(
                 state,
