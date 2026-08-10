@@ -150,15 +150,10 @@ impl Sessions {
         display_id: DisplayId,
         playlist_id: i64,
     ) -> Result<bool> {
-        if self.is_owned(display_id).await {
-            return Ok(true);
-        }
-        let session = {
-            let by_playlist = self.by_playlist.lock().await;
-            by_playlist.get(&playlist_id).cloned()
-        };
-        let Some(session) = session else {
-            return Ok(false);
+        let session = match self.attach_start(display_id, playlist_id).await {
+            AttachStart::AlreadyOwned => return Ok(true),
+            AttachStart::NoSession => return Ok(false),
+            AttachStart::Session(session) => session,
         };
 
         let current = session.cursor.lock().await.current.clone();
@@ -315,9 +310,7 @@ impl Sessions {
             return Ok(None);
         };
         if items.is_empty() {
-            let members = session.members.lock().await.clone();
-            self.release(&members).await;
-            return Ok(Some(members));
+            return Ok(Some(self.deactivate_playlist(playlist_id).await));
         }
 
         let (apply_id, need_apply) = {
@@ -357,5 +350,177 @@ impl Sessions {
     async fn session_for_display(&self, display_id: DisplayId) -> Option<Arc<SharedSession>> {
         let pid = self.by_display.lock().await.get(&display_id).copied()?;
         self.by_playlist.lock().await.get(&pid).cloned()
+    }
+
+    async fn attach_start(&self, display_id: DisplayId, playlist_id: i64) -> AttachStart {
+        if self.is_owned(display_id).await {
+            return AttachStart::AlreadyOwned;
+        }
+        let session = {
+            let by_playlist = self.by_playlist.lock().await;
+            by_playlist.get(&playlist_id).cloned()
+        };
+        match session {
+            Some(session) => AttachStart::Session(session),
+            None => AttachStart::NoSession,
+        }
+    }
+}
+
+enum AttachStart {
+    AlreadyOwned,
+    NoSession,
+    Session(Arc<SharedSession>),
+}
+
+#[cfg(test)]
+impl Sessions {
+    pub(crate) async fn seed_for_test(
+        &self,
+        playlist_id: i64,
+        members: &[DisplayId],
+        items: Vec<String>,
+        current: Option<String>,
+        interval: u32,
+    ) {
+        let mut cursor = PlaylistCursor::new(items, Mode::Sequential, 1);
+        if let Some(id) = current.as_ref() {
+            cursor.set_current(id);
+        } else {
+            cursor.first();
+        }
+        let (handle, rx) = make_handle();
+        handle.set_interval(interval);
+        let task = tokio::spawn(async move {
+            let _rx = rx;
+            std::future::pending::<()>().await
+        });
+        let session = Arc::new(SharedSession {
+            playlist_id,
+            cursor: Arc::new(Mutex::new(cursor)),
+            handle,
+            deadline: Arc::new(std::sync::Mutex::new(None)),
+            members: Arc::new(Mutex::new(members.to_vec())),
+            task,
+        });
+        self.by_playlist
+            .lock()
+            .await
+            .insert(playlist_id, Arc::clone(&session));
+        let mut by_display = self.by_display.lock().await;
+        for &did in members {
+            by_display.insert(did, playlist_id);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn is_owned_and_release_last_member_drops_session() {
+        let sessions = Sessions::default();
+        sessions
+            .seed_for_test(1, &[10, 20], vec!["a".into()], Some("a".into()), 30)
+            .await;
+        assert!(sessions.is_owned(10).await);
+        assert!(sessions.is_owned(20).await);
+        sessions.release(&[10]).await;
+        assert!(!sessions.is_owned(10).await);
+        assert!(sessions.is_owned(20).await);
+        assert!(sessions.by_playlist.lock().await.contains_key(&1));
+        sessions.release(&[20]).await;
+        assert!(!sessions.is_owned(20).await);
+        assert!(sessions.by_playlist.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn attach_returns_false_without_session() {
+        let sessions = Sessions::default();
+        assert!(matches!(
+            sessions.attach_start(5, 99).await,
+            AttachStart::NoSession
+        ));
+    }
+
+    #[tokio::test]
+    async fn attach_noops_when_already_owned() {
+        let sessions = Sessions::default();
+        sessions
+            .seed_for_test(1, &[5], vec!["a".into()], Some("a".into()), 30)
+            .await;
+        assert!(matches!(
+            sessions.attach_start(5, 1).await,
+            AttachStart::AlreadyOwned
+        ));
+    }
+
+    #[tokio::test]
+    async fn deactivate_playlist_returns_members() {
+        let sessions = Sessions::default();
+        sessions
+            .seed_for_test(3, &[1, 2], vec!["a".into()], Some("a".into()), 10)
+            .await;
+        let members = sessions.deactivate_playlist(3).await;
+        assert_eq!(members, vec![1, 2]);
+        assert!(!sessions.is_owned(1).await);
+        assert!(!sessions.is_owned(2).await);
+        assert!(sessions.deactivate_playlist(3).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn status_fans_out_same_cursor_to_all_members() {
+        let sessions = Sessions::default();
+        sessions
+            .seed_for_test(
+                8,
+                &[100, 200],
+                vec!["a".into(), "b".into()],
+                Some("b".into()),
+                45,
+            )
+            .await;
+        let status = sessions.status().await;
+        assert_eq!(status.len(), 2);
+        for s in &status {
+            assert_eq!(s.active_id, 8);
+            assert_eq!(s.current_id.as_deref(), Some("b"));
+            assert_eq!(s.position, 1);
+            assert_eq!(s.count, 2);
+            assert_eq!(s.interval_secs, 45);
+        }
+        let ids: Vec<_> = status.iter().map(|s| s.display_id).collect();
+        assert!(ids.contains(&100));
+        assert!(ids.contains(&200));
+    }
+
+    #[tokio::test]
+    async fn rebuild_empty_items_releases_session() {
+        let sessions = Sessions::default();
+        sessions
+            .seed_for_test(4, &[7, 8], vec!["a".into()], Some("a".into()), 30)
+            .await;
+        let exists = sessions.by_playlist.lock().await.contains_key(&4);
+        assert!(exists);
+        let members = sessions.deactivate_playlist(4).await;
+        assert_eq!(members, vec![7, 8]);
+        assert!(sessions.by_playlist.lock().await.is_empty());
+        assert!(matches!(
+            sessions.attach_start(7, 4).await,
+            AttachStart::NoSession
+        ));
+    }
+
+    #[tokio::test]
+    async fn set_interval_updates_existing_session() {
+        let sessions = Sessions::default();
+        assert!(!sessions.set_interval(1, 60).await);
+        sessions
+            .seed_for_test(1, &[9], vec!["a".into()], Some("a".into()), 30)
+            .await;
+        assert!(sessions.set_interval(1, 60).await);
+        let session = sessions.by_playlist.lock().await.get(&1).cloned().unwrap();
+        assert_eq!(session.handle.interval(), 60);
     }
 }

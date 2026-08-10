@@ -44,6 +44,14 @@ pub struct ApplyOptions {
     pub force_shared_renderer: bool,
 }
 
+fn should_duplicate_renderers(
+    setting_enabled: bool,
+    has_targets: bool,
+    force_shared: bool,
+) -> bool {
+    setting_enabled && has_targets && !force_shared
+}
+
 pub struct PluginInstallResult {
     pub plugin_id: String,
     pub needs_restart: bool,
@@ -1087,9 +1095,11 @@ pub async fn apply_wallpaper_with_options(
     if options.require_display && target_ids.is_empty() {
         return Err(Error::NoDisplayRegistered);
     }
-    let duplicate_renderers = app.settings.global().duplicate_renderers_for_same_wallpaper
-        && !target_ids.is_empty()
-        && !options.force_shared_renderer;
+    let duplicate_renderers = should_duplicate_renderers(
+        app.settings.global().duplicate_renderers_for_same_wallpaper,
+        !target_ids.is_empty(),
+        options.force_shared_renderer,
+    );
     let renderer_id = if duplicate_renderers {
         apply_duplicate_renderers(
             app,
@@ -1798,4 +1808,22 @@ async fn refresh_sources_inner(app: &Arc<AppState>) -> Result<usize> {
         return Err(e);
     }
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn force_shared_disables_duplicate_path() {
+        assert!(!should_duplicate_renderers(true, true, true));
+    }
+
+    #[test]
+    fn duplicate_only_when_setting_and_targets() {
+        assert!(should_duplicate_renderers(true, true, false));
+        assert!(!should_duplicate_renderers(false, true, false));
+        assert!(!should_duplicate_renderers(true, false, false));
+        assert!(!should_duplicate_renderers(true, false, true));
+    }
 }

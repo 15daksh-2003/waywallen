@@ -585,3 +585,74 @@ pub(crate) async fn display_settings_key(
         .find(|d| d.id == display_id)
         .map(|d| d.instance_id.unwrap_or(d.name))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::queue::Mode;
+
+    #[tokio::test]
+    async fn is_owned_true_for_shared_or_inner() {
+        let engine = Engine::new();
+        assert!(!engine.is_owned(1).await);
+
+        engine
+            .shared
+            .seed_for_test(9, &[1], vec!["a".into()], Some("a".into()), 30)
+            .await;
+        assert!(engine.is_owned(1).await);
+        assert!(!engine.is_owned(2).await);
+
+        let cursor = Arc::new(Mutex::new(PlaylistCursor::new(
+            vec!["a".into()],
+            Mode::Sequential,
+            1,
+        )));
+        let (handle, _rx) = make_handle();
+        let task = tokio::spawn(async {});
+        engine.inner.lock().await.insert(
+            2,
+            DisplayRotation {
+                playlist_id: 9,
+                cursor,
+                handle,
+                deadline: Arc::new(std::sync::Mutex::new(None)),
+                task,
+            },
+        );
+        assert!(engine.is_owned(2).await);
+    }
+
+    #[tokio::test]
+    async fn claim_inner_before_shared_release_keeps_owned() {
+        let engine = Engine::new();
+        engine
+            .shared
+            .seed_for_test(3, &[10], vec!["a".into()], Some("a".into()), 30)
+            .await;
+        assert!(engine.is_owned(10).await);
+
+        let cursor = Arc::new(Mutex::new(PlaylistCursor::new(
+            vec!["b".into()],
+            Mode::Sequential,
+            1,
+        )));
+        let (handle, _rx) = make_handle();
+        let task = tokio::spawn(async {});
+        engine.inner.lock().await.insert(
+            10,
+            DisplayRotation {
+                playlist_id: 4,
+                cursor,
+                handle,
+                deadline: Arc::new(std::sync::Mutex::new(None)),
+                task,
+            },
+        );
+        engine.shared.release(&[10]).await;
+
+        assert!(engine.is_owned(10).await);
+        assert!(engine.inner.lock().await.contains_key(&10));
+        assert!(!engine.shared.is_owned(10).await);
+    }
+}

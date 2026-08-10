@@ -10,11 +10,27 @@ use crate::AppState;
 const SETTLE: Duration = Duration::from_secs(2);
 const IDLE_PARK: Duration = Duration::from_secs(3600);
 
+fn resolve_playlist_id(active: Option<i64>, auto_attach: Option<i64>) -> Option<i64> {
+    active.or(auto_attach)
+}
+
 fn resolve_pid(app: &Arc<AppState>, key: &str) -> Option<i64> {
-    app.settings
-        .display_prefs(key)
-        .and_then(|p| p.active_playlist_id)
-        .or_else(|| app.settings.global().auto_attach_playlist_id)
+    resolve_playlist_id(
+        app.settings
+            .display_prefs(key)
+            .and_then(|p| p.active_playlist_id),
+        app.settings.global().auto_attach_playlist_id,
+    )
+}
+
+fn group_displays_by_playlist(
+    entries: impl IntoIterator<Item = (DisplayId, i64)>,
+) -> HashMap<i64, Vec<DisplayId>> {
+    let mut groups: HashMap<i64, Vec<DisplayId>> = HashMap::new();
+    for (display_id, pid) in entries {
+        groups.entry(pid).or_default().push(display_id);
+    }
+    groups
 }
 
 async fn activate_groups(app: &Arc<AppState>, groups: HashMap<i64, Vec<DisplayId>>) {
@@ -107,14 +123,11 @@ async fn flush_pending(
 
 pub async fn restore_all(app: &Arc<AppState>) {
     let displays = app.router.snapshot_displays().await;
-    let mut groups: HashMap<i64, Vec<DisplayId>> = HashMap::new();
-    for d in displays {
+    let entries = displays.into_iter().filter_map(|d| {
         let key = d.instance_id.clone().unwrap_or_else(|| d.name.clone());
-        if let Some(pid) = resolve_pid(app, &key) {
-            groups.entry(pid).or_default().push(d.id);
-        }
-    }
-    activate_groups(app, groups).await;
+        resolve_pid(app, &key).map(|pid| (d.id, pid))
+    });
+    activate_groups(app, group_displays_by_playlist(entries)).await;
 }
 
 pub async fn watch_hotplug(app: Arc<AppState>) {
@@ -220,5 +233,61 @@ pub async fn watch_hotplug(app: Arc<AppState>) {
                 if changed.is_err() || *shutdown.borrow() { break; }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn queue_pending_coalesces_same_playlist() {
+        let mut pending = HashMap::new();
+        let settle = Duration::from_secs(2);
+        queue_pending(&mut pending, 7, 1, settle);
+        queue_pending(&mut pending, 7, 2, settle);
+        queue_pending(&mut pending, 7, 1, settle);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending.get(&7).unwrap().1, vec![1, 2]);
+    }
+
+    #[test]
+    fn queue_pending_keeps_separate_playlists() {
+        let mut pending = HashMap::new();
+        let settle = Duration::from_millis(10);
+        queue_pending(&mut pending, 1, 10, settle);
+        queue_pending(&mut pending, 2, 20, settle);
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending.get(&1).unwrap().1, vec![10]);
+        assert_eq!(pending.get(&2).unwrap().1, vec![20]);
+    }
+
+    #[test]
+    fn remove_pending_display_drops_empty_entries() {
+        let mut pending = HashMap::new();
+        let settle = Duration::from_secs(1);
+        queue_pending(&mut pending, 1, 10, settle);
+        queue_pending(&mut pending, 1, 11, settle);
+        queue_pending(&mut pending, 2, 20, settle);
+        remove_pending_display(&mut pending, 10);
+        assert_eq!(pending.get(&1).unwrap().1, vec![11]);
+        remove_pending_display(&mut pending, 11);
+        assert!(!pending.contains_key(&1));
+        assert_eq!(pending.get(&2).unwrap().1, vec![20]);
+    }
+
+    #[test]
+    fn resolve_playlist_id_prefers_active_then_auto_attach() {
+        assert_eq!(resolve_playlist_id(Some(3), Some(9)), Some(3));
+        assert_eq!(resolve_playlist_id(None, Some(9)), Some(9));
+        assert_eq!(resolve_playlist_id(None, None), None);
+    }
+
+    #[test]
+    fn group_displays_by_playlist_merges_same_pid() {
+        let groups = group_displays_by_playlist([(1, 42), (2, 42), (3, 7)]);
+        assert_eq!(groups.get(&42).unwrap(), &vec![1, 2]);
+        assert_eq!(groups.get(&7).unwrap(), &vec![3]);
     }
 }
