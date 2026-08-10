@@ -2527,6 +2527,7 @@ async fn dispatch_inner(
                     renderer_name: (!r.renderer_name.is_empty()).then_some(r.renderer_name),
                     first_frame_timeout: Some(control::APPLY_FIRST_FRAME_TIMEOUT),
                     require_display: true,
+                    force_shared_renderer: false,
                 },
             )
             .await?;

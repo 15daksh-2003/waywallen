@@ -41,6 +41,7 @@ pub struct ApplyOptions {
     pub renderer_name: Option<String>,
     pub first_frame_timeout: Option<Duration>,
     pub require_display: bool,
+    pub force_shared_renderer: bool,
 }
 
 pub struct PluginInstallResult {
@@ -824,6 +825,30 @@ pub async fn apply_wallpaper_to_displays_with_first_frame_timeout(
     .await
 }
 
+pub async fn apply_wallpaper_shared_to_displays(
+    app: &Arc<AppState>,
+    id: &str,
+    target: &[DisplayId],
+    first_frame_timeout: Option<Duration>,
+) -> Result<ApplyResult> {
+    if target.is_empty() {
+        return Err(Error::Internal(anyhow!(
+            "apply_wallpaper_shared_to_displays: empty target"
+        )));
+    }
+    apply_wallpaper_with_options(
+        app,
+        id,
+        ApplyOptions {
+            display_ids: Some(target.to_vec()),
+            first_frame_timeout,
+            force_shared_renderer: true,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
 pub struct PortalApplyResult {
     pub wallpaper_id: String,
     pub uri: String,
@@ -1062,8 +1087,9 @@ pub async fn apply_wallpaper_with_options(
     if options.require_display && target_ids.is_empty() {
         return Err(Error::NoDisplayRegistered);
     }
-    let duplicate_renderers =
-        app.settings.global().duplicate_renderers_for_same_wallpaper && !target_ids.is_empty();
+    let duplicate_renderers = app.settings.global().duplicate_renderers_for_same_wallpaper
+        && !target_ids.is_empty()
+        && !options.force_shared_renderer;
     let renderer_id = if duplicate_renderers {
         apply_duplicate_renderers(
             app,

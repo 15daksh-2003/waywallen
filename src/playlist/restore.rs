@@ -83,15 +83,24 @@ pub async fn watch_hotplug(app: Arc<AppState>) {
                             app.settings.display_prefs(&key).and_then(|p| p.active_playlist_id)
                         };
                         if let Some(pid) = pid {
-                            if let Err(e) = Engine::activate_resuming_with_first_frame_timeout(
-                                &app,
-                                &[s.id],
-                                pid,
-                                crate::control::APPLY_FIRST_FRAME_TIMEOUT,
-                            )
-                            .await
-                            {
-                                log::warn!("hotplug activate playlist {pid} failed: {e:#}");
+                            match Engine::attach_shared(&app, s.id, pid).await {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    if let Err(e) =
+                                        Engine::activate_resuming_with_first_frame_timeout(
+                                            &app,
+                                            &[s.id],
+                                            pid,
+                                            crate::control::APPLY_FIRST_FRAME_TIMEOUT,
+                                        )
+                                        .await
+                                    {
+                                        log::warn!("hotplug activate playlist {pid} failed: {e:#}");
+                                    }
+                                }
+                                Err(e) => {
+                                    log::warn!("hotplug attach playlist {pid} failed: {e:#}");
+                                }
                             }
                         }
                     }
