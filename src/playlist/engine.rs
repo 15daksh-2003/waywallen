@@ -151,7 +151,6 @@ impl Engine {
             .unwrap_or(1)
             .max(1);
 
-        app.playlists.shared.release(&targets).await;
         for did in targets {
             Self::activate_one(
                 app,
@@ -204,9 +203,6 @@ impl Engine {
         first_frame_timeout: Option<std::time::Duration>,
         seed: u64,
     ) -> Result<()> {
-        {
-            app.playlists.inner.lock().await.remove(&display_id);
-        }
         let resume_id = if resume && mode != Mode::Random {
             match display_settings_key(app, display_id).await {
                 Some(key) => app
@@ -219,11 +215,11 @@ impl Engine {
         } else {
             None
         };
+
         let cursor = Arc::new(Mutex::new(PlaylistCursor::new(items, mode, seed)));
         let (handle, rx) = make_handle();
         handle.set_interval(interval);
         let deadline = Arc::new(std::sync::Mutex::new(None));
-
         let first = {
             let mut c = cursor.lock().await;
             match resume_id {
@@ -234,23 +230,6 @@ impl Engine {
                 None => c.first(),
             }
         };
-        if let Some(id) = first {
-            match first_frame_timeout {
-                Some(timeout) => {
-                    crate::control::apply_wallpaper_to_displays_with_first_frame_timeout(
-                        app,
-                        &id,
-                        &[display_id],
-                        timeout,
-                    )
-                    .await?;
-                }
-                None => {
-                    let _ =
-                        crate::control::apply_wallpaper_to_displays(app, &id, &[display_id]).await;
-                }
-            }
-        }
 
         let members = Arc::new(Mutex::new(vec![display_id]));
         let task = tokio::spawn(run_playlist_rotator(
@@ -262,17 +241,44 @@ impl Engine {
             rx,
             app.shutdown_subscribe(),
         ));
+        {
+            let mut map = app.playlists.inner.lock().await;
+            map.remove(&display_id);
+            map.insert(
+                display_id,
+                DisplayRotation {
+                    playlist_id,
+                    cursor,
+                    handle,
+                    deadline,
+                    task,
+                },
+            );
+        }
+        app.playlists.shared.release(&[display_id]).await;
 
-        app.playlists.inner.lock().await.insert(
-            display_id,
-            DisplayRotation {
-                playlist_id,
-                cursor,
-                handle,
-                deadline,
-                task,
-            },
-        );
+        if let Some(id) = first {
+            match first_frame_timeout {
+                Some(timeout) => {
+                    if let Err(e) =
+                        crate::control::apply_wallpaper_to_displays_with_first_frame_timeout(
+                            app,
+                            &id,
+                            &[display_id],
+                            timeout,
+                        )
+                        .await
+                    {
+                        app.playlists.inner.lock().await.remove(&display_id);
+                        return Err(e);
+                    }
+                }
+                None => {
+                    let _ =
+                        crate::control::apply_wallpaper_to_displays(app, &id, &[display_id]).await;
+                }
+            }
+        }
         Ok(())
     }
 
