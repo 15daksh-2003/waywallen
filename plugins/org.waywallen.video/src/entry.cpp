@@ -1615,6 +1615,7 @@ int run(int argc, char** argv) {
             if ((stall_warn_counter++ % 30) == 0) {
                 rstd_warn("waywallen-video-renderer: all slots are busy, dropping frame");
             }
+            wavsen::video::Presenter::wait_until(presentation);
             continue;
         }
         stall_warn_counter = 0;
@@ -1656,6 +1657,7 @@ int run(int argc, char** argv) {
             auto value = rstd::move(reserved).unwrap();
             if (value.is_none()) {
                 ww_bridge_pool_abort_acquired_slot(host.pool, &acquired.identity);
+                wavsen::video::Presenter::wait_until(presentation);
                 continue;
             }
             conversion_reservation = rstd::move(value);
@@ -1724,6 +1726,7 @@ int run(int argc, char** argv) {
             auto submission = rstd::move(converted).unwrap();
             if (submission.is_none()) {
                 ww_bridge_pool_abort_acquired_slot(host.pool, &acquired.identity);
+                wavsen::video::Presenter::wait_until(presentation);
                 continue;
             }
             cv_res = rstd::Ok(submission->sync_fd);
