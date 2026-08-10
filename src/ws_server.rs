@@ -2519,6 +2519,10 @@ async fn dispatch_inner(
             }
 
             let _ = crate::playlist::engine::Engine::deactivate(&state, &r.display_ids).await;
+            state.settings.update(|s| {
+                s.global.auto_attach_playlist_id = None;
+            });
+            state.settings.flush_now().await;
             let res = control::apply_wallpaper_with_options(
                 state,
                 &r.wallpaper_id,

@@ -776,7 +776,7 @@ MD.Page {
             if (displayIds.length === 0)
                 return;
             if (root.playlistIsSharedActive(playlist))
-                playlistPlaybackMutation.deactivate(displayIds, 0);
+                playlistPlaybackMutation.deactivate(displayIds, playlist.id);
             else
                 playlistPlaybackMutation.activate(playlist.id, displayIds, true);
             return;
