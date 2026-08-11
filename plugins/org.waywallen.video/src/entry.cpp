@@ -867,34 +867,19 @@ int run_selftest(const Options& opt) {
     int sync_fd = -1;
     if (kind == wavsen::video::FrameKind::VulkanShared) {
         for (uint32_t frame_index = 0; frame_index < target_count * 3; ++frame_index) {
-            const auto                 target_index = frame_index % target_count;
-            wavsen::video::VkFrameView vkv {};
-            auto                       fs_res = decoder->next_vk_frame(vkv);
+            const auto target_index = frame_index % target_count;
+            auto       fs_res       = decoder->next_vk_frame();
             if (fs_res.is_err()) {
                 rstd_error("selftest next_vk_frame: {}",
                            rstd::move(fs_res).unwrap_err().message.as_str());
                 return 1;
             }
-            if (std::move(fs_res).unwrap() != wavsen::video::NextFrame::Ok) return 1;
-            const auto cm = wavsen::video::make_color_matrix(
-                static_cast<wavsen::video::ColorSpace>(vkv.colorspace.to_primitive()),
-                static_cast<wavsen::video::ColorRange>(vkv.color_range.to_primitive()));
-            wavsen::video::YuvToRgba::VkFrameImports im {};
-            im.y_image          = vkv.img[0];
-            im.uv_image         = vkv.plane_count > rstd::u32(1) ? vkv.img[1] : VK_NULL_HANDLE;
-            im.y_sem            = vkv.sem[0];
-            im.uv_sem           = vkv.plane_count > rstd::u32(1) ? vkv.sem[1] : vkv.sem[0];
-            im.y_sem_val_in_out = &vkv.sem_value[0];
-            im.uv_sem_val_in_out =
-                vkv.plane_count > rstd::u32(1) ? &vkv.sem_value[1] : &vkv.sem_value[0];
-            im.y_layout_in_out  = &vkv.layout[0];
-            im.uv_layout_in_out = vkv.plane_count > rstd::u32(1) ? &vkv.layout[1] : &vkv.layout[0];
-            im.y_qf_in_out      = &vkv.queue_family[0];
-            im.uv_qf_in_out =
-                vkv.plane_count > rstd::u32(1) ? &vkv.queue_family[1] : &vkv.queue_family[0];
-            im.src_w     = vkv.width;
-            im.src_h     = vkv.height;
-            im.bit_depth = vkv.bit_depth;
+            auto pull = rstd::move(fs_res).unwrap();
+            if (pull.status != wavsen::video::NextFrame::Ok || pull.frame.is_none()) return 1;
+            const auto& info = pull.frame->info();
+            const auto  cm   = wavsen::video::make_color_matrix(
+                static_cast<wavsen::video::ColorSpace>(info.colorspace.to_primitive()),
+                static_cast<wavsen::video::ColorRange>(info.color_range.to_primitive()));
             auto reserved = yuv->reserve({
                 .target = {
                     .image  = dst_images[target_index],
@@ -906,7 +891,8 @@ int run_selftest(const Options& opt) {
                                        rstd::time::Duration::from_secs(rstd::u64(1))),
             });
             if (reserved.is_err() || reserved->is_none()) return 1;
-            auto cv_res = yuv->submit_av_vk_frame(rstd::move(**reserved), im, cm);
+            auto cv_res =
+                yuv->submit_av_vk_frame(rstd::move(**reserved), rstd::move(*pull.frame), cm);
             if (cv_res.is_err()) {
                 rstd_error("selftest convert: {}", std::move(cv_res).unwrap_err().message.as_str());
                 sync_fd = -1;
@@ -1371,11 +1357,10 @@ int run(int argc, char** argv) {
             return p->current_time_seconds();
         });
     }
-    wavsen::video::Nv12Frame   frame;
-    wavsen::video::VkFrameView vkv {};
-    rstd::f64                  prev_pts { -1.0 }; // for loop-boundary detection (PTS regression)
-    uint32_t stall_warn_counter        = 0;       // throttle ETIME log spam during backpressure
-    bool     submitted_since_negotiate = false;
+    wavsen::video::Nv12Frame frame;
+    rstd::f64                prev_pts { -1.0 };      // for loop-boundary detection (PTS regression)
+    uint32_t                 stall_warn_counter = 0; // throttle ETIME log spam during backpressure
+    bool                     submitted_since_negotiate = false;
 
     while (! host.shutdown.load(std::memory_order_acquire)) {
         {
@@ -1533,13 +1518,22 @@ int run(int argc, char** argv) {
 
         rstd::f64                                                    frame_pts { -1.0 };
         const auto                                                   fkind = decoder->get()->kind();
+        rstd::Option<wavsen::video::VkFrameLease>                    vulkan_frame;
         rstd::Option<wavsen::video::VaapiFrameLease>                 vaapi_frame;
         rstd::Result<wavsen::video::NextFrame, wavsen::video::Error> fs_res =
             rstd::Ok(wavsen::video::NextFrame::Ok);
         switch (fkind) {
-        case wavsen::video::FrameKind::VulkanShared:
-            fs_res = decoder->get()->next_vk_frame(vkv);
+        case wavsen::video::FrameKind::VulkanShared: {
+            auto pulled = decoder->get()->next_vk_frame();
+            if (pulled.is_err()) {
+                fs_res = rstd::Err(rstd::move(pulled).unwrap_err());
+            } else {
+                auto value   = rstd::move(pulled).unwrap();
+                fs_res       = rstd::Ok(value.status);
+                vulkan_frame = rstd::move(value.frame);
+            }
             break;
+        }
         case wavsen::video::FrameKind::VaapiDrm: {
             auto pulled = decoder->get()->next_vaapi_frame();
             if (pulled.is_err()) {
@@ -1581,7 +1575,14 @@ int run(int argc, char** argv) {
         }
         const bool decoder_looped = fs == wavsen::video::NextFrame::Looped;
         switch (fkind) {
-        case wavsen::video::FrameKind::VulkanShared: frame_pts = vkv.pts_seconds; break;
+        case wavsen::video::FrameKind::VulkanShared:
+            if (vulkan_frame.is_none()) {
+                rstd_error("waywallen-video-renderer: Vulkan decode returned no frame lease");
+                signal_shutdown(host);
+                continue;
+            }
+            frame_pts = vulkan_frame->info().pts_seconds;
+            break;
         case wavsen::video::FrameKind::VaapiDrm:
             if (vaapi_frame.is_none()) {
                 rstd_error("waywallen-video-renderer: VAAPI decode returned no surface lease");
@@ -1615,6 +1616,7 @@ int run(int argc, char** argv) {
             if ((stall_warn_counter++ % 30) == 0) {
                 rstd_warn("waywallen-video-renderer: all slots are busy, dropping frame");
             }
+            wavsen::video::Presenter::wait_until(presentation);
             continue;
         }
         stall_warn_counter = 0;
@@ -1656,6 +1658,7 @@ int run(int argc, char** argv) {
             auto value = rstd::move(reserved).unwrap();
             if (value.is_none()) {
                 ww_bridge_pool_abort_acquired_slot(host.pool, &acquired.identity);
+                wavsen::video::Presenter::wait_until(presentation);
                 continue;
             }
             conversion_reservation = rstd::move(value);
@@ -1666,8 +1669,8 @@ int run(int argc, char** argv) {
         rstd::u32 cr_id;
         switch (fkind) {
         case wavsen::video::FrameKind::VulkanShared:
-            cs_id = vkv.colorspace;
-            cr_id = vkv.color_range;
+            cs_id = vulkan_frame->info().colorspace;
+            cr_id = vulkan_frame->info().color_range;
             break;
         case wavsen::video::FrameKind::VaapiDrm:
             cs_id = vaapi_frame->view().colorspace;
@@ -1684,24 +1687,8 @@ int run(int argc, char** argv) {
         rstd::Result<int, wavsen::video::Error> cv_res = rstd::Ok(-1);
         switch (fkind) {
         case wavsen::video::FrameKind::VulkanShared: {
-            wavsen::video::YuvToRgba::VkFrameImports im {};
-            im.y_image          = vkv.img[0];
-            im.uv_image         = vkv.plane_count > rstd::u32(1) ? vkv.img[1] : VK_NULL_HANDLE;
-            im.y_sem            = vkv.sem[0];
-            im.uv_sem           = vkv.plane_count > rstd::u32(1) ? vkv.sem[1] : vkv.sem[0];
-            im.y_sem_val_in_out = &vkv.sem_value[0];
-            im.uv_sem_val_in_out =
-                vkv.plane_count > rstd::u32(1) ? &vkv.sem_value[1] : &vkv.sem_value[0];
-            im.y_layout_in_out  = &vkv.layout[0];
-            im.uv_layout_in_out = vkv.plane_count > rstd::u32(1) ? &vkv.layout[1] : &vkv.layout[0];
-            im.y_qf_in_out      = &vkv.queue_family[0];
-            im.uv_qf_in_out =
-                vkv.plane_count > rstd::u32(1) ? &vkv.queue_family[1] : &vkv.queue_family[0];
-            im.src_w     = vkv.width;
-            im.src_h     = vkv.height;
-            im.bit_depth = vkv.bit_depth;
-            auto converted =
-                yuv->submit_av_vk_frame(rstd::move(*conversion_reservation), im, color_matrix);
+            auto converted = yuv->submit_av_vk_frame(
+                rstd::move(*conversion_reservation), rstd::move(*vulkan_frame), color_matrix);
             if (converted.is_err()) {
                 cv_res = rstd::Err(rstd::move(converted).unwrap_err());
             } else {
@@ -1724,6 +1711,7 @@ int run(int argc, char** argv) {
             auto submission = rstd::move(converted).unwrap();
             if (submission.is_none()) {
                 ww_bridge_pool_abort_acquired_slot(host.pool, &acquired.identity);
+                wavsen::video::Presenter::wait_until(presentation);
                 continue;
             }
             cv_res = rstd::Ok(submission->sync_fd);

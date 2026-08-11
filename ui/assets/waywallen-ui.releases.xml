@@ -1,3 +1,12 @@
+<release version="0.3.3" date="2026-08-10">
+  <description>
+    <p>Fixes:</p>
+    <ul>
+      <li>VAAPI hardware decoding no longer stalls between frames when looped video restarts.</li>
+      <li>Vulkan hardware decoding no longer intermittently displays stale frames.</li>
+    </ul>
+  </description>
+</release>
 <release version="0.3.2" date="2026-08-08">
   <description>
     <p>Added:</p>

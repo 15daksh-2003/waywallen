@@ -18,11 +18,21 @@
   </description>
 
   <screenshots>
-      <screenshot type="default">
-        <caption>main window</caption>
-        <caption xml:lang="ru">главное окно</caption>
-        <image type="source">https://github.com/waywallen/waywallen/raw/refs/heads/main/ui/assets/main_page.webp</image>
-      </screenshot>
+    <screenshot type="default">
+      <caption>Wallpaper library in light and dark themes</caption>
+      <caption xml:lang="ru">Библиотека обоев в светлой и тёмной темах</caption>
+      <image type="source">https://github.com/waywallen/waywallen/raw/refs/heads/main/ui/assets/main_page.webp</image>
+    </screenshot>
+    <screenshot>
+      <caption>Display layout and wallpaper controls</caption>
+      <caption xml:lang="ru">Настройки экранов и обоев</caption>
+      <image type="source">https://github.com/waywallen/waywallen/raw/refs/heads/main/ui/assets/displays_page.webp</image>
+    </screenshot>
+    <screenshot>
+      <caption>Renderer and component status</caption>
+      <caption xml:lang="ru">Состояние рендереров и компонентов</caption>
+      <image type="source">https://github.com/waywallen/waywallen/raw/refs/heads/main/ui/assets/status_page.webp</image>
+    </screenshot>
   </screenshots>
 
   <categories>
