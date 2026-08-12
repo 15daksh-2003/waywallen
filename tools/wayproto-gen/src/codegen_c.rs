@@ -721,6 +721,7 @@ static int rd_string(ww_rd_t *r, char **out) {
     return WW_OK;
 }
 
+/* Guard against an untrusted count forcing a huge allocation (DoS). */
 #define DEFINE_ARRAY_READER(NAME, CTYPE, READ_ONE)                     \
     static int rd_array_##NAME(ww_rd_t *r, ww_array_##NAME##_t *out) { \
         uint32_t n;                                                    \
@@ -729,6 +730,7 @@ static int rd_string(ww_rd_t *r, char **out) {
         out->count = 0;                                                \
         out->data = NULL;                                              \
         if (n == 0) return WW_OK;                                      \
+        if ((size_t)n > r->len - r->pos) return WW_ERR_BAD_ARRAY;      \
         if ((size_t)n > (SIZE_MAX / sizeof(CTYPE))) return WW_ERR_BAD_ARRAY; \
         CTYPE *arr = (CTYPE *)malloc((size_t)n * sizeof(CTYPE));       \
         if (!arr) return WW_ERR_NOMEM;                                 \
@@ -755,6 +757,7 @@ static int rd_array_string(ww_rd_t *r, ww_array_string_t *out) {
     out->count = 0;
     out->data = NULL;
     if (n == 0) return WW_OK;
+    if ((size_t)n > r->len - r->pos) return WW_ERR_BAD_ARRAY;
     if ((size_t)n > (SIZE_MAX / sizeof(char *))) return WW_ERR_BAD_ARRAY;
     char **arr = (char **)calloc(n, sizeof(char *));
     if (!arr) return WW_ERR_NOMEM;
@@ -778,6 +781,7 @@ static int rd_kv_list(ww_rd_t *r, ww_kv_list_t *out) {
     out->count = 0;
     out->data = NULL;
     if (n == 0) return WW_OK;
+    if ((size_t)n > r->len - r->pos) return WW_ERR_BAD_ARRAY;
     if ((size_t)n > (SIZE_MAX / sizeof(ww_kv_t))) return WW_ERR_BAD_ARRAY;
     ww_kv_t *arr = (ww_kv_t *)calloc(n, sizeof(ww_kv_t));
     if (!arr) return WW_ERR_NOMEM;
