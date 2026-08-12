@@ -36,12 +36,32 @@ MD.BottomSheet {
                 maximumLineCount: 1
             }
 
+            MD.Text {
+                text: qsTr("Shared")
+                typescale: MD.Token.typescale.body_medium
+                color: MD.Token.color.on_surface_variant
+            }
+
+            MD.Switch {
+                id: sharedSwitch
+                checked: control.sheetState.shareAllDisplays
+                onToggled: control.sheetState.setShareAllDisplays(checked)
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.leftMargin: 16
+            Layout.rightMargin: 16
+            Layout.bottomMargin: 8
+            spacing: 8
+
             MD.EmbedChip {
                 id: playlistDisplayChip
 
                 Layout.maximumWidth: 280
                 text: control.sheetState.selectedDisplay ? control.sheetState.displayLabel(control.sheetState.selectedDisplay) : qsTr("No displays")
-                enabled: control.sheetState.playDisplays.length > 0
+                enabled: control.sheetState.playDisplays.length > 0 && !control.sheetState.shareAllDisplays
                 icon.name: MD.Token.icon.monitor
                 trailingIconName: MD.Token.icon.expand_more
                 mdState.borderWidth: 1
@@ -144,7 +164,7 @@ MD.BottomSheet {
                     spacing: 4
 
                     MD.BusyIconButton {
-                        enabled: control.sheetState.selectedDisplay !== null && !control.sheetState.playlistPlaybackMutation.querying
+                        enabled: control.sheetState.hasPlayTarget && !control.sheetState.playlistPlaybackMutation.querying
                         busy: control.sheetState.playlistPlaybackMutation.querying
                         icon.name: playlistSheetItem.playingOnSelectedDisplay ? MD.Token.icon.pause : MD.Token.icon.play_arrow
                         onClicked: control.sheetState.togglePlayback(playlistSheetItem.modelData)

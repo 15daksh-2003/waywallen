@@ -705,11 +705,12 @@ MD.Page {
     function displayLabel(display) {
         if (!display)
             return qsTr("Display");
-        const alias = display.displayLabel || "";
-        if (alias.length > 0)
-            return alias;
-        const name = (display.name || "").replace(/^waywallen-[a-z]+-[a-z]+-/, "");
-        return name.length > 0 ? name : qsTr("Display %1").arg(display.id);
+        let base = display.alias || "";
+        if (!base.length)
+            base = (display.name || "").replace(/^waywallen-[a-z]+-[a-z]+-/, "");
+        if (!base.length)
+            return qsTr("Display #%1").arg(display.id);
+        return base + " (#" + display.id + ")";
     }
 
     function selectedPlaylistDisplay() {
@@ -759,9 +760,30 @@ MD.Page {
         return false;
     }
 
-    function togglePlaylistPlayback(playlist) {
+    function playlistIsSharedActive(playlist) {
+        const displays = root.playlistPlayDisplays || [];
+        if (!playlist || displays.length === 0)
+            return false;
+        return root.playlistDisplayStatuses(playlist).length === displays.length;
+    }
+
+    function togglePlaylistPlayback(playlist, shareAllDisplays) {
+        if (!playlist || playlistPlaybackMutation.querying)
+            return;
+
+        if (shareAllDisplays) {
+            const displayIds = (root.playlistPlayDisplays || []).map(display => display.id);
+            if (displayIds.length === 0)
+                return;
+            if (root.playlistIsSharedActive(playlist))
+                playlistPlaybackMutation.deactivate(displayIds, playlist.id);
+            else
+                playlistPlaybackMutation.activate(playlist.id, displayIds, true);
+            return;
+        }
+
         const display = root.selectedPlaylistDisplay();
-        if (!playlist || !display || playlistPlaybackMutation.querying)
+        if (!display)
             return;
         const displayIds = [display.id];
         if (root.playlistIsPlayingOnSelectedDisplay(playlist))

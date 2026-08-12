@@ -6,6 +6,7 @@ use tokio::task::JoinHandle;
 
 use crate::error::Result;
 use crate::playlist::cursor::PlaylistCursor;
+use crate::playlist::shared;
 use crate::playlist::{repo as plrepo, resolve};
 use crate::queue::rotator::{make_handle, RotationConfig, RotationHandle};
 use crate::queue::Mode;
@@ -41,6 +42,7 @@ pub struct DisplayStatus {
 #[derive(Default)]
 pub struct Engine {
     inner: Mutex<HashMap<DisplayId, DisplayRotation>>,
+    shared: shared::Sessions,
 }
 
 impl Engine {
@@ -49,11 +51,14 @@ impl Engine {
     }
 
     pub async fn owned_display_ids(&self) -> Vec<DisplayId> {
-        self.inner.lock().await.keys().copied().collect()
+        let mut ids = self.inner.lock().await.keys().copied().collect::<Vec<_>>();
+        ids.extend(self.shared.owned_display_ids().await);
+        ids
     }
 
     pub async fn is_owned(&self, display_id: DisplayId) -> bool {
         self.inner.lock().await.contains_key(&display_id)
+            || self.shared.is_owned(display_id).await
     }
 
     pub async fn activate(
@@ -110,6 +115,41 @@ impl Engine {
         } else {
             display_ids.to_vec()
         };
+        if targets.is_empty() {
+            return Ok(());
+        }
+
+        if targets.len() >= 2 {
+            for &did in &targets {
+                app.playlists.inner.lock().await.remove(&did);
+            }
+            app.playlists
+                .shared
+                .activate(
+                    app,
+                    &targets,
+                    playlist_id,
+                    mode,
+                    interval,
+                    items,
+                    resume,
+                    first_frame_timeout,
+                )
+                .await?;
+            for &did in &targets {
+                persist_assignment(app, did, Some(playlist_id)).await;
+            }
+            app.events
+                .publish(crate::events::GlobalEvent::PlaylistChanged);
+            return Ok(());
+        }
+
+        // Shared across all targets so displays activated together shuffle in sync.
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(1)
+            .max(1);
 
         for did in targets {
             Self::activate_one(
@@ -121,6 +161,7 @@ impl Engine {
                 items.clone(),
                 resume,
                 first_frame_timeout,
+                seed,
             )
             .await?;
             persist_assignment(app, did, Some(playlist_id)).await;
@@ -128,6 +169,27 @@ impl Engine {
         app.events
             .publish(crate::events::GlobalEvent::PlaylistChanged);
         Ok(())
+    }
+
+    pub async fn attach_shared(
+        app: &Arc<AppState>,
+        display_id: DisplayId,
+        playlist_id: i64,
+    ) -> Result<bool> {
+        if app.playlists.is_owned(display_id).await {
+            return Ok(true);
+        }
+        let attached = app
+            .playlists
+            .shared
+            .attach(app, display_id, playlist_id)
+            .await?;
+        if attached {
+            persist_assignment(app, display_id, Some(playlist_id)).await;
+            app.events
+                .publish(crate::events::GlobalEvent::PlaylistChanged);
+        }
+        Ok(attached)
     }
 
     async fn activate_one(
@@ -139,15 +201,8 @@ impl Engine {
         items: Vec<String>,
         resume: bool,
         first_frame_timeout: Option<std::time::Duration>,
+        seed: u64,
     ) -> Result<()> {
-        {
-            app.playlists.inner.lock().await.remove(&display_id);
-        }
-        let entropy = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(1);
-        let seed = (entropy ^ display_id.wrapping_mul(0x9E3779B97F4A7C15)).max(1);
         let resume_id = if resume && mode != Mode::Random {
             match display_settings_key(app, display_id).await {
                 Some(key) => app
@@ -160,11 +215,11 @@ impl Engine {
         } else {
             None
         };
+
         let cursor = Arc::new(Mutex::new(PlaylistCursor::new(items, mode, seed)));
         let (handle, rx) = make_handle();
         handle.set_interval(interval);
         let deadline = Arc::new(std::sync::Mutex::new(None));
-
         let first = {
             let mut c = cursor.lock().await;
             match resume_id {
@@ -175,16 +230,48 @@ impl Engine {
                 None => c.first(),
             }
         };
+
+        let members = Arc::new(Mutex::new(vec![display_id]));
+        let task = tokio::spawn(run_playlist_rotator(
+            app.clone(),
+            cursor.clone(),
+            deadline.clone(),
+            members,
+            false,
+            rx,
+            app.shutdown_subscribe(),
+        ));
+        {
+            let mut map = app.playlists.inner.lock().await;
+            map.remove(&display_id);
+            map.insert(
+                display_id,
+                DisplayRotation {
+                    playlist_id,
+                    cursor,
+                    handle,
+                    deadline,
+                    task,
+                },
+            );
+        }
+        app.playlists.shared.release(&[display_id]).await;
+
         if let Some(id) = first {
             match first_frame_timeout {
                 Some(timeout) => {
-                    crate::control::apply_wallpaper_to_displays_with_first_frame_timeout(
-                        app,
-                        &id,
-                        &[display_id],
-                        timeout,
-                    )
-                    .await?;
+                    if let Err(e) =
+                        crate::control::apply_wallpaper_to_displays_with_first_frame_timeout(
+                            app,
+                            &id,
+                            &[display_id],
+                            timeout,
+                        )
+                        .await
+                    {
+                        app.playlists.inner.lock().await.remove(&display_id);
+                        return Err(e);
+                    }
                 }
                 None => {
                     let _ =
@@ -192,26 +279,6 @@ impl Engine {
                 }
             }
         }
-
-        let task = tokio::spawn(run_display_rotator(
-            app.clone(),
-            display_id,
-            cursor.clone(),
-            deadline.clone(),
-            rx,
-            app.shutdown_subscribe(),
-        ));
-
-        app.playlists.inner.lock().await.insert(
-            display_id,
-            DisplayRotation {
-                playlist_id,
-                cursor,
-                handle,
-                deadline,
-                task,
-            },
-        );
         Ok(())
     }
 
@@ -221,9 +288,10 @@ impl Engine {
         } else {
             display_ids.to_vec()
         };
-        for did in targets {
-            app.playlists.inner.lock().await.remove(&did);
-            persist_assignment(app, did, None).await;
+        app.playlists.shared.release(&targets).await;
+        for did in &targets {
+            app.playlists.inner.lock().await.remove(did);
+            persist_assignment(app, *did, None).await;
         }
         app.events
             .publish(crate::events::GlobalEvent::PlaylistChanged);
@@ -231,6 +299,9 @@ impl Engine {
     }
 
     pub async fn step(app: &Arc<AppState>, display_id: DisplayId, delta: i32) -> Result<()> {
+        if app.playlists.shared.step(app, display_id, delta).await? {
+            return Ok(());
+        }
         let cursor = {
             let map = app.playlists.inner.lock().await;
             map.get(&display_id).map(|r| r.cursor.clone())
@@ -250,6 +321,14 @@ impl Engine {
     }
 
     pub async fn jump_to(app: &Arc<AppState>, playlist_id: i64, entry_id: &str) -> Result<()> {
+        if app
+            .playlists
+            .shared
+            .jump_to(app, playlist_id, entry_id)
+            .await?
+        {
+            return Ok(());
+        }
         let displays: Vec<(DisplayId, Arc<Mutex<PlaylistCursor>>)> = {
             let map = app.playlists.inner.lock().await;
             map.iter()
@@ -312,14 +391,20 @@ impl Engine {
                 remaining_secs,
             });
         }
+        out.extend(self.shared.status().await);
         out
     }
 
     pub async fn drop_display(&self, display_id: DisplayId) {
+        self.shared.drop_display(display_id).await;
         self.inner.lock().await.remove(&display_id);
     }
 
     pub async fn deactivate_for_playlist(app: &Arc<AppState>, playlist_id: i64) {
+        let shared_members = app.playlists.shared.deactivate_playlist(playlist_id).await;
+        for did in &shared_members {
+            persist_assignment(app, *did, None).await;
+        }
         let owned: Vec<DisplayId> = {
             let map = app.playlists.inner.lock().await;
             map.iter()
@@ -327,13 +412,48 @@ impl Engine {
                 .map(|(d, _)| *d)
                 .collect()
         };
-        if owned.is_empty() {
+        if owned.is_empty() && shared_members.is_empty() {
             return;
         }
-        let _ = Self::deactivate(app, &owned).await;
+        if !owned.is_empty() {
+            let _ = Self::deactivate(app, &owned).await;
+        } else if !shared_members.is_empty() {
+            app.events
+                .publish(crate::events::GlobalEvent::PlaylistChanged);
+        }
     }
 
     pub async fn rebuild_for_playlist(app: &Arc<AppState>, playlist_id: i64) {
+        let pl = match plrepo::get(&app.db, playlist_id).await {
+            Ok(Some(p)) => p,
+            _ => return,
+        };
+        let mode: Mode = pl.mode.into();
+        let interval = pl.interval_secs as u32;
+        let items = resolve::resolve(app, playlist_id).await.unwrap_or_default();
+
+        match app
+            .playlists
+            .shared
+            .rebuild(app, playlist_id, mode, interval, items.clone())
+            .await
+        {
+            Ok(None) => {}
+            Ok(Some(cleared)) if !cleared.is_empty() => {
+                for did in cleared {
+                    persist_assignment(app, did, None).await;
+                }
+                app.events
+                    .publish(crate::events::GlobalEvent::PlaylistChanged);
+                return;
+            }
+            Ok(Some(_)) => return,
+            Err(e) => {
+                log::warn!("shared playlist rebuild {playlist_id} failed: {e:#}");
+                return;
+            }
+        }
+
         type Bound = (DisplayId, Arc<Mutex<PlaylistCursor>>, RotationHandle);
         let affected: Vec<Bound> = {
             let map = app.playlists.inner.lock().await;
@@ -345,14 +465,6 @@ impl Engine {
         if affected.is_empty() {
             return;
         }
-
-        let pl = match plrepo::get(&app.db, playlist_id).await {
-            Ok(Some(p)) => p,
-            _ => return,
-        };
-        let mode: Mode = pl.mode.into();
-        let interval = pl.interval_secs as u32;
-        let items = resolve::resolve(app, playlist_id).await.unwrap_or_default();
 
         if items.is_empty() {
             let ids: Vec<DisplayId> = affected.iter().map(|(d, _, _)| *d).collect();
@@ -383,6 +495,9 @@ impl Engine {
     }
 
     pub async fn set_interval_for_playlist(app: &Arc<AppState>, playlist_id: i64, secs: u32) {
+        if app.playlists.shared.set_interval(playlist_id, secs).await {
+            return;
+        }
         let map = app.playlists.inner.lock().await;
         for (_, r) in map.iter() {
             if r.playlist_id == playlist_id {
@@ -392,11 +507,12 @@ impl Engine {
     }
 }
 
-async fn run_display_rotator(
+pub(crate) async fn run_playlist_rotator(
     app: Arc<AppState>,
-    display_id: DisplayId,
     cursor: Arc<Mutex<PlaylistCursor>>,
     deadline: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    targets: Arc<Mutex<Vec<DisplayId>>>,
+    shared_renderer: bool,
     mut rx: tokio::sync::watch::Receiver<RotationConfig>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
@@ -416,12 +532,24 @@ async fn run_display_rotator(
             tokio::select! {
                 _ = tokio::time::sleep(dur) => {
                     if rx.borrow().interval_secs == 0 { continue; }
+                    let members = targets.lock().await.clone();
+                    if members.is_empty() {
+                        continue;
+                    }
                     let next = cursor.lock().await.next(1);
                     if let Some(id) = next {
-                        if let Err(e) =
-                            crate::control::apply_wallpaper_to_displays(&app, &id, &[display_id]).await
-                        {
-                            log::warn!("playlist rotator display={display_id} apply failed: {e:#}");
+                        let result = if shared_renderer {
+                            crate::control::apply_wallpaper_shared_to_displays(
+                                &app, &id, &members, None,
+                            )
+                            .await
+                        } else {
+                            crate::control::apply_wallpaper_to_displays(&app, &id, &members).await
+                        };
+                        if let Err(e) = result {
+                            log::warn!(
+                                "playlist rotator displays={members:?} apply failed: {e:#}"
+                            );
                         }
                     }
                 }
@@ -446,11 +574,85 @@ async fn persist_assignment(app: &Arc<AppState>, display_id: DisplayId, playlist
     app.settings.flush_now().await;
 }
 
-async fn display_settings_key(app: &Arc<AppState>, display_id: DisplayId) -> Option<String> {
+pub(crate) async fn display_settings_key(
+    app: &Arc<AppState>,
+    display_id: DisplayId,
+) -> Option<String> {
     app.router
         .snapshot_displays()
         .await
         .into_iter()
         .find(|d| d.id == display_id)
         .map(|d| d.instance_id.unwrap_or(d.name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::queue::Mode;
+
+    #[tokio::test]
+    async fn is_owned_true_for_shared_or_inner() {
+        let engine = Engine::new();
+        assert!(!engine.is_owned(1).await);
+
+        engine
+            .shared
+            .seed_for_test(9, &[1], vec!["a".into()], Some("a".into()), 30)
+            .await;
+        assert!(engine.is_owned(1).await);
+        assert!(!engine.is_owned(2).await);
+
+        let cursor = Arc::new(Mutex::new(PlaylistCursor::new(
+            vec!["a".into()],
+            Mode::Sequential,
+            1,
+        )));
+        let (handle, _rx) = make_handle();
+        let task = tokio::spawn(async {});
+        engine.inner.lock().await.insert(
+            2,
+            DisplayRotation {
+                playlist_id: 9,
+                cursor,
+                handle,
+                deadline: Arc::new(std::sync::Mutex::new(None)),
+                task,
+            },
+        );
+        assert!(engine.is_owned(2).await);
+    }
+
+    #[tokio::test]
+    async fn claim_inner_before_shared_release_keeps_owned() {
+        let engine = Engine::new();
+        engine
+            .shared
+            .seed_for_test(3, &[10], vec!["a".into()], Some("a".into()), 30)
+            .await;
+        assert!(engine.is_owned(10).await);
+
+        let cursor = Arc::new(Mutex::new(PlaylistCursor::new(
+            vec!["b".into()],
+            Mode::Sequential,
+            1,
+        )));
+        let (handle, _rx) = make_handle();
+        let task = tokio::spawn(async {});
+        engine.inner.lock().await.insert(
+            10,
+            DisplayRotation {
+                playlist_id: 4,
+                cursor,
+                handle,
+                deadline: Arc::new(std::sync::Mutex::new(None)),
+                task,
+            },
+        );
+        engine.shared.release(&[10]).await;
+
+        assert!(engine.is_owned(10).await);
+        assert!(engine.inner.lock().await.contains_key(&10));
+        assert!(!engine.shared.is_owned(10).await);
+    }
 }

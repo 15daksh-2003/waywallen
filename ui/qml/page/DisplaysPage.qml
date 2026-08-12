@@ -259,7 +259,7 @@ MD.Page {
 
                             MD.Text {
                                 Layout.fillWidth: true
-                                text: rectItem.d.displayLabel || rectItem.d.name || qsTr("Display %1").arg(rectItem.d.id)
+                                text: rectItem.d.displayLabel || qsTr("Display #%1").arg(rectItem.d.id)
                                 typescale: MD.Token.typescale.title_small
                                 color: rectItem.hasLink ? MD.Token.color.on_primary_container : MD.Token.color.on_surface
                                 horizontalAlignment: Text.AlignHCenter
@@ -359,7 +359,7 @@ MD.Page {
 
                         MD.Text {
                             Layout.fillWidth: true
-                            text: root.selected ? (root.selected.displayLabel || root.selected.name || qsTr("Display %1").arg(root.selected.id)) : ""
+                            text: root.selected ? (root.selected.displayLabel || qsTr("Display #%1").arg(root.selected.id)) : ""
                             typescale: MD.Token.typescale.title_medium
                             color: MD.Token.color.on_surface
                             elide: Text.ElideRight
