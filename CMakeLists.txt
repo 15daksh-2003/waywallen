@@ -42,7 +42,12 @@ list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 option(WAYWALLEN_BUILD_DAEMON  "Build the Rust daemon via Corrosion"   ON)
 option(WAYWALLEN_BUILD_UI      "Build the Qt/QML UI"                   ON)
 option(WAYWALLEN_BUILD_PLUGINS "Build renderer plugins (image, video)" ON)
+option(WAYWALLEN_BUILD_TESTS   "Build tests"                            OFF)
 option(WAYWALLEN_CARGO_OFFLINE "Pass --frozen to cargo (offline + locked, for flatpak)" OFF)
+
+if(WAYWALLEN_BUILD_TESTS)
+    enable_testing()
+endif()
 
 if(WAYWALLEN_BUILD_DAEMON)
     include(FetchDeps)

@@ -97,6 +97,52 @@ QString replaceTag(const QString& in, const QString& tag, const QString& openHtm
     return QString(in).replace(*it.value(), openHtml + QStringLiteral("\\1") + closeHtml);
 }
 
+QString linkifyBareUrls(const QString& text) {
+    static const QRegularExpression re(QStringLiteral("https?://[^\\s<\\[\\]]+"));
+    QString                         out;
+    out.reserve(text.size());
+    int  cursor = 0;
+    auto it     = re.globalMatch(text);
+    while (it.hasNext()) {
+        const auto m = it.next();
+        out.append(text.mid(cursor, m.capturedStart() - cursor));
+        const QString url = m.captured();
+        out.append(QStringLiteral("<a href=\"%1\">%1</a>").arg(url));
+        cursor = m.capturedEnd();
+    }
+    out.append(text.mid(cursor));
+    return out;
+}
+
+QString linkifyTextNodes(const QString& html) {
+    QString out;
+    out.reserve(html.size());
+    int cursor    = 0;
+    int linkDepth = 0;
+    while (cursor < html.size()) {
+        const int  tagStart = html.indexOf(QLatin1Char('<'), cursor);
+        const int  textEnd  = tagStart < 0 ? html.size() : tagStart;
+        const auto text     = html.mid(cursor, textEnd - cursor);
+        out.append(linkDepth > 0 ? text : linkifyBareUrls(text));
+        if (tagStart < 0) break;
+
+        const int tagEnd = html.indexOf(QLatin1Char('>'), tagStart + 1);
+        if (tagEnd < 0) {
+            out.append(html.mid(tagStart));
+            break;
+        }
+        const auto tag = html.mid(tagStart, tagEnd - tagStart + 1);
+        out.append(tag);
+        if (tag.startsWith(QLatin1StringView("<a "))) {
+            ++linkDepth;
+        } else if (tag == QLatin1StringView("</a>") && linkDepth > 0) {
+            --linkDepth;
+        }
+        cursor = tagEnd + 1;
+    }
+    return out;
+}
+
 } // namespace
 
 QString Util::bbcodeToHtml(const QString& src) const {
@@ -195,30 +241,9 @@ QString Util::bbcodeToHtml(const QString& src) const {
         stage.replace(reImg, QStringLiteral("<img src=\"\\1\">"));
     }
 
-    // Auto-linkify bare URLs. Single sweep that either matches a `href="`
-    // marker (and leaves it alone) or a free-standing URL (and wraps it).
-    {
-        static const QRegularExpression reAuto(
-            QStringLiteral("(href=\")|(https?://[^\\s<\\[\\]]+)"));
-        QString out;
-        out.reserve(stage.size());
-        int  cursor = 0;
-        auto it     = reAuto.globalMatch(stage);
-        while (it.hasNext()) {
-            auto m = it.next();
-            out.append(stage.mid(cursor, m.capturedStart() - cursor));
-            if (m.capturedLength(1) > 0) {
-                // It's an existing href="…" — skip.
-                out.append(m.captured(0));
-            } else {
-                const QString url = m.captured(2);
-                out.append(QStringLiteral("<a href=\"%1\">%1</a>").arg(url));
-            }
-            cursor = m.capturedEnd();
-        }
-        out.append(stage.mid(cursor));
-        stage = std::move(out);
-    }
+    // Linkify text nodes only. Generated tag attributes and existing anchor
+    // contents must remain opaque to avoid nested or malformed links.
+    stage = linkifyTextNodes(stage);
 
     // Line breaks last so embedded \n inside tag payloads stayed intact
     // through the scans above.

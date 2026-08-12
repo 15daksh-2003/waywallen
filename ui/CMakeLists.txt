@@ -313,6 +313,13 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 )
 target_link_libraries(${PROJECT_NAME} PRIVATE waywallen-qml)
 
+if(WAYWALLEN_BUILD_TESTS)
+  qt_add_executable(waywallen-ui-util-tests tests/util.cpp)
+  set_target_properties(waywallen-ui-util-tests PROPERTIES CXX_SCAN_FOR_MODULES ON)
+  target_link_libraries(waywallen-ui-util-tests PRIVATE waywallen-qml)
+  add_test(NAME waywallen-ui-util-tests COMMAND waywallen-ui-util-tests)
+endif()
+
 # ---------------------------------------------------------------------------
 # Translations
 #
