@@ -8,6 +8,7 @@ use log::warn;
 /// Public, owner-controlled list of `SONAME`s we'll try to dlopen, in order.
 /// Never take this from caller-controlled input.
 const LIBAVFORMAT_CANDIDATES: &[&str] = &[
+    "libavformat.so.63", // FFmpeg 9.x
     "libavformat.so.62", // FFmpeg 8.x (devel) — observed on Fedora 44+
     "libavformat.so.61", // FFmpeg 7.x
     "libavformat.so.60", // FFmpeg 6.x — original target ABI
@@ -57,7 +58,7 @@ struct LoadedLib {
     library: Library,
     #[allow(dead_code)]
     soname: &'static str,
-    /// Major ABI version (e.g. `60`/`61`/`62`). Drives the
+    /// Major ABI version (e.g. `60`/`61`/`62`/`63`). Drives the
     /// `AVCodecParameters` layout we use.
     #[allow(dead_code)]
     major: u32,
@@ -291,7 +292,7 @@ fn try_load_libavformat() -> Option<LoadedLib> {
 
         let layout = match major {
             60 => CODECPAR_FFMPEG_6,
-            61 | 62 => CODECPAR_FFMPEG_7_PLUS,
+            61 | 62 | 63 => CODECPAR_FFMPEG_7_PLUS,
             other => {
                 warn!(
                     target: "waywallen::probe::media",
