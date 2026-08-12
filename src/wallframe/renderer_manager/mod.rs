@@ -2,8 +2,9 @@ use crate::error::{Error, Result, ResultExt};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream as StdUnixStream;
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock as StdRwLock, Weak as StdWeak};
 use std::thread;
@@ -68,9 +69,31 @@ const MAX_RUNTIME_TAG_VALUE_BYTES: usize = 64;
 const WRITER_QUEUE_CAPACITY: usize = 64;
 const RENDERER_FAILED_EXIT_GRACE: Duration = Duration::from_millis(250);
 
+fn renderer_exit_status(status: &ExitStatus) -> String {
+    let hint = match status.code() {
+        Some(127) => Some(
+            "a runtime dependency or launcher command may be missing; check renderer stderr in the daemon logs",
+        ),
+        Some(126) => Some(
+            "the renderer or a launcher command could not be executed; check renderer stderr in the daemon logs",
+        ),
+        _ => None,
+    };
+
+    let mut description = status.to_string();
+    if status.core_dumped() {
+        description.push_str("; core dumped");
+    }
+    if let Some(hint) = hint {
+        description.push_str("; ");
+        description.push_str(hint);
+    }
+    description
+}
+
 async fn failed_renderer_process_status(child: &mut Child) -> String {
     match tokio::time::timeout(RENDERER_FAILED_EXIT_GRACE, child.wait()).await {
-        Ok(Ok(status)) => format!("process_status={status}"),
+        Ok(Ok(status)) => format!("process_status={}", renderer_exit_status(&status)),
         Ok(Err(error)) => {
             let kill = child.start_kill().map_or_else(
                 |kill_error| format!("kill failed: {kill_error}"),
@@ -753,17 +776,26 @@ impl RendererManager {
         let process_group = child_pid.and_then(|pid| i32::try_from(pid).ok());
         let process_group_registration = self.register_process_group(process_group);
 
-        // Accept, with a bound to avoid hanging forever on a broken host.
-        let accept = listener.accept();
-        let (tokio_stream, _addr) = tokio::time::timeout(Duration::from_secs(10), accept)
-            .await
-            .map_err(|_| {
+        // A dynamic-loader or early initialization failure happens after
+        // exec succeeds, so observe the child while waiting for IPC.
+        let connect_timeout = tokio::time::sleep(Duration::from_secs(10));
+        tokio::pin!(connect_timeout);
+        let (tokio_stream, _addr) = tokio::select! {
+            accepted = listener.accept() => accepted.context("accept")?,
+            status = child.wait() => {
+                let status = status.context("wait for renderer before IPC connect")?;
+                return Err(Error::RendererSpawnFailed(format!(
+                    "renderer exited before IPC connect: {}",
+                    renderer_exit_status(&status),
+                )));
+            }
+            () = &mut connect_timeout => {
                 let _ = child.start_kill();
-                Error::RendererSpawnFailed(
+                return Err(Error::RendererSpawnFailed(
                     "timed out waiting for waywallen-renderer to connect back".into(),
-                )
-            })?
-            .context("accept")?;
+                ));
+            }
+        };
 
         // Convert to a blocking std UnixStream for the rest of the
         // lifecycle because ipc::uds uses blocking sendmsg/recvmsg.
@@ -1592,6 +1624,23 @@ mod subscription_tests {
     use crate::wallframe::ipc::proto::{AudioStreamFormat, RgbaColor};
     use crate::wallframe::ipc::uds::{recv_control, CodecError};
 
+    #[test]
+    fn renderer_exit_status_diagnoses_runtime_dependency_failure() {
+        let status = ExitStatus::from_raw(127 << 8);
+        let message = renderer_exit_status(&status);
+        assert!(message.contains("exit status: 127"), "{message}");
+        assert!(message.contains("runtime dependency"), "{message}");
+        assert!(message.contains("launcher command"), "{message}");
+    }
+
+    #[test]
+    fn renderer_exit_status_keeps_signal_diagnostic_factual() {
+        let status = ExitStatus::from_raw(libc::SIGSEGV);
+        let message = renderer_exit_status(&status);
+        assert!(message.contains("signal: 11"), "{message}");
+        assert!(!message.contains("possible"), "{message}");
+    }
+
     #[tokio::test]
     async fn failed_renderer_process_status_includes_exit_code() {
         let mut child = Command::new("/bin/sh")
@@ -1937,6 +1986,7 @@ mod init_handshake_tests {
     use crate::plugin::renderer_registry::{SettingDef, SettingType};
     use crate::wallframe::ipc::proto::{InitRejection, PROTOCOL_VERSION};
     use crate::wallframe::ipc::uds::send_event;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::thread;
 
@@ -2051,6 +2101,44 @@ mod init_handshake_tests {
             "{message}"
         );
         assert!(message.contains("update the plugin"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn spawn_reports_early_renderer_exit_without_waiting_for_connect_timeout() {
+        let directory = tempfile::tempdir().expect("create renderer directory");
+        let renderer = directory.path().join("renderer-exits-127");
+        std::fs::write(&renderer, "#!/bin/sh\nexit 127\n").expect("write renderer script");
+        let mut permissions = std::fs::metadata(&renderer)
+            .expect("read renderer metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&renderer, permissions).expect("make renderer executable");
+
+        let mut def = def_legacy("early-exit-renderer");
+        def.bin = renderer;
+        let mut registry = RendererRegistry::new();
+        registry.register(def);
+        let manager = RendererManager::new(registry);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            manager.spawn(SpawnRequest {
+                wp_type: "scene".to_string(),
+                renderer_name: Some("early-exit-renderer".to_string()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("early exit must beat the 10-second connect timeout");
+        let message = result
+            .expect_err("early renderer exit must fail")
+            .to_string();
+        assert!(
+            message.contains("renderer exited before IPC connect"),
+            "{message}"
+        );
+        assert!(message.contains("exit status: 127"), "{message}");
+        assert!(message.contains("runtime dependency"), "{message}");
     }
 
     #[test]
