@@ -63,8 +63,7 @@ public:
     auto alias() const -> const QString& { return m_alias; }
     auto displayLabel() const -> QString {
         const QString base = m_alias.isEmpty() ? m_name : m_alias;
-        if (base.isEmpty())
-            return QString("Display #%1").arg(m_id);
+        if (base.isEmpty()) return QString("Display #%1").arg(m_id);
         return QString("%1 (#%2)").arg(base).arg(m_id);
     }
     auto width() const -> quint32 { return m_width; }

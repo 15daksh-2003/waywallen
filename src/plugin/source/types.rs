@@ -1,0 +1,358 @@
+use super::*;
+
+/// User-Agent the `ctx.http` default client sends.
+pub(super) const WAYWALLEN_HTTP_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) waywallen";
+pub(super) const LUA_CALLBACK_TIMEOUT: Duration = Duration::from_secs(25);
+pub(super) const LUA_HOOK_INSTRUCTION_INTERVAL: u32 = 10_000;
+pub(super) const RUNTIME_ACTIVE: u8 = 0;
+pub(super) const RUNTIME_DRAINING: u8 = 1;
+pub(super) const RUNTIME_INACTIVE: u8 = 2;
+
+pub const ENTRY_VERSION_V2: u32 = 2;
+pub const ENTRY_VERSION_V3: u32 = 3;
+pub const ENTRY_VERSION: u32 = ENTRY_VERSION_V2;
+pub const LATEST_ENTRY_VERSION: u32 = ENTRY_VERSION_V3;
+pub const SUPPORTED_ENTRY_VERSIONS: &[u32] = &[ENTRY_VERSION_V2, ENTRY_VERSION_V3];
+
+pub fn supports_entry_version(version: u32) -> bool {
+    SUPPORTED_ENTRY_VERSIONS.contains(&version)
+}
+
+pub(super) fn resolve_plugin_import(root: &Path, name: &str) -> LuaResult<PathBuf> {
+    let mut rel = PathBuf::new();
+    for part in name.split('.') {
+        if part.is_empty()
+            || part == ".."
+            || part.contains('/')
+            || part.contains('\\')
+            || part == "."
+        {
+            return Err(LuaError::RuntimeError(format!(
+                "invalid import module name: {name}"
+            )));
+        }
+        rel.push(part);
+    }
+
+    let candidates = [
+        root.join(&rel).with_extension("lua"),
+        root.join(&rel).join("init.lua"),
+    ];
+    for candidate in candidates {
+        if !candidate.is_file() {
+            continue;
+        }
+        let path = candidate.canonicalize().map_err(LuaError::external)?;
+        if path.starts_with(root) {
+            return Ok(path);
+        }
+    }
+
+    Err(LuaError::RuntimeError(format!("module not found: {name}")))
+}
+
+// ---------------------------------------------------------------------------
+// Public types
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SourcePluginInfo {
+    pub name: String,
+    /// Domain id of the owning installable plugin.
+    /// Empty when loaded without package metadata.
+    pub plugin_id: String,
+    pub types: Vec<WallpaperType>,
+    pub version: String,
+    /// Short UI label or placeholder for prompting a library path.
+    /// Empty when the plugin did not declare one.
+    pub library_label: String,
+    /// Longer helper text for choosing a library path.
+    /// May contain newlines or inline-code Markdown markers.
+    pub library_hint: String,
+    /// User-configurable settings the plugin declares via `info().settings`,
+    /// stored under the Lua source name in the shared component settings map.
+    pub settings: Vec<SourceSetting>,
+}
+
+/// One entry from a source plugin's `info().settings` sequence. Shapes the
+/// same UI widgets as renderer `[settings]`, but declared in Lua so a source
+/// plugin keeps all of its surface in one place.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SourceSetting {
+    pub key: String,
+    /// "string" | "bool" | "u32" | "i32" | "f32".
+    pub ty: String,
+    pub default: String,
+    /// Human-readable label and help text (shown verbatim; no i18n yet).
+    pub label: String,
+    pub description: String,
+    pub group: String,
+    pub order: i32,
+    pub choices: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceActionKind {
+    Invoke,
+    QrLogin,
+    Form,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SourceActionField {
+    pub key: String,
+    pub label: String,
+    pub description: String,
+    pub placeholder: String,
+    pub secret: bool,
+    pub required: bool,
+}
+
+/// A button declared by `info().actions` and routed through the generic plugin
+/// action contract.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SourceAction {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub browse_description: String,
+    pub browse_button_label: String,
+    pub group: String,
+    pub order: i32,
+    pub kind: SourceActionKind,
+    pub visible: bool,
+    pub enabled: bool,
+    pub fields: Vec<SourceActionField>,
+    pub required_for_browsing: bool,
+}
+
+/// A read-only status row a source plugin declares via `info().status`. The
+/// `value` is computed by the daemon at query time (e.g. "Signed in as X").
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SourceStatus {
+    pub id: String,
+    pub label: String,
+    pub group: String,
+    pub order: i32,
+    pub value: String,
+}
+
+/// One sort option a discover-capable plugin advertises via
+/// `info().capabilities.discover.sorts`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiscoverSort {
+    pub key: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoverFilterType {
+    Select,
+    MultiSelect,
+    Toggle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DiscoverFilter {
+    pub id: String,
+    pub title: String,
+    pub ty: DiscoverFilterType,
+    pub values: Vec<String>,
+    pub description: String,
+    pub confirmation: String,
+}
+
+/// Discover capability of a single source plugin, derived from
+/// `info().capabilities.discover`. Plugins without that table are not listed.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiscoverSourceInfo {
+    /// Discover entry name — the routing key clients echo back in
+    /// `DiscoverSearchRequest.plugin_id`.
+    pub plugin_id: String,
+    pub name: String,
+    /// Human-readable display name (falls back to `name`).
+    pub display_name: String,
+    pub supports_search: bool,
+    pub remote_capability: Option<RemoteCapability>,
+    pub remote_hint: String,
+    pub sorts: Vec<DiscoverSort>,
+    pub filters: Vec<DiscoverFilter>,
+    /// Domain id of the owning installable plugin (e.g.
+    /// `org.waywallen.open-wallpaper-engine`). Source settings remain keyed by
+    /// `plugin_id`, the Lua source name.
+    pub owner_plugin_id: String,
+    /// User-configurable settings the plugin declares via `info().settings`.
+    pub settings: Vec<SourceSetting>,
+    /// Action buttons the plugin declares via `info().actions`.
+    pub actions: Vec<SourceAction>,
+    /// Status rows the plugin declares via `info().status` (values daemon-filled).
+    pub status: Vec<SourceStatus>,
+    /// Provider-owned account image returned by `lifecycle.check()`.
+    pub avatar_url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteCapability {
+    Download,
+    Subscription,
+}
+
+pub(super) fn validate_source_setting(
+    setting: &SourceSetting,
+    raw: &str,
+) -> std::result::Result<String, String> {
+    let value = match setting.ty.as_str() {
+        "u32" => raw
+            .parse::<u32>()
+            .map(|value| value.to_string())
+            .map_err(|_| ()),
+        "i32" => raw
+            .parse::<i32>()
+            .map(|value| value.to_string())
+            .map_err(|_| ()),
+        "f32" => raw
+            .parse::<f32>()
+            .map(|value| value.to_string())
+            .map_err(|_| ()),
+        "bool" => match raw {
+            "true" | "false" => Ok(raw.to_string()),
+            _ => Err(()),
+        },
+        "string" => Ok(raw.to_string()),
+        other => {
+            return Err(format!("{}.type '{other}' is unsupported", setting.key));
+        }
+    }
+    .map_err(|_| format!("{} expects {}, got '{raw}'", setting.key, setting.ty))?;
+
+    if !setting.choices.is_empty() && !setting.choices.iter().any(|choice| choice == &value) {
+        return Err(format!(
+            "{} value '{value}' is not one of [{}]",
+            setting.key,
+            setting.choices.join(", ")
+        ));
+    }
+    Ok(value)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionState {
+    Unknown,
+    Unsubscribed,
+    Subscribed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscriptionItemState {
+    pub id: String,
+    pub state: SubscriptionState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QrLoginBegin {
+    pub operation_id: u64,
+    pub challenge: String,
+    pub poll_after_ms: u64,
+    pub expires_in_ms: Option<u64>,
+    pub title: String,
+    pub instruction: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QrLoginPollState {
+    AwaitingScan,
+    AwaitingConfirmation,
+    ChallengeChanged,
+    Succeeded,
+    Expired,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QrLoginPoll {
+    pub state: QrLoginPollState,
+    pub challenge: String,
+    pub poll_after_ms: Option<u64>,
+    pub display_value: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginLifecycleState {
+    SignedOut,
+    SignedIn,
+    Expired,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginLifecycleCheck {
+    pub state: PluginLifecycleState,
+    pub display_value: String,
+    pub error: String,
+    pub avatar_url: String,
+}
+
+/// One remote item returned by a plugin's `discover.search(ctx, params)`.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct DiscoverItem {
+    pub id: String,
+    pub title: String,
+    pub preview_url: String,
+    pub author: String,
+    pub wp_type: String,
+    pub extra: HashMap<String, String>,
+}
+
+/// Detail blob returned by a plugin's `discover.details(ctx, id)`.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct DiscoverDetails {
+    pub author: String,
+    pub description: String,
+    pub size: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub tags: Vec<String>,
+    pub web_url: String,
+    pub extra: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct DiscoverSearchResult {
+    pub items: Vec<DiscoverItem>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DiscoverDownload {
+    pub wp_type: String,
+    pub url: String,
+    pub filename: String,
+    pub title: String,
+    pub preview_url: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub external_id: String,
+    pub size: Option<i64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub content_rating: Option<String>,
+}
+
+/// Directory item resolved by `discover.resolve` after a provider fetch.
+/// Paths are relative to the fetched directory.
+#[derive(Debug, Clone, Default)]
+pub struct DiscoverResolve {
+    pub name: String,
+    pub wp_type: String,
+    pub resource: String,
+    pub preview: Option<String>,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub external_id: String,
+    pub size: Option<i64>,
+    pub content_rating: Option<String>,
+}

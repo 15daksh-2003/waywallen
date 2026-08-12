@@ -1,16 +1,16 @@
 #[path = "common/mod.rs"]
 mod common;
 
-fn test_metrics(width: u32, height: u32) -> waywallen::display::proto::DisplayMetrics {
-    waywallen::display::proto::DisplayMetrics {
+fn test_metrics(width: u32, height: u32) -> waywallen::wallframe::display::proto::DisplayMetrics {
+    waywallen::wallframe::display::proto::DisplayMetrics {
         width,
         height,
         refresh_mhz: 60_000,
     }
 }
 
-fn test_consumer_caps() -> waywallen::display::proto::ConsumerCapabilities {
-    waywallen::display::proto::ConsumerCapabilities {
+fn test_consumer_caps() -> waywallen::wallframe::display::proto::ConsumerCapabilities {
+    waywallen::wallframe::display::proto::ConsumerCapabilities {
         fourccs: vec![0x3432_4241, 0x3432_4258],
         mod_counts: vec![1, 1],
         modifiers: vec![0, 0],
@@ -19,7 +19,7 @@ fn test_consumer_caps() -> waywallen::display::proto::ConsumerCapabilities {
         driver_uuid: vec![0; 4],
         drm_render_major: 0,
         drm_render_minor: 0,
-        mem_hints: (1 << 1) | (1 << 4),
+        mem_hints: waywallen::wallframe::dma::negotiate::MEM_HINT_HOST_VISIBLE,
         sync_caps: (1 << 1) | (1 << 2),
         color_caps: (1 << 0) | (1 << 6) | (1 << 7),
         extent_max_w: 8192,
@@ -37,14 +37,14 @@ mod handshake {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use waywallen::display::endpoint;
-    use waywallen::display::proto::{
+    use waywallen::events::GlobalEvent;
+    use waywallen::wallframe::display::endpoint;
+    use waywallen::wallframe::display::proto::{
         codec, DisplayErrorCode, Event, PauseEffectKind, PresentationCapabilities, Request,
         PROTOCOL_VERSION,
     };
-    use waywallen::events::GlobalEvent;
-    use waywallen::renderer_manager::RendererManager;
-    use waywallen::routing::Router;
+    use waywallen::wallframe::renderer_manager::RendererManager;
+    use waywallen::wallframe::routing::Router;
 
     async fn start_display_endpoint(
         sock_name: &str,
@@ -167,7 +167,7 @@ mod handshake {
 
     fn expect_registration_reject(
         sock: &Path,
-        consumer_caps: waywallen::display::proto::ConsumerCapabilities,
+        consumer_caps: waywallen::wallframe::display::proto::ConsumerCapabilities,
         presentation_flags: u32,
     ) -> anyhow::Result<()> {
         use std::os::unix::net::UnixStream;
@@ -371,12 +371,12 @@ mod sync_fd_fanout {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use waywallen::display::endpoint;
-    use waywallen::display::proto::{
+    use waywallen::wallframe::display::endpoint;
+    use waywallen::wallframe::display::proto::{
         codec, Event, PresentationCapabilities, Request, PROTOCOL_VERSION,
     };
-    use waywallen::renderer_manager::{RendererManager, SpawnRequest};
-    use waywallen::routing::Router;
+    use waywallen::wallframe::renderer_manager::{RendererManager, SpawnRequest};
+    use waywallen::wallframe::routing::Router;
 
     /// Drive a single display client through handshake + N frames.
     /// Returns the count of real `anon_inode:sync_file` fds received.
@@ -553,12 +553,12 @@ mod sync_fd_single {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use waywallen::display::endpoint;
-    use waywallen::display::proto::{
+    use waywallen::wallframe::display::endpoint;
+    use waywallen::wallframe::display::proto::{
         codec, Event, PresentationCapabilities, Request, PROTOCOL_VERSION,
     };
-    use waywallen::renderer_manager::{RendererManager, SpawnRequest};
-    use waywallen::routing::Router;
+    use waywallen::wallframe::renderer_manager::{RendererManager, SpawnRequest};
+    use waywallen::wallframe::routing::Router;
 
     #[tokio::test]
     async fn renderer_produces_real_sync_fds() {

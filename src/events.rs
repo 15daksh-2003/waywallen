@@ -2,6 +2,15 @@ use tokio::sync::{broadcast, watch};
 
 const DEFAULT_BUS_CAPACITY: usize = 64;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteDownloadState {
+    Pending,
+    Downloading,
+    Done,
+    Timeout,
+    Error,
+}
+
 /// Transient process-wide notifications.
 #[derive(Debug, Clone)]
 pub enum GlobalEvent {
@@ -50,7 +59,7 @@ pub enum GlobalEvent {
     RemoteDownloadProgress {
         source_id: String,
         id: String,
-        state: i32,
+        state: RemoteDownloadState,
         error: String,
     },
     QrLoginProgress {

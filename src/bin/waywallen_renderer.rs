@@ -8,11 +8,11 @@ use std::thread;
 use anyhow::{anyhow, Context, Result};
 use ash::{vk, Entry, Instance};
 
-use waywallen::ipc::proto::{
+use waywallen::wallframe::ipc::proto::{
     BufferFormat, BufferPool, ControlMsg, EventMsg, Extent, Frame, WireDrmNode,
 };
-use waywallen::ipc::uds::{recv_control, send_event};
-use waywallen::renderer_manager::BUF_HOST_VISIBLE;
+use waywallen::wallframe::ipc::uds::{recv_control, send_event};
+use waywallen::wallframe::renderer_manager::BUF_HOST_VISIBLE;
 
 const SLOT_COUNT: usize = 3;
 const RENDER_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;

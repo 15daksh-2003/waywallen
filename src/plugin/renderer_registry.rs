@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-use crate::wallpaper::types::WallpaperType;
+use crate::catalog::entry::WallpaperType;
 
 // ---------------------------------------------------------------------------
 // Installable-plugin manifest (`plugins/<dir>/plugin.toml`)
@@ -98,7 +98,7 @@ impl PluginScan {
     }
 }
 
-/// Installable-plugin (package) summary, retained in `AppState` so the UI
+/// Installable-plugin (package) summary, retained in `DaemonContext` so the UI
 /// can present a plugin-centric view independent of the component registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginPackageMeta {

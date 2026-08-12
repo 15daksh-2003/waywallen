@@ -1,0 +1,453 @@
+use super::*;
+use crate::model::connect_url;
+use std::ffi::OsString;
+use std::sync::Mutex;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct HomeGuard {
+    old: Option<OsString>,
+}
+
+impl HomeGuard {
+    fn set(home: &str) -> Self {
+        let old = std::env::var_os("HOME");
+        std::env::set_var("HOME", home);
+        Self { old }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        if let Some(old) = &self.old {
+            std::env::set_var("HOME", old);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+}
+
+async fn mem_db() -> DatabaseConnection {
+    connect_url("sqlite::memory:").await.unwrap()
+}
+
+fn minimal_args<'a>(
+    plugin_id: i64,
+    library_id: i64,
+    path: &'a str,
+    ty: &'a str,
+) -> ItemUpsertArgs<'a> {
+    ItemUpsertArgs {
+        plugin_id,
+        library_id,
+        path,
+        ty,
+        display_name: "",
+        preview_path: None,
+        description: None,
+        external_id: None,
+        size: None,
+        width: None,
+        height: None,
+        content_rating: None,
+    }
+}
+
+#[tokio::test]
+async fn upsert_plugin_inserts_then_updates_version() {
+    let db = mem_db().await;
+    let p1 = upsert_plugin(&db, "wescene", "1.0").await.unwrap();
+    let p2 = upsert_plugin(&db, "wescene", "1.1").await.unwrap();
+    assert_eq!(p2.id, p1.id);
+    assert_eq!(p2.version, "1.1");
+}
+
+#[tokio::test]
+async fn library_path_scoped_per_plugin() {
+    let db = mem_db().await;
+    let a = upsert_plugin(&db, "a", "").await.unwrap();
+    let b = upsert_plugin(&db, "b", "").await.unwrap();
+    add_library(&db, a.id, "/shared").await.unwrap();
+    add_library(&db, b.id, "/shared").await.unwrap();
+    assert!(add_library(&db, a.id, "/shared").await.is_err());
+}
+
+#[tokio::test]
+async fn add_library_expands_home_prefix() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _home = HomeGuard::set("/tmp/waywallen-home");
+    let db = mem_db().await;
+    let p = upsert_plugin(&db, "p", "").await.unwrap();
+
+    let root = add_library(&db, p.id, "~").await.unwrap();
+    let pictures = add_library(&db, p.id, "~/Pictures").await.unwrap();
+
+    assert_eq!(root.path, "/tmp/waywallen-home");
+    assert_eq!(pictures.path, "/tmp/waywallen-home/Pictures");
+    assert!(find_library(&db, p.id, "~/Pictures")
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(expand_home_path("~other/Pictures"), "~other/Pictures");
+}
+
+#[tokio::test]
+async fn upsert_item_refreshes_every_column_on_conflict() {
+    let db = mem_db().await;
+    let p = upsert_plugin(&db, "p", "").await.unwrap();
+    let lib = add_library(&db, p.id, "/root").await.unwrap();
+    upsert_item(
+        &db,
+        ItemUpsertArgs {
+            plugin_id: p.id,
+            library_id: lib.id,
+            path: "a.png",
+            ty: "image",
+            display_name: "Old",
+            preview_path: None,
+            description: None,
+            external_id: None,
+            size: None,
+            width: None,
+            height: None,
+            content_rating: None,
+        },
+    )
+    .await
+    .unwrap();
+    let updated = upsert_item(
+        &db,
+        ItemUpsertArgs {
+            plugin_id: p.id,
+            library_id: lib.id,
+            path: "a.png",
+            ty: "GIF",
+            display_name: "New",
+            preview_path: Some("new/preview.png"),
+            description: Some("now animated"),
+            external_id: Some("ext-42"),
+            size: None,
+            width: None,
+            height: None,
+            content_rating: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated.ty, "gif");
+    assert_eq!(updated.display_name, "New");
+    assert_eq!(updated.preview_path.as_deref(), Some("new/preview.png"));
+    assert_eq!(updated.description.as_deref(), Some("now animated"));
+    assert_eq!(updated.external_id.as_deref(), Some("ext-42"));
+}
+
+#[tokio::test]
+async fn upsert_item_persists_media_meta() {
+    let db = mem_db().await;
+    let p = upsert_plugin(&db, "p", "").await.unwrap();
+    let lib = add_library(&db, p.id, "/root").await.unwrap();
+    let first = upsert_item(
+        &db,
+        ItemUpsertArgs {
+            plugin_id: p.id,
+            library_id: lib.id,
+            path: "video.mkv",
+            ty: "video",
+            display_name: "v",
+            preview_path: None,
+            description: None,
+            external_id: None,
+            size: Some(123_456),
+            width: Some(1920),
+            height: Some(1080),
+            content_rating: Some("Everyone"),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.size, Some(123_456));
+    assert_eq!(first.width, Some(1920));
+    assert_eq!(first.height, Some(1080));
+    assert_eq!(first.content_rating.as_deref(), Some("Everyone"));
+
+    // Re-upserting with None must preserve the prior probe-filled
+    // values — otherwise plugin re-scans clobber size/width/height
+    let second = upsert_item(
+        &db,
+        ItemUpsertArgs {
+            plugin_id: p.id,
+            library_id: lib.id,
+            path: "video.mkv",
+            ty: "video",
+            display_name: "v",
+            preview_path: None,
+            description: None,
+            external_id: None,
+            size: None,
+            width: None,
+            height: None,
+            content_rating: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(second.size, Some(123_456));
+    assert_eq!(second.width, Some(1920));
+    assert_eq!(second.height, Some(1080));
+    assert_eq!(second.content_rating.as_deref(), Some("Everyone"));
+}
+
+#[tokio::test]
+async fn upsert_tags_dedupes_case_insensitively() {
+    let db = mem_db().await;
+    let tags = upsert_tags(
+        &db,
+        &[
+            "Anime".into(),
+            "anime".into(),
+            "Landscape".into(),
+            "ANIME".into(),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(tags.len(), 2);
+    let all = list_tags(&db).await.unwrap();
+    let names: Vec<_> = all.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, ["Anime", "Landscape"]);
+}
+
+#[tokio::test]
+async fn upsert_tags_skips_whitespace_entries() {
+    let db = mem_db().await;
+    let tags = upsert_tags(&db, &["  ".into(), "".into(), " Anime ".into()])
+        .await
+        .unwrap();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0].name, "Anime");
+}
+
+#[tokio::test]
+async fn replace_item_tags_idempotent_and_atomic() {
+    let db = mem_db().await;
+    let p = upsert_plugin(&db, "p", "").await.unwrap();
+    let lib = add_library(&db, p.id, "/r").await.unwrap();
+    let item = upsert_item(&db, minimal_args(p.id, lib.id, "a.png", "image"))
+        .await
+        .unwrap();
+    let tags = upsert_tags(&db, &["Anime".into(), "Nature".into(), "Game".into()])
+        .await
+        .unwrap();
+    let ids: HashMap<&str, i64> = tags.iter().map(|t| (t.name.as_str(), t.id)).collect();
+
+    replace_item_tags(&db, item.id, &[ids["Anime"], ids["Nature"]])
+        .await
+        .unwrap();
+    assert_eq!(list_tags_of_item(&db, item.id).await.unwrap().len(), 2);
+
+    replace_item_tags(&db, item.id, &[ids["Game"]])
+        .await
+        .unwrap();
+    let after = list_tags_of_item(&db, item.id).await.unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].name, "Game");
+}
+
+#[tokio::test]
+async fn list_items_by_tag_crosses_libraries() {
+    let db = mem_db().await;
+    let p = upsert_plugin(&db, "p", "").await.unwrap();
+    let l1 = add_library(&db, p.id, "/one").await.unwrap();
+    let l2 = add_library(&db, p.id, "/two").await.unwrap();
+    let i1 = upsert_item(&db, minimal_args(p.id, l1.id, "a", "image"))
+        .await
+        .unwrap();
+    let i2 = upsert_item(&db, minimal_args(p.id, l2.id, "b", "image"))
+        .await
+        .unwrap();
+    let tags = upsert_tags(&db, &["Shared".into()]).await.unwrap();
+    replace_item_tags(&db, i1.id, &[tags[0].id]).await.unwrap();
+    replace_item_tags(&db, i2.id, &[tags[0].id]).await.unwrap();
+    assert_eq!(list_items_by_tag(&db, tags[0].id).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn item_delete_cascades_item_tag() {
+    let db = mem_db().await;
+    let p = upsert_plugin(&db, "p", "").await.unwrap();
+    let lib = add_library(&db, p.id, "/r").await.unwrap();
+    let item = upsert_item(&db, minimal_args(p.id, lib.id, "a", "image"))
+        .await
+        .unwrap();
+    let tags = upsert_tags(&db, &["Anime".into()]).await.unwrap();
+    replace_item_tags(&db, item.id, &[tags[0].id])
+        .await
+        .unwrap();
+
+    remove_library(&db, lib.id).await.unwrap();
+    assert!(list_items_by_tag(&db, tags[0].id).await.unwrap().is_empty());
+    assert_eq!(list_tags(&db).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn remove_plugin_cascades_everything_including_item_tag() {
+    let db = mem_db().await;
+    let p = upsert_plugin(&db, "doomed", "").await.unwrap();
+    let lib = add_library(&db, p.id, "/x").await.unwrap();
+    let it = upsert_item(&db, minimal_args(p.id, lib.id, "a", "image"))
+        .await
+        .unwrap();
+    let tags = upsert_tags(&db, &["T".into()]).await.unwrap();
+    replace_item_tags(&db, it.id, &[tags[0].id]).await.unwrap();
+
+    remove_plugin(&db, p.id).await.unwrap();
+    assert!(list_plugins(&db).await.unwrap().is_empty());
+    assert!(list_items_by_plugin(&db, p.id).await.unwrap().is_empty());
+    assert!(list_items_by_tag(&db, tags[0].id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn delete_items_synced_before_sweeps_only_scoped_and_stale() {
+    let db = mem_db().await;
+    let p = upsert_plugin(&db, "p", "").await.unwrap();
+    let l1 = add_library(&db, p.id, "/one").await.unwrap();
+    let l2 = add_library(&db, p.id, "/two").await.unwrap();
+    // Seed three items in l1 and one in l2 (all stamped "old").
+    for rel in ["a", "b", "c"] {
+        upsert_item(&db, minimal_args(p.id, l1.id, rel, "image"))
+            .await
+            .unwrap();
+    }
+    upsert_item(&db, minimal_args(p.id, l2.id, "z", "image"))
+        .await
+        .unwrap();
+    // Advance the clock, then re-see only l1/a — it gets a fresh
+    // sync_at; the cutoff sits between the two timestamps.
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let cutoff = crate::tasks::now_ms();
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    upsert_item(&db, minimal_args(p.id, l1.id, "a", "image"))
+        .await
+        .unwrap();
+    // Sweep l1 only: stale b/c go, fresh a stays; l2 untouched
+    // because it isn't in the scoped set.
+    let deleted = delete_items_synced_before(&db, &[l1.id], cutoff)
+        .await
+        .unwrap();
+    assert_eq!(deleted, 2);
+    assert_eq!(list_items_by_library(&db, l1.id).await.unwrap().len(), 1);
+    assert_eq!(list_items_by_library(&db, l2.id).await.unwrap().len(), 1);
+}
+
+async fn seed_queue_db() -> (DatabaseConnection, Vec<i64>) {
+    let db = mem_db().await;
+    let plug = upsert_plugin(&db, "p", "").await.unwrap();
+    let lib = add_library(&db, plug.id, "/lib").await.unwrap();
+    let mut ids = Vec::new();
+    for path in ["a.png", "b.png", "c.png"] {
+        let it = upsert_item(&db, minimal_args(plug.id, lib.id, path, "image"))
+            .await
+            .unwrap();
+        ids.push(it.id);
+    }
+    (db, ids)
+}
+
+#[tokio::test]
+async fn random_item_by_filter_skips_excluded_when_pool_has_others() {
+    let (db, ids) = seed_queue_db().await;
+    for _ in 0..16 {
+        let row = random_item_by_filter(&db, &[], &[], Some(ids[0]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(row.item_id, ids[0], "exclude_id must never come back");
+    }
+}
+
+#[tokio::test]
+async fn random_item_by_filter_returns_only_when_pool_is_singleton() {
+    let (db, ids) = seed_queue_db().await;
+    let plugin = find_plugin_by_name(&db, "p").await.unwrap().unwrap();
+    let library = find_library(&db, plugin.id, "/lib").await.unwrap().unwrap();
+    let mut args = minimal_args(plugin.id, library.id, "a.png", "image");
+    args.width = Some(640);
+    upsert_item(&db, args).await.unwrap();
+    let filter = crate::catalog::FilterRule {
+        group: 0,
+        predicate: crate::catalog::query::FilterPredicate::Width {
+            value: 640,
+            condition: crate::catalog::query::IntMatch::Equal,
+        },
+    };
+
+    let row = random_item_by_filter(&db, &[filter], &[], Some(ids[0]))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.item_id, ids[0]);
+}
+
+#[tokio::test]
+async fn list_item_ids_by_filter_returns_stable_order() {
+    let (db, ids) = seed_queue_db().await;
+    let listed = list_item_ids_by_filter(&db, &[], &[]).await.unwrap();
+    assert_eq!(listed, ids);
+}
+
+#[tokio::test]
+async fn count_items_by_filter_with_no_filter_counts_all() {
+    let (db, _) = seed_queue_db().await;
+    assert_eq!(count_items_by_filter(&db, &[], &[]).await.unwrap(), 3);
+}
+
+#[tokio::test]
+async fn user_property_override_distinguishes_empty_value_from_reset() {
+    let (db, ids) = seed_queue_db().await;
+
+    set_user_property_override(&db, ids[0], "text", Some(""))
+        .await
+        .unwrap();
+    let overrides = get_user_property_overrides(&db, ids[0]).await.unwrap();
+    assert_eq!(overrides.get("text").map(String::as_str), Some(""));
+
+    set_user_property_override(&db, ids[0], "text", None)
+        .await
+        .unwrap();
+    let overrides = get_user_property_overrides(&db, ids[0]).await.unwrap();
+    assert!(!overrides.contains_key("text"));
+}
+
+#[tokio::test]
+async fn find_item_by_library_path_round_trip() {
+    let (db, ids) = seed_queue_db().await;
+    let it = find_item_by_library_path(&db, "/lib", "b.png")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(it.id, ids[1]);
+    assert!(find_item_by_library_path(&db, "/lib", "missing.png")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn delete_libraries_missing_drops_absent_and_cascades_items() {
+    let db = mem_db().await;
+    let p = upsert_plugin(&db, "p", "").await.unwrap();
+    let keep_lib = add_library(&db, p.id, "/keep").await.unwrap();
+    let drop_lib = add_library(&db, p.id, "/drop").await.unwrap();
+    upsert_item(&db, minimal_args(p.id, drop_lib.id, "x", "image"))
+        .await
+        .unwrap();
+    let keep_set: HashSet<String> = ["/keep".to_owned()].into_iter().collect();
+    let deleted = delete_libraries_missing(&db, p.id, &keep_set)
+        .await
+        .unwrap();
+    assert_eq!(deleted, 1);
+    let remaining = list_libraries_by_plugin(&db, p.id).await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, keep_lib.id);
+    assert_eq!(list_items_by_plugin(&db, p.id).await.unwrap().len(), 0);
+}

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use waywallen::display::proto::{
+use waywallen::wallframe::display::proto::{
     codec, ConsumerCapabilities, DisplayMetrics, Event, PresentationCapabilities, Request,
     PROTOCOL_VERSION,
 };
@@ -261,7 +261,8 @@ fn run_session(sock_path: &Path, args: &Args) -> Result<()> {
                     ));
                 }
                 let release_fd = fds.swap_remove(1);
-                let device = waywallen::sync::drm_device().context("open DRM render node")?;
+                let device =
+                    waywallen::wallframe::sync::drm_device().context("open DRM render node")?;
                 let release = device
                     .fd_to_handle(&release_fd)
                     .context("import release syncobj")?;

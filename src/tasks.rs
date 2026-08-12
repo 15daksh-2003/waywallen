@@ -152,16 +152,8 @@ type BoxedResultFn = Box<dyn FnOnce() -> Result<()> + Send + 'static>;
 pub type ProgressSink = Arc<dyn Fn(TaskProgress) + Send + Sync + 'static>;
 
 enum TaskMsg {
-    Async {
-        id: TaskId,
-        name: String,
-        fut: BoxedResultFut,
-    },
-    Blocking {
-        id: TaskId,
-        name: String,
-        func: BoxedResultFn,
-    },
+    Async { id: TaskId, fut: BoxedResultFut },
+    Blocking { id: TaskId, func: BoxedResultFn },
 }
 
 pub struct TaskManager {
@@ -175,6 +167,7 @@ pub struct TaskManager {
     /// Optional dedup key to currently-running TaskId.
     /// `spawn_async_unique` cancels the prior task for the same key.
     unique_keys: Arc<RwLock<HashMap<String, TaskId>>>,
+    stopped: watch::Receiver<bool>,
 }
 
 impl TaskManager {
@@ -190,15 +183,24 @@ impl TaskManager {
             Arc::new(RwLock::new(HashMap::new()));
         let unique_keys: Arc<RwLock<HashMap<String, TaskId>>> =
             Arc::new(RwLock::new(HashMap::new()));
+        let (stopped_tx, stopped_rx) = watch::channel(false);
+        let supervisor_records = records.clone();
+        let supervisor_events = events_tx.clone();
+        let supervisor_cancel_tokens = cancel_tokens.clone();
+        let supervisor_unique_keys = unique_keys.clone();
 
-        tokio::spawn(supervisor(
-            rx,
-            shutdown_rx,
-            records.clone(),
-            events_tx.clone(),
-            cancel_tokens.clone(),
-            unique_keys.clone(),
-        ));
+        tokio::spawn(async move {
+            supervisor(
+                rx,
+                shutdown_rx,
+                supervisor_records,
+                supervisor_events,
+                supervisor_cancel_tokens,
+                supervisor_unique_keys,
+            )
+            .await;
+            let _ = stopped_tx.send(true);
+        });
 
         Arc::new(Self {
             tx,
@@ -207,6 +209,7 @@ impl TaskManager {
             events: events_tx,
             cancel_tokens,
             unique_keys,
+            stopped: stopped_rx,
         })
     }
 
@@ -232,7 +235,6 @@ impl TaskManager {
         };
         if let Err(e) = self.tx.send(TaskMsg::Async {
             id,
-            name: name.clone(),
             fut: Box::pin(wrapped),
         }) {
             log::warn!("task '{name}' (id {id}) dropped: supervisor is gone ({e})");
@@ -319,7 +321,6 @@ impl TaskManager {
         };
         if let Err(e) = self.tx.send(TaskMsg::Async {
             id,
-            name: name.clone(),
             fut: Box::pin(wrapped),
         }) {
             log::warn!("task '{name}' (id {id}) dropped: supervisor is gone ({e})");
@@ -366,7 +367,6 @@ impl TaskManager {
         self.record_started(id, kind, name.clone());
         if let Err(e) = self.tx.send(TaskMsg::Blocking {
             id,
-            name: name.clone(),
             func: Box::new(func),
         }) {
             log::warn!("task '{name}' (id {id}) dropped: supervisor is gone ({e})");
@@ -385,6 +385,14 @@ impl TaskManager {
     /// events and should re-snapshot via [`list`](Self::list) on start.
     pub fn subscribe(&self) -> broadcast::Receiver<TaskEvent> {
         self.events.subscribe()
+    }
+
+    pub async fn wait_stopped(&self) {
+        let mut stopped = self.stopped.clone();
+        if *stopped.borrow() {
+            return;
+        }
+        let _ = stopped.wait_for(|value| *value).await;
     }
 
     fn running_unique_task_id(&self, key: &str) -> Option<TaskId> {
@@ -488,10 +496,10 @@ async fn supervisor(
             }
 
             msg = rx.recv() => match msg {
-                Some(TaskMsg::Async { id, name: _, fut }) => {
+                Some(TaskMsg::Async { id, fut }) => {
                     set.spawn(async move { (id, fut.await) });
                 }
-                Some(TaskMsg::Blocking { id, name: _, func }) => {
+                Some(TaskMsg::Blocking { id, func }) => {
                     set.spawn_blocking(move || (id, func()));
                 }
                 None => break,
@@ -503,13 +511,22 @@ async fn supervisor(
         }
     }
 
+    rx.close();
+    while let Ok(msg) = rx.try_recv() {
+        let id = match msg {
+            TaskMsg::Async { id, .. } | TaskMsg::Blocking { id, .. } => id,
+        };
+        mark_cancelled(id, &records, &events, &cancel_tokens, &unique_keys);
+    }
+    cancel_non_service(&records, &events, &cancel_tokens);
+
     log::info!(
         "TaskManager supervisor draining ({} tasks in flight)",
         set.len()
     );
-    set.abort_all();
     let deadline = tokio::time::sleep(SHUTDOWN_DEADLINE);
     tokio::pin!(deadline);
+    let mut timed_out = false;
     loop {
         tokio::select! {
             biased;
@@ -519,6 +536,7 @@ async fn supervisor(
                     set.len(),
                     SHUTDOWN_DEADLINE
                 );
+                timed_out = true;
                 break;
             }
             opt = set.join_next() => match opt {
@@ -527,7 +545,83 @@ async fn supervisor(
             },
         }
     }
+    if timed_out {
+        set.abort_all();
+        while let Some(joined) = set.join_next().await {
+            handle_join(joined, &records, &events, &cancel_tokens, &unique_keys);
+        }
+    }
+    cancel_all_running(&records, &events, &cancel_tokens, &unique_keys);
     log::info!("TaskManager supervisor exited");
+}
+
+fn cancel_non_service(
+    records: &Arc<RwLock<HashMap<TaskId, TaskRecord>>>,
+    events: &broadcast::Sender<TaskEvent>,
+    cancel_tokens: &Arc<RwLock<HashMap<TaskId, CancellationToken>>>,
+) {
+    let ids: Vec<TaskId> = records
+        .read()
+        .unwrap()
+        .iter()
+        .filter_map(|(id, record)| {
+            (matches!(record.state, TaskState::Running) && record.kind != TaskKind::Service)
+                .then_some(*id)
+        })
+        .collect();
+    for id in ids {
+        if let Some(token) = cancel_tokens.read().unwrap().get(&id).cloned() {
+            token.cancel();
+        }
+        set_cancelled(id, records, events);
+    }
+}
+
+fn cancel_all_running(
+    records: &Arc<RwLock<HashMap<TaskId, TaskRecord>>>,
+    events: &broadcast::Sender<TaskEvent>,
+    cancel_tokens: &Arc<RwLock<HashMap<TaskId, CancellationToken>>>,
+    unique_keys: &Arc<RwLock<HashMap<String, TaskId>>>,
+) {
+    let ids: Vec<TaskId> = records
+        .read()
+        .unwrap()
+        .iter()
+        .filter_map(|(id, record)| matches!(record.state, TaskState::Running).then_some(*id))
+        .collect();
+    for id in ids {
+        mark_cancelled(id, records, events, cancel_tokens, unique_keys);
+    }
+}
+
+fn mark_cancelled(
+    id: TaskId,
+    records: &Arc<RwLock<HashMap<TaskId, TaskRecord>>>,
+    events: &broadcast::Sender<TaskEvent>,
+    cancel_tokens: &Arc<RwLock<HashMap<TaskId, CancellationToken>>>,
+    unique_keys: &Arc<RwLock<HashMap<String, TaskId>>>,
+) {
+    cancel_tokens.write().unwrap().remove(&id);
+    unique_keys.write().unwrap().retain(|_, value| *value != id);
+    set_cancelled(id, records, events);
+}
+
+fn set_cancelled(
+    id: TaskId,
+    records: &Arc<RwLock<HashMap<TaskId, TaskRecord>>>,
+    events: &broadcast::Sender<TaskEvent>,
+) {
+    let changed = records.write().unwrap().get_mut(&id).is_some_and(|record| {
+        if matches!(record.state, TaskState::Running) {
+            record.state = TaskState::Cancelled;
+            true
+        } else {
+            false
+        }
+    });
+    if changed {
+        let _ = events.send(TaskEvent::Cancelled(id));
+    }
 }
 
 fn handle_join(
@@ -670,8 +764,30 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(20)).await;
         let _ = tx.send(true);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::timeout(Duration::from_secs(1), tm.wait_stopped())
+            .await
+            .expect("supervisor did not stop");
         assert_eq!(finished.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_service_cleanup() {
+        let (tx, mut rx) = watch::channel(false);
+        let tm = TaskManager::spawn(rx.clone());
+        let cleaned = Arc::new(AtomicU32::new(0));
+        let task_cleaned = cleaned.clone();
+        tm.spawn_async(TaskKind::Service, "unit/service", async move {
+            let _ = rx.wait_for(|value| *value).await;
+            task_cleaned.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let _ = tx.send(true);
+        tokio::time::timeout(Duration::from_secs(1), tm.wait_stopped())
+            .await
+            .expect("supervisor did not wait for service cleanup");
+        assert_eq!(cleaned.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

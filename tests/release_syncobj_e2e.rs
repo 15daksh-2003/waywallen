@@ -6,12 +6,12 @@ use std::time::Duration;
 
 mod common;
 
-use waywallen::ipc::generated::{
+use waywallen::wallframe::ipc::generated::{
     BufferDirective, BufferFormat, BufferMemorySource, BufferPath, Event as EventMsg,
     EventIn as ControlMsg, RendererInit, PROTOCOL_VERSION,
 };
-use waywallen::ipc::uds::{recv_event, send_control};
-use waywallen::sync::DrmDevice;
+use waywallen::wallframe::ipc::uds::{recv_event, send_control};
+use waywallen::wallframe::sync::DrmDevice;
 
 fn renderer_bin() -> Option<PathBuf> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -85,7 +85,7 @@ fn release_syncobj_round_trip() {
         &ControlMsg::Init {
             config: RendererInit {
                 protocol_version: PROTOCOL_VERSION,
-                spawn_version: waywallen::renderer_manager::SPAWN_VERSION,
+                spawn_version: waywallen::wallframe::renderer_manager::SPAWN_VERSION,
                 settings: Vec::new(),
                 user_properties: String::new(),
             },
@@ -113,7 +113,7 @@ fn release_syncobj_round_trip() {
                 saw_ready = true;
             }
             EventMsg::FormatCaps { capabilities } => {
-                use waywallen::dma::negotiate as N;
+                use waywallen::wallframe::dma::negotiate as N;
                 let caps = N::unflatten_caps(
                     &capabilities.fourccs,
                     &capabilities.mod_counts,
@@ -121,7 +121,7 @@ fn release_syncobj_round_trip() {
                     &capabilities.plane_counts,
                     &capabilities.device_uuid,
                     &capabilities.driver_uuid,
-                    waywallen::renderer_manager::DrmNode {
+                    waywallen::wallframe::renderer_manager::DrmNode {
                         major: capabilities.drm_node.major,
                         minor: capabilities.drm_node.minor,
                     },

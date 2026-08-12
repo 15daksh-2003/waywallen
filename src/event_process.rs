@@ -3,17 +3,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::events::GlobalEvent;
-use crate::routing;
-use crate::scheduler;
 use crate::tasks;
-use crate::AppState;
+use crate::wallframe::routing;
+use crate::wallframe::scheduler;
+use crate::DaemonContext;
 
 const DISPLAY_CONNECTION_NOTIFICATION_ID: &str =
     "org.waywallen.waywallen.display-connection-failed";
 
 /// Spawn the dispatcher. `restore_last` mirrors `cli.restore_last` —
 /// when false the wallpaper-recall watcher is never started even
-pub fn spawn(state: Arc<AppState>, restore_last: bool) {
+pub fn spawn(state: Arc<DaemonContext>, restore_last: bool) {
     // Subscribe before submitting the task so publishers cannot win the
     // scheduler race and lose a transient event during startup.
     let mut bus = state.events.subscribe();
@@ -23,6 +23,7 @@ pub fn spawn(state: Arc<AppState>, restore_last: bool) {
         "service/event-process",
         async move {
             let mut recall_started = !restore_last;
+            let mut shutdown = state.shutdown_subscribe();
 
             if !recall_started && state.events.is_sources_ready() {
                 spawn_wallpaper_recall(state.clone());
@@ -30,38 +31,43 @@ pub fn spawn(state: Arc<AppState>, restore_last: bool) {
             }
 
             loop {
-                match bus.recv().await {
-                    Ok(GlobalEvent::SourcesReady) => {
-                        if !recall_started {
-                            spawn_wallpaper_recall(state.clone());
-                            recall_started = true;
+                tokio::select! {
+                    event = bus.recv() => match event {
+                        Ok(GlobalEvent::SourcesReady) => {
+                            if !recall_started {
+                                spawn_wallpaper_recall(state.clone());
+                                recall_started = true;
+                            }
                         }
-                    }
-                    Ok(GlobalEvent::DisplayConnectionFailed {
-                        client_name,
-                        reason,
-                        ..
-                    }) => {
-                        let body = display_connection_notification_body(&client_name, &reason);
-                        if let Err(e) = crate::notifications::notify(
-                            DISPLAY_CONNECTION_NOTIFICATION_ID,
-                            "Display connection failed",
-                            &body,
-                        )
-                        .await
-                        {
-                            log::warn!("display connection notification failed: {e}");
+                        Ok(GlobalEvent::DisplayConnectionFailed {
+                            client_name,
+                            reason,
+                            ..
+                        }) => {
+                            let body = display_connection_notification_body(&client_name, &reason);
+                            if let Err(e) = crate::system::notifications::notify(
+                                DISPLAY_CONNECTION_NOTIFICATION_ID,
+                                "Display connection failed",
+                                &body,
+                            )
+                            .await
+                            {
+                                log::warn!("display connection notification failed: {e}");
+                            }
                         }
-                    }
-                    Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        if !recall_started && state.events.is_sources_ready() {
-                            spawn_wallpaper_recall(state.clone());
-                            recall_started = true;
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            if !recall_started && state.events.is_sources_ready() {
+                                spawn_wallpaper_recall(state.clone());
+                                recall_started = true;
+                            }
                         }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        return Ok(());
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+                    },
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -79,7 +85,7 @@ fn display_connection_notification_body(client_name: &str, reason: &str) -> Stri
 
 /// Long-lived watcher: re-apply each display's persisted wallpaper as
 /// it becomes visible. Spawned by the dispatcher when `SourcesReady`
-fn spawn_wallpaper_recall(state: Arc<AppState>) {
+fn spawn_wallpaper_recall(state: Arc<DaemonContext>) {
     let tasks_h = state.tasks.clone();
     tasks_h.spawn_async(
         tasks::TaskKind::Service,
@@ -97,6 +103,7 @@ fn spawn_wallpaper_recall(state: Arc<AppState>) {
             let mut pending: HashMap<String, (tokio::time::Instant, Vec<scheduler::DisplayId>)> =
                 HashMap::new();
             let mut events_rx = state.router.subscribe_events();
+            let mut shutdown = state.shutdown_subscribe();
 
             // Initial sweep of already-registered displays.
             for snap in state.router.snapshot_displays().await {
@@ -142,26 +149,32 @@ fn spawn_wallpaper_recall(state: Arc<AppState>) {
                         for wp_id in due {
                             if let Some((_, ids)) = pending.remove(&wp_id) {
                                 let state2 = state.clone();
-                                tokio::spawn(async move {
-                                    log::info!(
-                                        "wallpaper recall: applying {wp_id} to {} display(s)",
-                                        ids.len()
-                                    );
-                                    if let Err(e) =
-                                        crate::control::apply_wallpaper_to_displays_with_first_frame_timeout(
+                                let task_name = format!("wallpaper/recall/{wp_id}");
+                                state.tasks.spawn_async(
+                                    tasks::TaskKind::Apply,
+                                    task_name,
+                                    async move {
+                                        log::info!(
+                                            "wallpaper recall: applying {wp_id} to {} display(s)",
+                                            ids.len()
+                                        );
+                                        crate::application::apply_wallpaper_to_displays_with_first_frame_timeout(
                                             &state2,
                                             &wp_id,
                                             &ids,
-                                            crate::control::APPLY_FIRST_FRAME_TIMEOUT,
+                                            crate::application::APPLY_FIRST_FRAME_TIMEOUT,
                                         )
                                         .await
-                                    {
-                                        log::warn!(
-                                            "wallpaper recall failed for {wp_id}: {e:#}"
-                                        );
-                                    }
-                                });
+                                        .map(|_| ())
+                                        .map_err(anyhow::Error::from)
+                                    },
+                                );
                             }
+                        }
+                    }
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            return Ok(());
                         }
                     }
                 }
@@ -171,7 +184,7 @@ fn spawn_wallpaper_recall(state: Arc<AppState>) {
 }
 
 fn record(
-    state: &Arc<AppState>,
+    state: &Arc<DaemonContext>,
     pending: &mut HashMap<String, (tokio::time::Instant, Vec<scheduler::DisplayId>)>,
     snap: routing::DisplaySnapshot,
     settle: Duration,

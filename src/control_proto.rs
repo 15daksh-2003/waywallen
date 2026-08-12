@@ -29,7 +29,7 @@ fn setting_type_to_proto(ty: SettingType) -> i32 {
 /// Convert a source plugin's Lua-declared `SourceSetting` into the same
 /// `SettingSchema` wire shape, so `SourcePluginInfo.settings` renders through
 /// the identical UI as renderer settings.
-pub fn source_setting_to_proto(s: &crate::plugin::source_manager::SourceSetting) -> SettingSchema {
+pub fn source_setting_to_proto(s: &crate::plugin::source::SourceSetting) -> SettingSchema {
     let ty = match s.ty.as_str() {
         "u32" => SettingValueType::U32,
         "i32" => SettingValueType::I32,
@@ -53,8 +53,8 @@ pub fn source_setting_to_proto(s: &crate::plugin::source_manager::SourceSetting)
     }
 }
 
-pub fn source_action_to_proto(a: &crate::plugin::source_manager::SourceAction) -> PluginActionDef {
-    use crate::plugin::source_manager::SourceActionKind;
+pub fn source_action_to_proto(a: &crate::plugin::source::SourceAction) -> PluginActionDef {
+    use crate::plugin::source::SourceActionKind;
     PluginActionDef {
         id: a.id.clone(),
         label: a.label.clone(),
@@ -86,7 +86,7 @@ pub fn source_action_to_proto(a: &crate::plugin::source_manager::SourceAction) -
     }
 }
 
-pub fn source_status_to_proto(s: &crate::plugin::source_manager::SourceStatus) -> PluginStatusRow {
+pub fn source_status_to_proto(s: &crate::plugin::source::SourceStatus) -> PluginStatusRow {
     PluginStatusRow {
         id: s.id.clone(),
         label: s.label.clone(),

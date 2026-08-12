@@ -5,7 +5,9 @@ use sea_orm::{
     Condition,
 };
 
-use crate::control_proto as pb;
+use crate::catalog::query::{
+    FilterLogic, FilterPredicate, FilterRule, IntMatch, LogicOperator, StringMatch,
+};
 
 use super::entities::{item, library};
 
@@ -13,7 +15,7 @@ pub fn build_grouped_condition<'a, F, GFn, CFn>(
     filters: impl IntoIterator<Item = &'a F>,
     group_of: GFn,
     to_condition: CFn,
-    logics: &[pb::FilterLogic],
+    logics: &[FilterLogic],
 ) -> Option<Condition>
 where
     F: 'a,
@@ -49,9 +51,9 @@ where
             (Some(a), Some(b)) => (a, b),
             _ => continue,
         };
-        let combined = match pb::LogicOp::try_from(logic.op).unwrap_or(pb::LogicOp::And) {
-            pb::LogicOp::Or => Condition::any().add(a).add(b),
-            _ => Condition::all().add(a).add(b),
+        let combined = match logic.operator {
+            LogicOperator::Or => Condition::any().add(a).add(b),
+            LogicOperator::And => Condition::all().add(a).add(b),
         };
         pair_conds.push(combined);
         referenced.insert(logic.group_a);
@@ -73,8 +75,8 @@ where
 }
 
 pub fn wallpaper_filters_to_condition(
-    filters: &[pb::WallpaperFilterRule],
-    logics: &[pb::FilterLogic],
+    filters: &[FilterRule],
+    logics: &[FilterLogic],
 ) -> Option<Condition> {
     build_grouped_condition(
         filters,
@@ -85,8 +87,8 @@ pub fn wallpaper_filters_to_condition(
 }
 
 pub fn wallpaper_query_to_condition(
-    filters: &[pb::WallpaperFilterRule],
-    logics: &[pb::FilterLogic],
+    filters: &[FilterRule],
+    logics: &[FilterLogic],
     search_text: &str,
 ) -> Option<Condition> {
     match (
@@ -113,111 +115,53 @@ fn wallpaper_search_to_condition(search_text: &str) -> Option<Condition> {
     Some(Condition::any().add(text).add(external_id))
 }
 
-pub fn wallpaper_filter_to_condition(filter: &pb::WallpaperFilterRule) -> Option<Condition> {
-    use pb::wallpaper_filter_rule::Payload;
-
-    match pb::WallpaperFilterType::try_from(filter.r#type).ok()? {
-        pb::WallpaperFilterType::Name => match filter.payload.as_ref() {
-            Some(Payload::StringFilter(f)) => name_condition_to_condition(f),
-            _ => None,
-        },
-        pb::WallpaperFilterType::WpType => match filter.payload.as_ref() {
-            Some(Payload::StringFilter(f)) => string_condition_to_condition(
-                || Expr::col((item::Entity, item::Column::Ty)),
-                pb::StringCondition::try_from(f.condition)
-                    .unwrap_or(pb::StringCondition::Unspecified),
-                &f.value.to_ascii_lowercase(),
-                false,
-            ),
-            _ => None,
-        },
-        pb::WallpaperFilterType::Library => match filter.payload.as_ref() {
-            Some(Payload::StringFilter(f)) => string_condition_to_condition(
-                || Expr::col((library::Entity, library::Column::Path)),
-                pb::StringCondition::try_from(f.condition)
-                    .unwrap_or(pb::StringCondition::Unspecified),
-                &f.value,
-                false,
-            ),
-            _ => None,
-        },
-        pb::WallpaperFilterType::Width => match filter.payload.as_ref() {
-            Some(Payload::IntFilter(f)) => int_condition_to_condition(
-                || Expr::col((item::Entity, item::Column::Width)),
-                pb::IntCondition::try_from(f.condition).unwrap_or(pb::IntCondition::Unspecified),
-                f.value,
-            ),
-            _ => None,
-        },
-        pb::WallpaperFilterType::Height => match filter.payload.as_ref() {
-            Some(Payload::IntFilter(f)) => int_condition_to_condition(
-                || Expr::col((item::Entity, item::Column::Height)),
-                pb::IntCondition::try_from(f.condition).unwrap_or(pb::IntCondition::Unspecified),
-                f.value,
-            ),
-            _ => None,
-        },
-        pb::WallpaperFilterType::Size => match filter.payload.as_ref() {
-            Some(Payload::IntFilter(f)) => int_condition_to_condition(
-                || Expr::col((item::Entity, item::Column::Size)),
-                pb::IntCondition::try_from(f.condition).unwrap_or(pb::IntCondition::Unspecified),
-                f.value,
-            ),
-            _ => None,
-        },
-        pb::WallpaperFilterType::ContentRating => match filter.payload.as_ref() {
-            Some(Payload::StringFilter(f)) => string_condition_to_condition(
-                || Expr::col((item::Entity, item::Column::ContentRating)),
-                pb::StringCondition::try_from(f.condition)
-                    .unwrap_or(pb::StringCondition::Unspecified),
-                &f.value,
-                true,
-            ),
-            _ => None,
-        },
-        pb::WallpaperFilterType::Tag => match filter.payload.as_ref() {
-            Some(Payload::TagFilter(f)) => tag_list_condition_to_condition(
-                &f.values,
-                pb::StringCondition::try_from(f.condition)
-                    .unwrap_or(pb::StringCondition::Unspecified),
-            ),
-            // Back-compat: older rules carried a single tag in string_filter.
-            Some(Payload::StringFilter(f)) => tag_condition_to_condition(
-                &f.value,
-                pb::StringCondition::try_from(f.condition)
-                    .unwrap_or(pb::StringCondition::Unspecified),
-            ),
-            _ => None,
-        },
-        pb::WallpaperFilterType::Unspecified => None,
-    }
-}
-
-/// Tag membership predicate. SQLite COLLATE NOCASE handles case
-/// insensitivity for tag names. CONTAINS / CONTAINS_NOT are nonsensical
-fn tag_condition_to_condition(tag: &str, cond: pb::StringCondition) -> Option<Condition> {
-    let tag_quoted = sqlite_quote(tag);
-    let exists = format!(
-        "EXISTS (SELECT 1 FROM item_tag JOIN tag ON tag.id = item_tag.tag_id \
-         WHERE item_tag.item_id = item.id AND tag.name = {tag_quoted} COLLATE NOCASE)"
-    );
-    match cond {
-        pb::StringCondition::Is | pb::StringCondition::Contains => {
-            Some(Condition::all().add(Expr::cust(exists)))
+pub fn wallpaper_filter_to_condition(filter: &FilterRule) -> Option<Condition> {
+    match &filter.predicate {
+        FilterPredicate::Name { value, condition } => {
+            name_condition_to_condition(value, *condition)
         }
-        pb::StringCondition::IsNot | pb::StringCondition::ContainsNot => {
-            Some(Condition::all().add(Expr::cust(format!("NOT {exists}"))))
+        FilterPredicate::WallpaperType { value, condition } => string_condition_to_condition(
+            || Expr::col((item::Entity, item::Column::Ty)),
+            *condition,
+            &value.to_ascii_lowercase(),
+            false,
+        ),
+        FilterPredicate::Library { value, condition } => string_condition_to_condition(
+            || Expr::col((library::Entity, library::Column::Path)),
+            *condition,
+            value,
+            false,
+        ),
+        FilterPredicate::Width { value, condition } => int_condition_to_condition(
+            || Expr::col((item::Entity, item::Column::Width)),
+            *condition,
+            *value,
+        ),
+        FilterPredicate::Height { value, condition } => int_condition_to_condition(
+            || Expr::col((item::Entity, item::Column::Height)),
+            *condition,
+            *value,
+        ),
+        FilterPredicate::Size { value, condition } => int_condition_to_condition(
+            || Expr::col((item::Entity, item::Column::Size)),
+            *condition,
+            *value,
+        ),
+        FilterPredicate::ContentRating { value, condition } => string_condition_to_condition(
+            || Expr::col((item::Entity, item::Column::ContentRating)),
+            *condition,
+            value,
+            true,
+        ),
+        FilterPredicate::Tags { values, condition } => {
+            tag_list_condition_to_condition(values, *condition)
         }
-        pb::StringCondition::Unspecified => None,
     }
 }
 
 /// Tag-set membership. IS → has any of `values`; IS_NOT → has none of
 /// them. Empty list imposes no constraint.
-fn tag_list_condition_to_condition(
-    values: &[String],
-    cond: pb::StringCondition,
-) -> Option<Condition> {
+fn tag_list_condition_to_condition(values: &[String], cond: StringMatch) -> Option<Condition> {
     let names: Vec<&String> = values.iter().filter(|v| !v.is_empty()).collect();
     if names.is_empty() {
         return None;
@@ -230,33 +174,30 @@ fn tag_list_condition_to_condition(
         )
     };
     match cond {
-        pb::StringCondition::Is | pb::StringCondition::Contains => {
+        StringMatch::Is | StringMatch::Contains => {
             let mut any = Condition::any();
             for tag in names {
                 any = any.add(Expr::cust(exists(tag)));
             }
             Some(any)
         }
-        pb::StringCondition::IsNot | pb::StringCondition::ContainsNot => {
+        StringMatch::IsNot | StringMatch::ContainsNot => {
             let mut all = Condition::all();
             for tag in names {
                 all = all.add(Expr::cust(format!("NOT {}", exists(tag))));
             }
             Some(all)
         }
-        pb::StringCondition::Unspecified => None,
     }
 }
 
-fn name_condition_to_condition(filter: &pb::WallpaperStringFilter) -> Option<Condition> {
-    let cond =
-        pb::StringCondition::try_from(filter.condition).unwrap_or(pb::StringCondition::Unspecified);
+fn name_condition_to_condition(value: &str, cond: StringMatch) -> Option<Condition> {
     match cond {
-        pb::StringCondition::Contains => text_contains_condition(&filter.value),
-        pb::StringCondition::ContainsNot => {
-            let fts_query = build_fts_match_query(&filter.value)?;
+        StringMatch::Contains => text_contains_condition(value),
+        StringMatch::ContainsNot => {
+            let fts_query = build_fts_match_query(value)?;
             let quoted = sqlite_quote(&fts_query);
-            let esc = filter.value.replace('\'', "''");
+            let esc = value.replace('\'', "''");
             let tag_exists = format!(
                 "EXISTS (SELECT 1 FROM item_tag JOIN tag ON tag.id = item_tag.tag_id \
                  WHERE item_tag.item_id = item.id AND tag.name LIKE '%{esc}%' COLLATE NOCASE)"
@@ -273,7 +214,7 @@ fn name_condition_to_condition(filter: &pb::WallpaperStringFilter) -> Option<Con
         _ => string_condition_to_condition(
             || Expr::col((item::Entity, item::Column::DisplayName)),
             cond,
-            &filter.value,
+            value,
             false,
         ),
     }
@@ -328,7 +269,7 @@ fn sqlite_quote(input: &str) -> String {
 
 fn string_condition_to_condition<E>(
     col: E,
-    cond: pb::StringCondition,
+    cond: StringMatch,
     value: &str,
     null_matches_negative: bool,
 ) -> Option<Condition>
@@ -336,10 +277,8 @@ where
     E: Fn() -> sea_orm::sea_query::Expr,
 {
     match cond {
-        pb::StringCondition::Contains => {
-            Some(Condition::all().add(col().like(format!("%{value}%"))))
-        }
-        pb::StringCondition::ContainsNot => {
+        StringMatch::Contains => Some(Condition::all().add(col().like(format!("%{value}%")))),
+        StringMatch::ContainsNot => {
             let not_like = col().not_like(format!("%{value}%"));
             if null_matches_negative {
                 Some(Condition::any().add(col().is_null()).add(not_like))
@@ -347,8 +286,8 @@ where
                 Some(Condition::all().add(not_like))
             }
         }
-        pb::StringCondition::Is => Some(Condition::all().add(col().eq(value))),
-        pb::StringCondition::IsNot => {
+        StringMatch::Is => Some(Condition::all().add(col().eq(value))),
+        StringMatch::IsNot => {
             let ne = col().ne(value);
             if null_matches_negative {
                 Some(Condition::any().add(col().is_null()).add(ne))
@@ -356,22 +295,20 @@ where
                 Some(Condition::all().add(ne))
             }
         }
-        pb::StringCondition::Unspecified => None,
     }
 }
 
-fn int_condition_to_condition<E>(col: E, cond: pb::IntCondition, value: i64) -> Option<Condition>
+fn int_condition_to_condition<E>(col: E, cond: IntMatch, value: i64) -> Option<Condition>
 where
     E: Fn() -> sea_orm::sea_query::Expr,
 {
     let expr = match cond {
-        pb::IntCondition::Equal => col().eq(value),
-        pb::IntCondition::EqualNot => col().ne(value),
-        pb::IntCondition::Less => col().lt(value),
-        pb::IntCondition::LessEqual => col().lte(value),
-        pb::IntCondition::Greater => col().gt(value),
-        pb::IntCondition::GreaterEqual => col().gte(value),
-        pb::IntCondition::Unspecified => return None,
+        IntMatch::Equal => col().eq(value),
+        IntMatch::NotEqual => col().ne(value),
+        IntMatch::Less => col().lt(value),
+        IntMatch::LessEqual => col().lte(value),
+        IntMatch::Greater => col().gt(value),
+        IntMatch::GreaterEqual => col().gte(value),
     };
     Some(Condition::all().add(expr))
 }
@@ -456,15 +393,12 @@ mod tests {
     #[tokio::test]
     async fn content_rating_exclusion_keeps_unrated_items() {
         let db = seed().await;
-        let filter = pb::WallpaperFilterRule {
-            r#type: pb::WallpaperFilterType::ContentRating as i32,
+        let filter = FilterRule {
             group: 0,
-            payload: Some(pb::wallpaper_filter_rule::Payload::StringFilter(
-                pb::WallpaperStringFilter {
-                    value: "Mature".into(),
-                    condition: pb::StringCondition::IsNot as i32,
-                },
-            )),
+            predicate: FilterPredicate::ContentRating {
+                value: "Mature".into(),
+                condition: StringMatch::IsNot,
+            },
         };
 
         let condition = wallpaper_filters_to_condition(&[filter], &[]).unwrap();
@@ -485,29 +419,21 @@ mod tests {
     async fn wallpaper_filters_to_condition_matches_grouped_rules() {
         let db = seed().await;
 
-        let mut name = pb::WallpaperFilterRule {
-            r#type: pb::WallpaperFilterType::Name as i32,
+        let name = FilterRule {
             group: 0,
-            payload: None,
-        };
-        name.payload = Some(pb::wallpaper_filter_rule::Payload::StringFilter(
-            pb::WallpaperStringFilter {
+            predicate: FilterPredicate::Name {
                 value: "City".into(),
-                condition: pb::StringCondition::Contains as i32,
+                condition: StringMatch::Contains,
             },
-        ));
-
-        let mut width = pb::WallpaperFilterRule {
-            r#type: pb::WallpaperFilterType::Width as i32,
-            group: 0,
-            payload: None,
         };
-        width.payload = Some(pb::wallpaper_filter_rule::Payload::IntFilter(
-            pb::WallpaperIntFilter {
+
+        let width = FilterRule {
+            group: 0,
+            predicate: FilterPredicate::Width {
                 value: 1000,
-                condition: pb::IntCondition::GreaterEqual as i32,
+                condition: IntMatch::GreaterEqual,
             },
-        ));
+        };
 
         let condition = wallpaper_filters_to_condition(&[name, width], &[]).unwrap();
         let rows = item::Entity::find()
@@ -525,32 +451,24 @@ mod tests {
     async fn wallpaper_filters_to_condition_honors_group_or_logic() {
         let db = seed().await;
 
-        let mut ty = pb::WallpaperFilterRule {
-            r#type: pb::WallpaperFilterType::WpType as i32,
+        let ty = FilterRule {
             group: 0,
-            payload: None,
-        };
-        ty.payload = Some(pb::wallpaper_filter_rule::Payload::StringFilter(
-            pb::WallpaperStringFilter {
+            predicate: FilterPredicate::WallpaperType {
                 value: "video".into(),
-                condition: pb::StringCondition::Is as i32,
+                condition: StringMatch::Is,
             },
-        ));
-
-        let mut wide = pb::WallpaperFilterRule {
-            r#type: pb::WallpaperFilterType::Width as i32,
-            group: 1,
-            payload: None,
         };
-        wide.payload = Some(pb::wallpaper_filter_rule::Payload::IntFilter(
-            pb::WallpaperIntFilter {
-                value: 1500,
-                condition: pb::IntCondition::GreaterEqual as i32,
-            },
-        ));
 
-        let logic = pb::FilterLogic {
-            op: pb::LogicOp::Or as i32,
+        let wide = FilterRule {
+            group: 1,
+            predicate: FilterPredicate::Width {
+                value: 1500,
+                condition: IntMatch::GreaterEqual,
+            },
+        };
+
+        let logic = FilterLogic {
+            operator: LogicOperator::Or,
             group_a: 0,
             group_b: 1,
         };
@@ -570,17 +488,13 @@ mod tests {
     async fn wallpaper_name_contains_matches_description_via_fts() {
         let db = seed().await;
 
-        let mut name = pb::WallpaperFilterRule {
-            r#type: pb::WallpaperFilterType::Name as i32,
+        let name = FilterRule {
             group: 0,
-            payload: None,
-        };
-        name.payload = Some(pb::wallpaper_filter_rule::Payload::StringFilter(
-            pb::WallpaperStringFilter {
+            predicate: FilterPredicate::Name {
                 value: "skyline".into(),
-                condition: pb::StringCondition::Contains as i32,
+                condition: StringMatch::Contains,
             },
-        ));
+        };
 
         let condition = wallpaper_filters_to_condition(&[name], &[]).unwrap();
         let rows = item::Entity::find()
@@ -613,15 +527,12 @@ mod tests {
     #[tokio::test]
     async fn wallpaper_search_ands_with_structured_filters() {
         let db = seed().await;
-        let video = pb::WallpaperFilterRule {
-            r#type: pb::WallpaperFilterType::WpType as i32,
+        let video = FilterRule {
             group: 0,
-            payload: Some(pb::wallpaper_filter_rule::Payload::StringFilter(
-                pb::WallpaperStringFilter {
-                    value: "video".into(),
-                    condition: pb::StringCondition::Is as i32,
-                },
-            )),
+            predicate: FilterPredicate::WallpaperType {
+                value: "video".into(),
+                condition: StringMatch::Is,
+            },
         };
 
         let condition = wallpaper_query_to_condition(&[video], &[], "B_C%4").unwrap();

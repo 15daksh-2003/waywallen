@@ -11,8 +11,8 @@ mod handshake_cpp {
     use std::os::unix::net::UnixListener;
     use std::process::{Command, Stdio};
     use std::time::Duration;
-    use waywallen::ipc::proto::EventMsg;
-    use waywallen::ipc::uds::recv_event;
+    use waywallen::wallframe::ipc::proto::EventMsg;
+    use waywallen::wallframe::ipc::uds::recv_event;
 
     #[test]
     fn hello_handshake() {
@@ -201,8 +201,8 @@ mod handshake_rust {
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::time::Duration;
-    use waywallen::ipc::proto::{ControlMsg, EventMsg};
-    use waywallen::ipc::uds::{recv_event, send_control};
+    use waywallen::wallframe::ipc::proto::{ControlMsg, EventMsg};
+    use waywallen::wallframe::ipc::uds::{recv_event, send_control};
 
     const DRM_FORMAT_ABGR8888: u32 = 0x34324241;
 
@@ -344,8 +344,8 @@ mod lifecycle {
 
     use std::sync::Arc;
     use std::time::Duration;
-    use waywallen::ipc::proto::{ControlMsg, ControlTransition, PointerMotion};
-    use waywallen::renderer_manager::{RendererManager, SpawnRequest};
+    use waywallen::wallframe::ipc::proto::{ControlMsg, ControlTransition, PointerMotion};
+    use waywallen::wallframe::renderer_manager::{RendererManager, SpawnRequest};
 
     #[tokio::test]
     async fn spawn_control_kill_roundtrip() {

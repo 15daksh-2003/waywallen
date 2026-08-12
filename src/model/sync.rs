@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 
+use crate::catalog::path::relative_under_root;
 use crate::error::{Result, ResultExt};
 use sea_orm::DatabaseConnection;
 
 use super::repo::{self, ItemUpsertArgs};
-use crate::wallpaper::types::WallpaperEntry;
+use crate::catalog::entry::WallpaperEntry;
 
 #[derive(Debug, Clone)]
 pub struct PluginRef<'a> {
@@ -151,14 +151,6 @@ pub async fn sync_plugin_entries(
         repo::delete_items_synced_before(db, &present_ids, seen_before).await?;
 
     Ok((summary, plugin_model))
-}
-
-pub(crate) fn relative_under_root(root: &str, resource: &str) -> Option<String> {
-    let root = root.trim_end_matches('/');
-    Path::new(resource)
-        .strip_prefix(root)
-        .ok()
-        .and_then(|p| p.to_str().map(|s| s.trim_start_matches('/').to_owned()))
 }
 
 #[cfg(test)]

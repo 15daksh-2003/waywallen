@@ -8,9 +8,9 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 use crate::plugin::renderer_registry::PluginPackageMeta;
-use crate::plugin::source_manager;
-use crate::renderer_manager;
+use crate::plugin::source;
 use crate::tasks;
+use crate::wallframe::renderer_manager;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -296,14 +296,14 @@ fn info_from_manifest(
             checked_at_ms,
         );
     };
-    if !source_manager::supports_entry_version(manifest.entry_version) {
+    if !source::supports_entry_version(manifest.entry_version) {
         return unsupported_info(
             pkg,
             manifest.version,
             format!(
                 "entry_version {} is unsupported; supported versions are {:?}",
                 manifest.entry_version,
-                source_manager::SUPPORTED_ENTRY_VERSIONS
+                source::SUPPORTED_ENTRY_VERSIONS
             ),
             checked_at_ms,
         );
@@ -450,7 +450,7 @@ mod tests {
         };
         let manifest = PluginUpdateManifest {
             version: "2.0.0".into(),
-            entry_version: source_manager::ENTRY_VERSION,
+            entry_version: source::ENTRY_VERSION,
             spawn_version: renderer_manager::SPAWN_VERSION,
             x86_64: None,
             aarch64: None,
@@ -474,10 +474,7 @@ mod tests {
             zip_url: "https://example.invalid/plugin.zip".into(),
             sha256: "00".repeat(32),
         };
-        for entry_version in [
-            source_manager::ENTRY_VERSION_V2,
-            source_manager::ENTRY_VERSION_V3,
-        ] {
+        for entry_version in [source::ENTRY_VERSION_V2, source::ENTRY_VERSION_V3] {
             let manifest = PluginUpdateManifest {
                 version: "2.0.0".into(),
                 entry_version,
@@ -504,7 +501,7 @@ mod tests {
         };
         let manifest = PluginUpdateManifest {
             version: "1.0.0".into(),
-            entry_version: source_manager::ENTRY_VERSION,
+            entry_version: source::ENTRY_VERSION,
             spawn_version: renderer_manager::SPAWN_VERSION,
             x86_64: None,
             aarch64: None,

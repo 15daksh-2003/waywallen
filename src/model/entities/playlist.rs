@@ -11,22 +11,22 @@ pub enum PlaylistMode {
     Random,
 }
 
-impl From<crate::queue::Mode> for PlaylistMode {
-    fn from(m: crate::queue::Mode) -> Self {
+impl From<crate::playback::Mode> for PlaylistMode {
+    fn from(m: crate::playback::Mode) -> Self {
         match m {
-            crate::queue::Mode::Sequential => PlaylistMode::Sequential,
-            crate::queue::Mode::Shuffle => PlaylistMode::Shuffle,
-            crate::queue::Mode::Random => PlaylistMode::Random,
+            crate::playback::Mode::Sequential => PlaylistMode::Sequential,
+            crate::playback::Mode::Shuffle => PlaylistMode::Shuffle,
+            crate::playback::Mode::Random => PlaylistMode::Random,
         }
     }
 }
 
-impl From<PlaylistMode> for crate::queue::Mode {
+impl From<PlaylistMode> for crate::playback::Mode {
     fn from(m: PlaylistMode) -> Self {
         match m {
-            PlaylistMode::Sequential => crate::queue::Mode::Sequential,
-            PlaylistMode::Shuffle => crate::queue::Mode::Shuffle,
-            PlaylistMode::Random => crate::queue::Mode::Random,
+            PlaylistMode::Sequential => crate::playback::Mode::Sequential,
+            PlaylistMode::Shuffle => crate::playback::Mode::Shuffle,
+            PlaylistMode::Random => crate::playback::Mode::Random,
         }
     }
 }

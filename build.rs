@@ -47,8 +47,8 @@ fn main() {
 }
 
 fn build_pulse_adapter(manifest_dir: &Path) {
-    let source = manifest_dir.join("src/audio/pulse_adapter.c");
-    let header = manifest_dir.join("src/audio/pulse_adapter.h");
+    let source = manifest_dir.join("src/system/audio/pulse_adapter.c");
+    let header = manifest_dir.join("src/system/audio/pulse_adapter.h");
     println!("cargo:rerun-if-changed={}", source.display());
     println!("cargo:rerun-if-changed={}", header.display());
 
