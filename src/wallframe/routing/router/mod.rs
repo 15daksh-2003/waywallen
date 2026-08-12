@@ -187,6 +187,16 @@ impl ResumeControl {
     }
 }
 
+fn lifecycle_control_label(message: &ControlMsg) -> &'static str {
+    match message {
+        ControlMsg::Pause { .. } => "pause",
+        ControlMsg::Play { .. } => "play",
+        ControlMsg::Mute { .. } => "mute",
+        ControlMsg::Unmute { .. } => "unmute",
+        _ => "control",
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ResumeRetry {
     control: ResumeControl,
@@ -2415,18 +2425,14 @@ impl Router {
         }
         for (id, msg, cause) in actions {
             let resume_control = ResumeControl::from_message(&msg);
-            let label = match msg {
-                ControlMsg::Pause { .. } => "pause",
-                ControlMsg::Play { .. } => "play",
-                _ => "ctl",
-            };
+            let label = lifecycle_control_label(&msg);
             if let Err(e) = self.mgr.send_control(&id, msg).await {
-                log::warn!("router: {label} {id}: {e}");
+                log::warn!("{label} renderer {id}: {e}");
                 if let Some(control) = resume_control {
                     self.schedule_resume_retry(&id, control).await;
                 }
             } else {
-                log::info!("router: {label} renderer {id} ({cause})");
+                log::info!("{label} renderer {id} ({cause})");
                 if resume_control.is_some() {
                     self.clear_resume_retry(&id).await;
                 }
@@ -2672,6 +2678,35 @@ impl Router {
 mod tests {
     use super::*;
     use crate::wallframe::renderer_manager::RendererManager;
+
+    #[test]
+    fn lifecycle_control_labels_name_the_actual_action() {
+        let transition = || ControlTransition { fade_ms: 0 };
+        assert_eq!(
+            lifecycle_control_label(&ControlMsg::Pause {
+                transition: transition()
+            }),
+            "pause"
+        );
+        assert_eq!(
+            lifecycle_control_label(&ControlMsg::Play {
+                transition: transition()
+            }),
+            "play"
+        );
+        assert_eq!(
+            lifecycle_control_label(&ControlMsg::Mute {
+                transition: transition()
+            }),
+            "mute"
+        );
+        assert_eq!(
+            lifecycle_control_label(&ControlMsg::Unmute {
+                transition: transition()
+            }),
+            "unmute"
+        );
+    }
 
     fn progress_at(
         now: Instant,

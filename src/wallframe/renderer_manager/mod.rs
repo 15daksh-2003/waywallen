@@ -1100,6 +1100,15 @@ impl RendererManager {
             .get(id)
             .await
             .ok_or_else(|| Error::RendererNotFound(id.to_string()))?;
+        self.send_control_to_handle(id, &handle, msg).await
+    }
+
+    async fn send_control_to_handle(
+        &self,
+        id: &str,
+        handle: &RendererHandle,
+        msg: ControlMsg,
+    ) -> Result<()> {
         let writer = handle.writer.clone();
         let write = tokio::task::spawn_blocking(move || writer.send_blocking(msg, None))
             .await
@@ -1274,23 +1283,15 @@ impl RendererManager {
     /// Forward an MPRIS media snapshot to a live renderer. Silently
     /// drops when the renderer did not subscribe to MPRIS events.
     pub async fn send_mpris(&self, id: &str, snapshot: MprisSnapshot) -> Result<()> {
-        if self.get(id).await.is_none() {
-            log::debug!("renderer {id}: drop mpris snapshot; renderer not found");
+        let Some(handle) = self.get(id).await else {
             return Ok(());
-        }
+        };
         if !self.subscribed_to(id, RendererEventKind::Mpris) {
-            log::debug!("renderer {id}: drop mpris snapshot; not subscribed");
             return Ok(());
         }
-        log::debug!(
-            "renderer {id}: send mpris snapshot state={} title={:?} artist={:?} art_url={:?}",
-            snapshot.state,
-            snapshot.title,
-            snapshot.artist,
-            snapshot.art_url
-        );
-        self.send_control(
+        self.send_control_to_handle(
             id,
+            &handle,
             ControlMsg::Mpris {
                 snapshot: WireMprisSnapshot {
                     state: match snapshot.state {
@@ -1908,6 +1909,87 @@ mod subscription_tests {
             .snapshot()
             .subscribers(RendererEventKind::Audio)
             .is_empty());
+    }
+
+    #[test]
+    fn subscription_snapshot_filters_mpris_subscribers() {
+        let registry = RendererSubscriptionRegistry::new();
+        registry.register("audio".to_string());
+        registry.register("mpris".to_string());
+
+        let audio = registry.prepare("audio", 1, &["audio".to_string()]);
+        registry.commit("audio".to_string(), audio.commit.unwrap());
+        let mpris = registry.prepare("mpris", 4, &["pointer".to_string(), "mpris".to_string()]);
+        registry.commit("mpris".to_string(), mpris.commit.unwrap());
+
+        assert_eq!(
+            registry.snapshot().subscribers(RendererEventKind::Mpris),
+            vec![("mpris".to_string(), 4)]
+        );
+    }
+
+    #[tokio::test]
+    async fn send_mpris_requires_a_live_committed_subscription() {
+        let manager = RendererManager::new_default();
+        let (handle, peer) = RendererHandle::test_stub_with_peer("renderer", "scene");
+        peer.set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        manager.register_test_handle(handle).await;
+        let snapshot = MprisSnapshot {
+            state: 1,
+            title: "Track".to_string(),
+            artist: "Artist".to_string(),
+            ..MprisSnapshot::default()
+        };
+        let assert_no_control = || match recv_control(&peer).unwrap_err() {
+            CodecError::Nix(nix::errno::Errno::EAGAIN) => {}
+            CodecError::Io(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            error => panic!("expected a read timeout, got {error:?}"),
+        };
+
+        manager
+            .send_mpris("renderer", snapshot.clone())
+            .await
+            .unwrap();
+        assert_no_control();
+
+        let applied = manager
+            .subscriptions
+            .prepare("renderer", 1, &["mpris".to_string()]);
+        manager
+            .subscriptions
+            .commit("renderer".to_string(), applied.commit.unwrap());
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        manager.send_mpris("renderer", snapshot).await.unwrap();
+        match recv_control(&peer).unwrap().0 {
+            ControlMsg::Mpris { snapshot } => {
+                assert_eq!(snapshot.state, MediaPlaybackState::Playing);
+                assert_eq!(snapshot.title, "Track");
+                assert_eq!(snapshot.artist, "Artist");
+            }
+            message => panic!("expected MPRIS snapshot, got {message:?}"),
+        }
+
+        let removed = manager.subscriptions.prepare("renderer", 2, &[]);
+        manager
+            .subscriptions
+            .commit("renderer".to_string(), removed.commit.unwrap());
+        peer.set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        manager
+            .send_mpris("renderer", MprisSnapshot::default())
+            .await
+            .unwrap();
+        assert_no_control();
+
+        manager
+            .send_mpris("missing", MprisSnapshot::default())
+            .await
+            .unwrap();
     }
 
     #[test]
