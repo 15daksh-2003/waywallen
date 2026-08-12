@@ -1849,6 +1849,10 @@ Unsaved frame state may be lost.</source>
 <context>
     <name>Window</name>
     <message>
+        <source>Changelog</source>
+        <translation>Журнал изменений</translation>
+    </message>
+    <message>
         <source>Paused</source>
         <translation>Приостановлено</translation>
     </message>

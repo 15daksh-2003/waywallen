@@ -25,6 +25,7 @@ MD.ApplicationWindow {
     title: "waywallen"
 
     readonly property alias popupPresenter: m_popup_presenter
+    property var changelogPresentation: null
 
     function presentPopup(source, properties) {
         const presentation = m_popup_presenter.present(source, properties || {});
@@ -36,9 +37,24 @@ MD.ApplicationWindow {
         return presentation;
     }
 
+    function showChangelog() {
+        if (changelogPresentation?.active)
+            return;
+        changelogPresentation = presentPopup(changelogDialogComponent, {
+            source: "qrc:/waywallen/ui/assets/waywallen-ui.releases.xml",
+            title: qsTr("Changelog")
+        });
+    }
+
     MD.PopupPresenter {
         id: m_popup_presenter
         host: win.contentItem
+    }
+
+    Component {
+        id: changelogDialogComponent
+
+        MD.ChangelogDialog {}
     }
 
     // Persist the window size across runs. Wayland doesn't let clients
@@ -112,7 +128,11 @@ MD.ApplicationWindow {
         if (W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready) {
             healthQuery.reload();
         }
+        if (W.Global.recordOpenedVersion(Qt.application.version))
+            Qt.callLater(win.showChangelog);
     }
+
+    Component.onDestruction: changelogPresentation?.cancel()
 
     MD.SnakeView {
         id: m_snake

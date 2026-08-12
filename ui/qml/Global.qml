@@ -14,6 +14,7 @@ QtObject {
     readonly property color defaultAccentColor: "#6750A4"
     property string accentMode: "system"
     property color accentColor: defaultAccentColor
+    property string lastOpenedVersion: ""
 
     onNetworkCacheMaximumMiBChanged:
         W.App.setNetworkCacheMaximumSize(networkCacheMaximumMiB * 1024 * 1024)
@@ -60,6 +61,15 @@ QtObject {
             MD.Token.color.accentColor = accentColor;
     }
 
+    function recordOpenedVersion(version) {
+        if (version.length === 0)
+            return false;
+        const previous = lastOpenedVersion;
+        if (previous !== version)
+            lastOpenedVersion = version;
+        return previous.length > 0 && previous !== version;
+    }
+
     readonly property Component errorToastAction: Component {
         MD.Action {
             required property string error
@@ -84,6 +94,7 @@ QtObject {
         property alias themeMode: root.themeMode
         property alias accentMode: root.accentMode
         property alias accentColor: root.accentColor
+        property alias lastOpenedVersion: root.lastOpenedVersion
     }
 
     // Per-vendor Material color schemes, seeded from each GPU vendor's brand

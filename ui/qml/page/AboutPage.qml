@@ -8,19 +8,6 @@ MD.Page {
     implicitWidth: aboutContent.implicitWidth + 32
     bottomPadding: 24
 
-    property var changelogPresentation: null
-
-    function showChangelog() {
-        if (root.changelogPresentation?.active)
-            return;
-        root.changelogPresentation = root.Window.window.presentPopup(changelogDialogComponent, {
-            source: "qrc:/waywallen/ui/assets/waywallen-ui.releases.xml",
-            title: qsTr("Changelog")
-        });
-    }
-
-    Component.onDestruction: root.changelogPresentation?.cancel()
-
     ColumnLayout {
         id: aboutContent
 
@@ -134,15 +121,9 @@ MD.Page {
                     id: changelogButton
                     text: qsTr("Changelog")
                     mdState.type: MD.Enum.BtText
-                    onClicked: root.showChangelog()
+                    onClicked: root.Window.window.showChangelog()
                 }
             }
         }
-    }
-
-    Component {
-        id: changelogDialogComponent
-
-        MD.ChangelogDialog {}
     }
 }

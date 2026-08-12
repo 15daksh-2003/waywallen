@@ -1841,6 +1841,10 @@ Unsaved frame state may be lost.</source>
 <context>
     <name>Window</name>
     <message>
+        <source>Changelog</source>
+        <translation>更新日志</translation>
+    </message>
+    <message>
         <source>Paused</source>
         <translation>已暂停</translation>
     </message>
