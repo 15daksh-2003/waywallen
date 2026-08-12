@@ -3,7 +3,18 @@ pkg_check_modules(AVFORMAT REQUIRED IMPORTED_TARGET libavformat>=58)
 pkg_check_modules(AVCODEC  REQUIRED IMPORTED_TARGET libavcodec>=58)
 pkg_check_modules(AVUTIL   REQUIRED IMPORTED_TARGET libavutil>=56)
 pkg_check_modules(SWSCALE  REQUIRED IMPORTED_TARGET libswscale>=5)
-find_package(Vulkan REQUIRED)
+# find_package(Vulkan) needs BOTH the loader and the dev headers
+# (vulkan/vulkan.h); on most distros the headers are a separate package.
+find_package(Vulkan QUIET)
+if(NOT Vulkan_INCLUDE_DIR)
+    message(FATAL_ERROR
+        "Vulkan headers not found (need vulkan/vulkan.h). Install the headers "
+        "package: vulkan-headers (Arch/Fedora) or libvulkan-dev (Debian/Ubuntu).")
+elseif(NOT Vulkan_LIBRARY)
+    message(FATAL_ERROR
+        "Vulkan loader not found (libvulkan). Install the loader: "
+        "vulkan-icd-loader (Arch), libvulkan1 (Debian/Ubuntu), or vulkan-loader (Fedora).")
+endif()
 
 add_executable(waywallen-image-renderer
     src/main.cpp

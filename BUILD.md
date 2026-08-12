@@ -9,7 +9,8 @@ End-to-end build instructions for developers.
 | Rust | stable | |
 | Clang | 22+ | [LLVM-22.1.4-Linux-X64](https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.4/LLVM-22.1.4-Linux-X64.tar.xz) |
 | CMake | 3.28+ | |
-| Vulkan SDK | ≥ 1.1 |  |
+| Vulkan loader | ≥ 1.1 | runtime: `vulkan-icd-loader` (Arch) · `libvulkan1` (Debian/Ubuntu) · `vulkan-loader` (Fedora) |
+| Vulkan headers | ≥ 1.1 | **build-time**, provides `vulkan/vulkan.h` for `find_package(Vulkan)`: `vulkan-headers` (Arch/Fedora) · `libvulkan-dev` (Debian/Ubuntu). |
 | Qt6 | ≥ 6.10 | Quick, DBus, Protobuf |
 | ffmpeg | - |  |
 
