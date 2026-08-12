@@ -50,7 +50,7 @@ enum : uint32_t
 
 export module waywallen.bridge;
 
-export import vulkan;
+export import vvk;
 import rstd.cppstd;
 
 export inline constexpr uint32_t WW_BRIDGE_SUPPORTED_PROTOCOL_VERSION =

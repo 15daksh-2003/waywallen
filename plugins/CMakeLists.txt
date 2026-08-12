@@ -20,7 +20,7 @@ target_sources(waywallen-plugin-common
 target_link_libraries(waywallen-plugin-common
     PUBLIC
         waywallen::bridge
-        vvk::ffi::vulkan
+        vvk::vvk
         rstd.cppstd
         rstd::json
 )
