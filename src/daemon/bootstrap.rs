@@ -70,7 +70,10 @@ pub async fn run(cli: DaemonConfig) -> anyhow::Result<()> {
 
     let renderer_mgr = Arc::new(renderer_manager::RendererManager::new(registry));
     let router = routing::Router::new(renderer_mgr.clone());
-    renderer_mgr.attach_router(Arc::downgrade(&router));
+    let process_exits = renderer_mgr
+        .take_process_exits()
+        .expect("renderer process exit receiver already taken");
+    router.start_process_exit_listener(process_exits);
     renderer_mgr.start_reaper();
     let settings_store =
         settings::SettingsStore::load_or_default(settings::default_config_path()).await;
@@ -189,16 +192,6 @@ pub async fn run(cli: DaemonConfig) -> anyhow::Result<()> {
             .tasks
             .spawn_async(tasks::TaskKind::Service, "playlist/rotator", async move {
                 application::run_rotator(app_for_rot, rotation_rx, shutdown_for_rot).await;
-                Ok(())
-            });
-    }
-    {
-        let app_for_restore = state.clone();
-        let shutdown_for_restore = state.shutdown_subscribe();
-        state
-            .tasks
-            .spawn_async(tasks::TaskKind::Service, "auto-stop/restore", async move {
-                application::run_auto_stop_restore(app_for_restore, shutdown_for_restore).await;
                 Ok(())
             });
     }

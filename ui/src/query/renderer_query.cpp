@@ -71,9 +71,15 @@ void RendererListQuery::reload() {
             QVariantList instances;
             for (const auto& inst : list_rsp.instances()) {
                 QVariantMap m;
-                m[u"id"_s]             = inst.rendererId();
-                m[u"fps"_s]            = inst.fps();
-                m[u"status"_s]         = inst.status();
+                m[u"id"_s]                 = inst.rendererId();
+                m[u"fps"_s]                = inst.fps();
+                m[u"status"_s]             = inst.status();
+                m[u"process_state"_s]      = static_cast<int>(inst.processState());
+                m[u"activity_state"_s]     = static_cast<int>(inst.activityState());
+                m[u"keep"_s]               = inst.keep();
+                m[u"process_generation"_s] = QVariant::fromValue(inst.processGeneration());
+                m[u"last_exit_reason"_s] =
+                    inst.hasLastExit() ? inst.lastExit().reason() : QString {};
                 m[u"name"_s]           = inst.name();
                 m[u"pid"_s]            = inst.pid();
                 m[u"texture_width"_s]  = inst.textureWidth();

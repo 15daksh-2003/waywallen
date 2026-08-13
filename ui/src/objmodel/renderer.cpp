@@ -25,6 +25,11 @@ Renderer::Renderer(const proto::RendererInstance& info, QObject* parent)
       m_id(info.rendererId()),
       m_fps(info.fps()),
       m_status(info.status()),
+      m_process_state(static_cast<int>(info.processState())),
+      m_activity_state(static_cast<int>(info.activityState())),
+      m_keep(info.keep()),
+      m_process_generation(info.processGeneration()),
+      m_last_exit_reason(info.hasLastExit() ? info.lastExit().reason() : QString {}),
       m_name(info.name()),
       m_pid(info.pid()),
       m_texture_width(info.textureWidth()),
@@ -45,6 +50,29 @@ void Renderer::updateFrom(const proto::RendererInstance& info) {
         m_status = info.status();
         Q_EMIT statusChanged();
     }
+    const auto process_state = static_cast<int>(info.processState());
+    if (m_process_state != process_state) {
+        m_process_state = process_state;
+        Q_EMIT processStateChanged();
+    }
+    const auto activity_state = static_cast<int>(info.activityState());
+    if (m_activity_state != activity_state) {
+        m_activity_state = activity_state;
+        Q_EMIT activityStateChanged();
+    }
+    if (m_keep != info.keep()) {
+        m_keep = info.keep();
+        Q_EMIT keepChanged();
+    }
+    if (m_process_generation != info.processGeneration()) {
+        m_process_generation = info.processGeneration();
+        Q_EMIT processGenerationChanged();
+    }
+    const auto last_exit_reason = info.hasLastExit() ? info.lastExit().reason() : QString {};
+    if (m_last_exit_reason != last_exit_reason) {
+        m_last_exit_reason = last_exit_reason;
+        Q_EMIT lastExitChanged();
+    }
     if (m_name != info.name()) {
         m_name = info.name();
         Q_EMIT nameChanged();
@@ -57,6 +85,12 @@ void Renderer::updateFrom(const proto::RendererInstance& info) {
         m_texture_width  = info.textureWidth();
         m_texture_height = info.textureHeight();
         Q_EMIT textureSizeChanged();
+    }
+    if (m_drm_render_major != info.drmRenderMajor() ||
+        m_drm_render_minor != info.drmRenderMinor()) {
+        m_drm_render_major = info.drmRenderMajor();
+        m_drm_render_minor = info.drmRenderMinor();
+        Q_EMIT drmRenderChanged();
     }
     auto conditions = runtimeConditionsFromPb(info.conditions());
     if (m_runtime_conditions != conditions) {

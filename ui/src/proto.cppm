@@ -34,6 +34,8 @@ using proto::RendererRuntimeTag;
 using proto::RendererSpawnRequest;
 using proto::RendererSpawnResponse;
 using proto::RuntimeCondition;
+using proto::RendererActivityStateGadget::RendererActivityState;
+using proto::RendererProcessStateGadget::RendererProcessState;
 using proto::RuntimeConditionKindGadget::RuntimeConditionKind;
 using proto::RuntimeConditionOriginGadget::RuntimeConditionOrigin;
 

@@ -293,6 +293,32 @@ message RendererRuntimeTag {
   string value = 2;
 }
 
+enum RendererProcessState {
+  RENDERER_PROCESS_STATE_UNSPECIFIED = 0;
+  RENDERER_PROCESS_STATE_STARTING = 1;
+  RENDERER_PROCESS_STATE_RUNNING = 2;
+  RENDERER_PROCESS_STATE_STOPPING = 3;
+  RENDERER_PROCESS_STATE_STOPPED = 4;
+  RENDERER_PROCESS_STATE_KILLED = 5;
+  RENDERER_PROCESS_STATE_FAILED = 6;
+}
+
+enum RendererActivityState {
+  RENDERER_ACTIVITY_STATE_UNSPECIFIED = 0;
+  RENDERER_ACTIVITY_STATE_PLAYING = 1;
+  RENDERER_ACTIVITY_STATE_PAUSED = 2;
+  RENDERER_ACTIVITY_STATE_MUTED = 3;
+  RENDERER_ACTIVITY_STATE_STOPPED = 4;
+}
+
+message RendererExit {
+  sint32 code = 1;
+  sint32 signal = 2;
+  bool has_code = 3;
+  bool has_signal = 4;
+  string reason = 5;
+}
+
 message RendererInstance {
   string renderer_id = 1;
   uint32 fps         = 2;
@@ -311,6 +337,11 @@ message RendererInstance {
   uint32 texture_height = 9;
   repeated RuntimeCondition conditions = 10;
   repeated RendererRuntimeTag runtime_tags = 11;
+  RendererProcessState process_state = 12;
+  RendererActivityState activity_state = 13;
+  bool keep = 14;
+  uint64 process_generation = 15;
+  RendererExit last_exit = 16;
 }
 
 message RendererPlayRequest  { string renderer_id = 1; }
@@ -567,6 +598,7 @@ message WallpaperApplyResponse {
   string wallpaper_id = 2;
   string wp_type = 3;
   string name = 4;
+  bool deferred = 5;
 }
 
 // Apply a wallpaper via the org.freedesktop.portal.Wallpaper portal —
@@ -591,6 +623,7 @@ message WallpaperApplyViaPortalResponse {
 message DisplayLinkInfo {
   string renderer_id = 1;
   int32  z_order     = 2;
+  bool active = 3;
 }
 
 // Wallpaper fit policy. Values mirror Plasma's wallpaper plugin enum

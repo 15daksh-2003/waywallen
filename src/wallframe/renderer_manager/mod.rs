@@ -6,7 +6,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock as StdRwLock, Weak as StdWeak};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock as StdRwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
@@ -28,7 +28,6 @@ pub const SPAWN_VERSION: u32 = 10;
 use crate::catalog::entry::WallpaperType;
 use crate::plugin::renderer_registry::{RendererActivityMode, RendererDef, RendererRegistry};
 use crate::settings::SettingsStore;
-use crate::wallframe::routing::Router;
 
 mod handshake;
 mod reader;
@@ -53,6 +52,24 @@ use writer::*;
 // Public types
 
 pub type RendererId = String;
+pub type RendererProcessGeneration = u64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RendererProcessExitKind {
+    Stopped,
+    Killed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RendererProcessExit {
+    pub renderer_id: RendererId,
+    pub process_generation: RendererProcessGeneration,
+    pub kind: RendererProcessExitKind,
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+    pub reason: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RendererRuntimeTag {
@@ -161,7 +178,7 @@ pub struct SpawnRequest {
     /// lets test renderers bypass normal content loading.
     pub test_pattern: bool,
     /// Optional explicit renderer plugin name. `None` (default) lets
-    /// `spawn` and `find_reusable` pick by type priority.
+    /// `spawn` pick by type priority.
     pub renderer_name: Option<String>,
     /// Persisted renderer-owned property overrides. Daemon-owned layout
     /// keys are filtered out before spawn.
@@ -298,6 +315,7 @@ const SYNC_FD_RETENTION: usize = 16;
 /// shared across HTTP handlers and the reader thread.
 pub struct RendererHandle {
     pub id: RendererId,
+    pub process_generation: RendererProcessGeneration,
     pub wp_type: WallpaperType,
     /// The `SpawnRequest.extras` this renderer was started with —
     /// canonical resource path plus manifest-allowlisted keys.
@@ -542,21 +560,23 @@ pub struct RendererManager {
     inner: TokioMutex<Inner>,
     /// Plugin registry mapping wallpaper types to renderer binaries.
     registry: StdRwLock<RendererRegistry>,
-    /// Back-reference to the router, installed after construction via
-    /// `attach_router`. Held weak to avoid a cycle with `Router::mgr`.
-    router: OnceLock<StdWeak<Router>>,
     /// Cached system snapshot from startup. Used at spawn time to resolve
     /// GPU selections into render-node paths.
     system_info: OnceLock<Arc<crate::system::SystemInfo>>,
     settings: OnceLock<Arc<SettingsStore>>,
     /// Dead-renderer signals queue here (from reader-thread exit or
     /// a send_control hitting EPIPE). One background task drains it.
-    reap_tx: tokio::sync::mpsc::UnboundedSender<RendererId>,
-    reap_rx: StdMutex<Option<tokio::sync::mpsc::UnboundedReceiver<RendererId>>>,
+    reap_tx: tokio::sync::mpsc::UnboundedSender<(RendererId, RendererProcessGeneration)>,
+    reap_rx: StdMutex<
+        Option<tokio::sync::mpsc::UnboundedReceiver<(RendererId, RendererProcessGeneration)>>,
+    >,
+    process_exit_tx: tokio::sync::mpsc::UnboundedSender<RendererProcessExit>,
+    process_exit_rx: StdMutex<Option<tokio::sync::mpsc::UnboundedReceiver<RendererProcessExit>>>,
     reaper_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     subscriptions: Arc<RendererSubscriptionRegistry>,
     process_ownership: watch::Sender<RendererProcessOwnershipSnapshot>,
     process_ownership_state: StdMutex<RendererProcessOwnershipState>,
+    next_process_generation: std::sync::atomic::AtomicU64,
 }
 
 struct Inner {
@@ -589,21 +609,24 @@ impl Drop for RendererProcessGroupRegistration<'_> {
 impl RendererManager {
     pub fn new(registry: RendererRegistry) -> Self {
         let (reap_tx, reap_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (process_exit_tx, process_exit_rx) = tokio::sync::mpsc::unbounded_channel();
         let (process_ownership, _) = watch::channel(RendererProcessOwnershipSnapshot::default());
         Self {
             inner: TokioMutex::new(Inner {
                 renderers: HashMap::new(),
             }),
             registry: StdRwLock::new(registry),
-            router: OnceLock::new(),
             system_info: OnceLock::new(),
             settings: OnceLock::new(),
             reap_tx,
             reap_rx: StdMutex::new(Some(reap_rx)),
+            process_exit_tx,
+            process_exit_rx: StdMutex::new(Some(process_exit_rx)),
             reaper_task: StdMutex::new(None),
             subscriptions: Arc::new(RendererSubscriptionRegistry::new()),
             process_ownership,
             process_ownership_state: StdMutex::new(RendererProcessOwnershipState::default()),
+            next_process_generation: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -617,10 +640,13 @@ impl RendererManager {
         let _ = self.settings.set(settings);
     }
 
-    /// Wire the manager to the router. Must be called once after both
-    /// sides have been constructed. Later calls are ignored.
-    pub fn attach_router(&self, router: StdWeak<Router>) {
-        let _ = self.router.set(router);
+    pub fn take_process_exits(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<RendererProcessExit>> {
+        self.process_exit_rx
+            .lock()
+            .ok()
+            .and_then(|mut receiver| receiver.take())
     }
 
     /// Start the background reaper task that drains `mark_dead`
@@ -633,8 +659,8 @@ impl RendererManager {
         let Some(mut rx) = rx else { return };
         let this = Arc::clone(self);
         let task = tokio::spawn(async move {
-            while let Some(id) = rx.recv().await {
-                this.evict(&id).await;
+            while let Some((id, generation)) = rx.recv().await {
+                this.evict(&id, generation).await;
             }
         });
         if let Ok(mut slot) = self.reaper_task.lock() {
@@ -655,11 +681,13 @@ impl RendererManager {
 
         let renderer_ids = self.list().await;
         for id in renderer_ids {
-            if let Some(router) = self.router.get().and_then(|router| router.upgrade()) {
-                router.unregister_renderer(&id).await;
-            }
-            if let Err(error) = self.kill(&id).await {
-                log::warn!("renderer {id}: shutdown failed: {error}");
+            match self.stop(&id).await {
+                Ok(exit) => {
+                    let _ = self.process_exit_tx.send(exit);
+                }
+                Err(error) => {
+                    log::warn!("renderer {id}: shutdown failed: {error}");
+                }
             }
         }
     }
@@ -702,8 +730,31 @@ impl RendererManager {
 
     /// Spawn a fresh renderer-host subprocess, wait for its `Ready`
     /// event, and return its id. Cleans up the child on failure.
-    pub async fn spawn(&self, mut req: SpawnRequest) -> Result<RendererId> {
+    pub async fn spawn(&self, req: SpawnRequest) -> Result<RendererId> {
         let id: RendererId = Uuid::new_v4().to_string();
+        let process_generation = self.reserve_process_generation();
+        self.spawn_for_generation(id.clone(), process_generation, req)
+            .await?;
+        Ok(id)
+    }
+
+    pub fn reserve_process_generation(&self) -> RendererProcessGeneration {
+        self.next_process_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1)
+    }
+
+    pub async fn spawn_for_generation(
+        &self,
+        id: RendererId,
+        process_generation: RendererProcessGeneration,
+        mut req: SpawnRequest,
+    ) -> Result<()> {
+        if self.get(&id).await.is_some() {
+            return Err(Error::InvalidArgument(format!(
+                "renderer '{id}' already has a live process"
+            )));
+        }
         req.default_user_properties =
             crate::catalog::properties::normalize_renderer_user_properties(
                 req.default_user_properties,
@@ -854,6 +905,7 @@ impl RendererManager {
         self.subscriptions.register(id.clone());
         let writer = RendererWriter::spawn(
             id.clone(),
+            process_generation,
             std_stream,
             Arc::clone(&self.subscriptions),
             self.reap_tx.clone(),
@@ -888,6 +940,7 @@ impl RendererManager {
 
         let handle = Arc::new(RendererHandle {
             id: id.clone(),
+            process_generation,
             wp_type: req.wp_type.clone(),
             extras: req.extras.clone(),
             name: renderer_def.name.clone(),
@@ -936,6 +989,7 @@ impl RendererManager {
         thread::spawn(move || {
             run_reader(
                 reader_id,
+                process_generation,
                 reader_stream,
                 reader_writer,
                 reader_subscriptions,
@@ -952,58 +1006,12 @@ impl RendererManager {
             );
         });
         log::info!("spawned renderer {id} ({})", req.wp_type);
-        Ok(id)
-    }
-
-    /// Find an already-running renderer whose **identity** matches
-    /// `req`, ignoring runtime-tunable plugin settings.
-    pub async fn find_reusable(&self, req: &SpawnRequest) -> Option<RendererId> {
-        self.reusable_renderer_ids(req).await.into_iter().next()
-    }
-
-    /// List already-running renderers whose **identity** matches `req`,
-    /// ignoring runtime-tunable plugin settings.
-    pub async fn reusable_renderer_ids(&self, req: &SpawnRequest) -> Vec<RendererId> {
-        let def = match req.renderer_name.as_deref() {
-            Some(name) => self.with_registry(|registry| registry.resolve_by_name(name).cloned()),
-            None => self.with_registry(|registry| registry.resolve(&req.wp_type).cloned()),
-        };
-        let Some(def) = def else {
-            return Vec::new();
-        };
-
-        let default_user_properties =
-            crate::catalog::properties::normalize_renderer_user_properties(
-                req.default_user_properties.clone(),
-            );
-        let inner = self.inner.lock().await;
-        let mut ids: Vec<_> = inner
-            .renderers
-            .iter()
-            .filter_map(|(id, h)| {
-                (h.wp_type == req.wp_type
-                    && h.name == def.name
-                    && h.extras == req.extras
-                    && h.spawn_request.default_user_properties == default_user_properties)
-                    .then(|| id.clone())
-            })
-            .collect();
-        ids.sort_unstable();
-        ids
+        Ok(())
     }
 
     pub async fn get(&self, id: &str) -> Option<Arc<RendererHandle>> {
         let inner = self.inner.lock().await;
         inner.renderers.get(id).cloned()
-    }
-
-    /// Locate a live renderer whose `extras["path"]` matches the given
-    /// resource. Used to route property changes to the active renderer.
-    pub async fn find_by_resource(&self, resource: &str) -> Option<Arc<RendererHandle>> {
-        let inner = self.inner.lock().await;
-        inner.renderers.values().find_map(|h| {
-            (h.extras.get("path").map(String::as_str) == Some(resource)).then(|| h.clone())
-        })
     }
 
     pub async fn list(&self) -> Vec<RendererId> {
@@ -1057,7 +1065,7 @@ impl RendererManager {
                     if let Some(child) = child_guard.as_mut() {
                         match child.try_wait() {
                             Ok(Some(status)) => {
-                                self.mark_dead(id);
+                                self.mark_dead_generation(id, handle.process_generation);
                                 return Err(Error::RendererFrameFailed(format!(
                                     "renderer '{id}' exited before its first frame: {status}"
                                 )));
@@ -1114,7 +1122,7 @@ impl RendererManager {
             .await
             .context("send_control join")?;
         write.map_err(|error| {
-            self.mark_dead(id);
+            self.mark_dead_generation(id, handle.process_generation);
             Error::RendererControlFailed(format!("send_control: {error}"))
         })
     }
@@ -1392,43 +1400,113 @@ impl RendererManager {
 
     /// Enqueue a renderer for eviction. Synchronous (cheap channel
     /// send); cleanup happens on the reaper task.
-    pub fn mark_dead(&self, id: &str) {
-        if self.reap_tx.send(id.to_string()).is_err() {
+    fn mark_dead_generation(&self, id: &str, process_generation: RendererProcessGeneration) {
+        if self
+            .reap_tx
+            .send((id.to_string(), process_generation))
+            .is_err()
+        {
             log::warn!("renderer {id}: mark_dead dropped (reaper channel closed)");
         }
     }
 
-    /// Actual eviction: remove from map, unregister from router, kill
-    /// child. Called only by the reaper task and is idempotent.
-    async fn evict(self: &Arc<Self>, id: &str) {
+    /// Remove the matching live generation, reap its child, and notify
+    /// the lifecycle owner. Called only by the reaper task and is idempotent.
+    async fn evict(self: &Arc<Self>, id: &str, process_generation: RendererProcessGeneration) {
         let handle = {
             let mut inner = self.inner.lock().await;
-            inner.renderers.remove(id)
+            match inner.renderers.get(id) {
+                Some(handle) if handle.process_generation == process_generation => {
+                    inner.renderers.remove(id)
+                }
+                _ => None,
+            }
         };
         let Some(handle) = handle else { return };
         self.unregister_process_group(handle.process_group);
         self.subscriptions.remove(id);
         log::warn!("renderer {id}: evicting");
 
-        if let Some(router) = self.router.get().and_then(|w| w.upgrade()) {
-            router.unregister_renderer(id).await;
-        }
-
         let mut child_guard = handle.child.lock().await;
+        let mut exit = None;
+        let mut killed = false;
         if let Some(mut child) = child_guard.take() {
-            let _ = child.start_kill();
-            let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+            exit = child.try_wait().ok().flatten();
+            if exit.is_none() {
+                killed = true;
+                let _ = child.start_kill();
+                exit = tokio::time::timeout(Duration::from_secs(2), child.wait())
+                    .await
+                    .ok()
+                    .and_then(std::result::Result::ok);
+            }
+        }
+        let event = RendererProcessExit {
+            renderer_id: id.to_string(),
+            process_generation,
+            kind: if killed
+                || exit
+                    .as_ref()
+                    .is_some_and(|status| status.signal().is_some())
+            {
+                RendererProcessExitKind::Killed
+            } else {
+                RendererProcessExitKind::Failed
+            },
+            code: exit.as_ref().and_then(ExitStatus::code),
+            signal: exit.as_ref().and_then(ExitStatusExt::signal),
+            reason: exit.as_ref().map(renderer_exit_status).unwrap_or_else(|| {
+                if killed {
+                    "renderer IPC closed; process was killed".to_string()
+                } else {
+                    "renderer IPC closed".to_string()
+                }
+            }),
+        };
+        if self.process_exit_tx.send(event).is_err() {
+            log::warn!("renderer {id}: process exit dropped (owner channel closed)");
         }
     }
 
     /// Send Shutdown, wait for the child to exit gracefully, escalate
     /// to SIGKILL only if it doesn't. Removes from the map.
     pub async fn kill(&self, id: &str) -> Result<()> {
+        self.stop(id).await.map(|_| ())
+    }
+
+    pub async fn stop(&self, id: &str) -> Result<RendererProcessExit> {
         let handle = {
             let mut inner = self.inner.lock().await;
             inner.renderers.remove(id)
         }
         .ok_or_else(|| Error::RendererNotFound(id.to_string()))?;
+        self.stop_handle(id, handle).await
+    }
+
+    pub async fn stop_generation(
+        &self,
+        id: &str,
+        process_generation: RendererProcessGeneration,
+    ) -> Result<Option<RendererProcessExit>> {
+        let handle = {
+            let mut inner = self.inner.lock().await;
+            match inner.renderers.get(id) {
+                Some(handle) if handle.process_generation == process_generation => {
+                    inner.renderers.remove(id)
+                }
+                Some(_) => return Ok(None),
+                None => return Err(Error::RendererNotFound(id.to_string())),
+            }
+        }
+        .expect("matched renderer disappeared while locked");
+        self.stop_handle(id, handle).await.map(Some)
+    }
+
+    async fn stop_handle(
+        &self,
+        id: &str,
+        handle: Arc<RendererHandle>,
+    ) -> Result<RendererProcessExit> {
         self.unregister_process_group(handle.process_group);
         self.subscriptions.remove(id);
 
@@ -1438,21 +1516,68 @@ impl RendererManager {
                 .await;
 
         let mut child_guard = handle.child.lock().await;
+        let mut exit = None;
+        let mut forced = false;
+        let mut wait_error = None;
         if let Some(mut child) = child_guard.take() {
             // 5 s: comfortably above any plausible vkDeviceWaitIdle
             // under load; image is usually microseconds, mpv/wescene slower.
             match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
-                Ok(_) => {
-                    log::info!("renderer {id}: graceful shutdown");
+                Ok(Ok(status)) => {
+                    log::info!("renderer {id}: shutdown complete");
+                    exit = Some(status);
+                }
+                Ok(Err(error)) => {
+                    wait_error = Some(error.to_string());
+                    let _ = child.start_kill();
+                    forced = true;
+                    exit = tokio::time::timeout(Duration::from_secs(1), child.wait())
+                        .await
+                        .ok()
+                        .and_then(std::result::Result::ok);
                 }
                 Err(_) => {
                     log::warn!("renderer {id}: Shutdown timeout (5s), escalating to SIGKILL");
                     let _ = child.start_kill();
-                    let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+                    forced = true;
+                    exit = tokio::time::timeout(Duration::from_secs(1), child.wait())
+                        .await
+                        .ok()
+                        .and_then(std::result::Result::ok);
                 }
             }
         }
-        Ok(())
+        Ok(RendererProcessExit {
+            renderer_id: id.to_string(),
+            process_generation: handle.process_generation,
+            kind: if forced
+                || exit
+                    .as_ref()
+                    .is_some_and(|status| status.signal().is_some())
+            {
+                RendererProcessExitKind::Killed
+            } else if exit
+                .as_ref()
+                .is_some_and(|status| status.code().is_some_and(|code| code != 0))
+                || wait_error.is_some()
+            {
+                RendererProcessExitKind::Failed
+            } else {
+                RendererProcessExitKind::Stopped
+            },
+            code: exit.as_ref().and_then(ExitStatus::code),
+            signal: exit.as_ref().and_then(ExitStatusExt::signal),
+            reason: if forced {
+                wait_error.map_or_else(
+                    || "renderer did not exit after Shutdown and was killed".to_string(),
+                    |error| format!("wait after Shutdown failed: {error}; renderer was killed"),
+                )
+            } else {
+                exit.as_ref()
+                    .map(renderer_exit_status)
+                    .unwrap_or_else(|| "renderer stopped".to_string())
+            },
+        })
     }
 }
 
@@ -1530,7 +1655,7 @@ impl RendererHandle {
         let subscriptions = Arc::new(RendererSubscriptionRegistry::new());
         subscriptions.register(id.to_string());
         let (reap_tx, _reap_rx) = tokio::sync::mpsc::unbounded_channel();
-        RendererWriter::spawn(id.to_string(), stream, subscriptions, reap_tx)
+        RendererWriter::spawn(id.to_string(), 1, stream, subscriptions, reap_tx)
     }
 
     /// Construct a `RendererHandle` with no running child process.
@@ -1571,6 +1696,7 @@ impl RendererHandle {
             tokio::sync::mpsc::unbounded_channel::<crate::wallframe::sync::ReleaseEvent>();
         let handle = Arc::new(Self {
             id: id.into(),
+            process_generation: 1,
             wp_type: wp_type.into(),
             extras: HashMap::new(),
             name: "test-stub".into(),
@@ -2000,6 +2126,7 @@ mod subscription_tests {
         let (reap_tx, _reap_rx) = tokio::sync::mpsc::unbounded_channel();
         let writer = RendererWriter::spawn(
             "renderer".to_string(),
+            1,
             daemon,
             Arc::clone(&subscriptions),
             reap_tx,
@@ -2355,121 +2482,27 @@ mod reuse_tests {
         }
     }
 
-    /// Construct a live mpv handle stub with the given extras dict.
-    /// Mirrors `RendererHandle::test_stub` but lets tests pin extras.
-    fn live_mpv_handle(id: &str, extras: HashMap<String, String>) -> Arc<RendererHandle> {
-        let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
-        let (events_tx, _) = tokio::sync::broadcast::channel::<RendererEvent>(8);
-        let (release_events_tx, release_events_rx) =
-            tokio::sync::mpsc::unbounded_channel::<crate::wallframe::sync::ReleaseEvent>();
-        Arc::new(RendererHandle {
-            id: id.into(),
-            wp_type: "video".into(),
-            extras: extras.clone(),
-            name: "waywallen-mpv".into(),
-            plugin_id: "test.plugin".into(),
-            activity_mode: RendererActivityMode::Continuous,
-            pid: None,
-            process_group: None,
-            gpu: DrmNode::UNKNOWN,
-            spawn_request: req_with_extras(extras.clone()),
-            writer: RendererHandle::test_writer(id, a),
-            events: events_tx,
-            _release_events_tx: release_events_tx,
-            release_events_rx: StdMutex::new(Some(release_events_rx)),
-            progress: Arc::new(StdMutex::new(RendererProgress::new())),
-            published_pool: Arc::new(StdMutex::new(None)),
-            sync_fds: Arc::new(StdMutex::new(std::collections::VecDeque::new())),
-            latest_frame: Arc::new(StdMutex::new(None)),
-            release_syncobj: Arc::new(StdMutex::new(None)),
-            format_caps: Arc::new(StdMutex::new(None)),
-            last_dispatched_scheme: Arc::new(StdMutex::new(None)),
-            frame_record_tx: None,
-            pending_configure: Arc::new(StdMutex::new(None)),
-            child: Arc::new(TokioMutex::new(None)),
-            reported_state: Arc::new(StdMutex::new(RendererReportedState::default())),
-        })
-    }
-
-    fn req_with_extras(extras: HashMap<String, String>) -> SpawnRequest {
-        SpawnRequest {
-            extras,
-            wp_type: "video".into(),
-            settings: HashMap::new(),
-            test_pattern: false,
-            renderer_name: None,
-            user_property_overrides: HashMap::new(),
-            default_user_properties: HashMap::new(),
-        }
-    }
-
     #[tokio::test]
-    async fn find_reusable_hits_when_extras_match() {
-        let mut registry = RendererRegistry::new();
-        registry.register(def_mpv());
-        let mgr = RendererManager::new(registry);
+    async fn stop_generation_does_not_remove_a_newer_process() {
+        let mgr = RendererManager::new(RendererRegistry::new());
+        let handle = RendererHandle::test_stub("h1", "image");
+        let generation = handle.process_generation;
+        mgr.register_test_handle(handle).await;
 
-        let mut extras = HashMap::new();
-        extras.insert("path".into(), "/clip.mp4".into());
-        let h = live_mpv_handle("h1", extras.clone());
-        mgr.register_test_handle(h).await;
+        assert!(mgr
+            .stop_generation("h1", generation.wrapping_add(1))
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(mgr.get("h1").await.unwrap().process_generation, generation);
 
-        let req = req_with_extras(extras);
-        let id = mgr.find_reusable(&req).await.expect("reuse hit expected");
-        assert_eq!(id, "h1");
-    }
-
-    #[tokio::test]
-    async fn reusable_renderer_ids_are_sorted() {
-        let mut registry = RendererRegistry::new();
-        registry.register(def_mpv());
-        let mgr = RendererManager::new(registry);
-
-        let mut extras = HashMap::new();
-        extras.insert("path".into(), "/clip.mp4".into());
-        mgr.register_test_handle(live_mpv_handle("h2", extras.clone()))
-            .await;
-        mgr.register_test_handle(live_mpv_handle("h1", extras.clone()))
-            .await;
-
-        let ids = mgr.reusable_renderer_ids(&req_with_extras(extras)).await;
-        assert_eq!(ids, vec!["h1".to_string(), "h2".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn find_reusable_misses_on_different_path() {
-        let mut registry = RendererRegistry::new();
-        registry.register(def_mpv());
-        let mgr = RendererManager::new(registry);
-
-        let mut h_extras = HashMap::new();
-        h_extras.insert("path".into(), "/clip.mp4".into());
-        mgr.register_test_handle(live_mpv_handle("h1", h_extras))
-            .await;
-
-        let mut req_extras = HashMap::new();
-        req_extras.insert("path".into(), "/other.mp4".into());
-        let req = req_with_extras(req_extras);
-        assert!(
-            mgr.find_reusable(&req).await.is_none(),
-            "different path must miss reuse",
-        );
-    }
-
-    #[tokio::test]
-    async fn find_reusable_misses_on_different_authored_defaults() {
-        let mut registry = RendererRegistry::new();
-        registry.register(def_mpv());
-        let mgr = RendererManager::new(registry);
-
-        let extras = HashMap::from([("path".into(), "/clip.mp4".into())]);
-        let h = live_mpv_handle("h1", extras.clone());
-        mgr.register_test_handle(h).await;
-
-        let mut req = req_with_extras(extras);
-        req.default_user_properties
-            .insert("waywallen.scheme_color".into(), "0.1 0.2 0.3".into());
-        assert!(mgr.find_reusable(&req).await.is_none());
+        let exit = mgr
+            .stop_generation("h1", generation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(exit.process_generation, generation);
+        assert!(mgr.get("h1").await.is_none());
     }
 
     #[tokio::test]
@@ -2506,6 +2539,7 @@ mod reuse_tests {
             tokio::sync::mpsc::unbounded_channel::<crate::wallframe::sync::ReleaseEvent>();
         let h = Arc::new(RendererHandle {
             id: "h1".into(),
+            process_generation: 1,
             wp_type: "video".into(),
             extras: HashMap::new(),
             name: "waywallen-mpv".into(),

@@ -134,6 +134,10 @@
         <translation>退出</translation>
     </message>
     <message>
+        <source>Assigned</source>
+        <translation>已分配</translation>
+    </message>
+    <message>
         <source>Restart</source>
         <translation>重启</translation>
     </message>
@@ -1314,8 +1318,8 @@ Unsaved frame state may be lost.</source>
         <translation>状态：</translation>
     </message>
     <message>
-        <source>Active Renderers</source>
-        <translation>运行的渲染器</translation>
+        <source>Renderers</source>
+        <translation>渲染器</translation>
     </message>
     <message>
         <source>Mute all</source>
@@ -1326,8 +1330,12 @@ Unsaved frame state may be lost.</source>
         <translation>全部暂停</translation>
     </message>
     <message>
-        <source>No active renderers</source>
-        <translation>没有活跃的渲染器</translation>
+        <source>No renderers</source>
+        <translation>没有渲染器</translation>
+    </message>
+    <message>
+        <source>Exit</source>
+        <translation>退出</translation>
     </message>
     <message>
         <source>Components</source>

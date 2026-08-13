@@ -81,6 +81,10 @@ impl RoutingTable {
         self.renderers.insert(id, handle);
     }
 
+    pub fn detach_renderer(&mut self, id: &str) -> Option<Arc<RendererHandle>> {
+        self.renderers.remove(id)
+    }
+
     /// Remove a renderer and the links pointing at it. Returns the
     /// (link_id, display_id) pairs that were removed so the caller can
     pub fn remove_renderer(&mut self, id: &str) -> Vec<(LinkId, DisplayId)> {
@@ -119,8 +123,17 @@ impl RoutingTable {
     /// Add a `(renderer → display)` link and return its id. Enforces
     /// the single-wallpaper invariant by *first* deleting any prior
     pub fn add_link(&mut self, renderer_id: RendererId, display_id: DisplayId) -> LinkId {
+        self.add_link_with_enabled(renderer_id, display_id, true)
+    }
+
+    pub fn add_link_with_enabled(
+        &mut self,
+        renderer_id: RendererId,
+        display_id: DisplayId,
+        enabled: bool,
+    ) -> LinkId {
         // Delete pre-existing links for this display so it has exactly
-        // one active renderer in the current routing model.
+        // one assigned renderer in the current routing model.
         let existing: Vec<LinkId> = self
             .by_display
             .get(&display_id)
@@ -141,7 +154,7 @@ impl RoutingTable {
             id,
             renderer_id: renderer_id.clone(),
             display_id,
-            enabled: true,
+            enabled,
             src_rect: FULL_SRC,
             dst_rect: FULL_DST,
             transform: 0,

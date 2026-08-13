@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) fn run_reader(
     id: RendererId,
+    process_generation: RendererProcessGeneration,
     read_stream: StdUnixStream,
     writer: RendererWriter,
     subscriptions: Arc<RendererSubscriptionRegistry>,
@@ -14,12 +15,13 @@ pub(super) fn run_reader(
     pending_configure: Arc<StdMutex<Option<u32>>>,
     reported_state: Arc<StdMutex<RendererReportedState>>,
     progress: Arc<StdMutex<RendererProgress>>,
-    reap_tx: tokio::sync::mpsc::UnboundedSender<RendererId>,
+    reap_tx: tokio::sync::mpsc::UnboundedSender<(RendererId, RendererProcessGeneration)>,
 ) {
     // Any reader exit enqueues renderer eviction so stale ids do not remain
     // registered after EOF, recvmsg error, or panic.
     let _reap = ReaperOnDrop {
         id: id.clone(),
+        process_generation,
         tx: reap_tx,
     };
 
@@ -283,12 +285,13 @@ pub(super) fn run_reader(
 /// thread drops on any exit path.
 struct ReaperOnDrop {
     id: RendererId,
-    tx: tokio::sync::mpsc::UnboundedSender<RendererId>,
+    process_generation: RendererProcessGeneration,
+    tx: tokio::sync::mpsc::UnboundedSender<(RendererId, RendererProcessGeneration)>,
 }
 
 impl Drop for ReaperOnDrop {
     fn drop(&mut self) {
         let id = std::mem::take(&mut self.id);
-        let _ = self.tx.send(id);
+        let _ = self.tx.send((id, self.process_generation));
     }
 }

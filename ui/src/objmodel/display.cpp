@@ -26,6 +26,7 @@ auto Display::linksFromPb(const proto::DisplayInfo& info) -> QVariantList {
         QVariantMap m;
         m[u"rendererId"_s] = l.rendererId();
         m[u"zOrder"_s]     = static_cast<int>(l.zOrder());
+        m[u"active"_s]     = l.active();
         out.append(m);
     }
     return out;

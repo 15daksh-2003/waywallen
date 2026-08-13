@@ -68,6 +68,17 @@ where
     }
     state.playlists.shutdown().await;
     state.tasks.wait_stopped().await;
+    let renderer_ids = state
+        .router
+        .snapshot_renderers()
+        .await
+        .into_iter()
+        .map(|renderer| renderer.id)
+        .collect::<Vec<_>>();
+    state
+        .router
+        .stop_renderers_orderly(&renderer_ids, std::time::Duration::from_secs(1))
+        .await;
     state.renderer_manager.shutdown().await;
     state.settings.stop_writer().await;
     state.settings.flush_now().await;

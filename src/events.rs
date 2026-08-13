@@ -18,7 +18,7 @@ pub enum GlobalEvent {
     /// Dependent startup work can now read source/plugin state.
     SourcesReady,
     /// At least one display has registered with the router and is
-    /// reachable for `relink_all_displays_to`.
+    /// available to wallpaper assignment.
     DisplayReady,
     /// The startup-restore task succeeded.
     /// Carries the applied wallpaper id, if any.

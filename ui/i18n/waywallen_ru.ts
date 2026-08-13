@@ -136,6 +136,10 @@
         <translation>Выход</translation>
     </message>
     <message>
+        <source>Assigned</source>
+        <translation>Назначено</translation>
+    </message>
+    <message>
         <source>Restart</source>
         <translation>Перезапустить</translation>
     </message>
@@ -1320,8 +1324,8 @@ Unsaved frame state may be lost.</source>
         <translation>Состояние:</translation>
     </message>
     <message>
-        <source>Active Renderers</source>
-        <translation>Активные рендереры</translation>
+        <source>Renderers</source>
+        <translation>Рендереры</translation>
     </message>
     <message>
         <source>Mute all</source>
@@ -1332,8 +1336,12 @@ Unsaved frame state may be lost.</source>
         <translation>Приостановить всё</translation>
     </message>
     <message>
-        <source>No active renderers</source>
-        <translation>Активных рендереров нет</translation>
+        <source>No renderers</source>
+        <translation>Рендереров нет</translation>
+    </message>
+    <message>
+        <source>Exit</source>
+        <translation>Выход</translation>
     </message>
     <message>
         <source>Components</source>

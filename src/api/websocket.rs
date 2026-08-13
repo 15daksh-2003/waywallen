@@ -24,7 +24,7 @@ use crate::settings::{
     remote_content_dir, SettingsStore, WallpaperFilterState, WallpaperSortRuleState,
 };
 use crate::tasks;
-use crate::wallframe::ipc::proto::{ControlMsg, ControlTransition};
+use crate::wallframe::ipc::proto::ControlMsg;
 use crate::wallframe::renderer_manager;
 use crate::wallframe::routing::{
     DisplaySnapshot, LayoutSource, LibrarySnapshot, RendererSnapshot, RouterEvent,

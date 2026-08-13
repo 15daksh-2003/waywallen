@@ -21,9 +21,10 @@ pub(super) struct RendererWriter {
 impl RendererWriter {
     pub(super) fn spawn(
         id: RendererId,
+        process_generation: RendererProcessGeneration,
         stream: StdUnixStream,
         subscriptions: Arc<RendererSubscriptionRegistry>,
-        reap_tx: tokio::sync::mpsc::UnboundedSender<RendererId>,
+        reap_tx: tokio::sync::mpsc::UnboundedSender<(RendererId, RendererProcessGeneration)>,
     ) -> Self {
         let (tx, rx) = std::sync::mpsc::sync_channel(WRITER_QUEUE_CAPACITY);
         let audio = Arc::new(StdMutex::new(None));
@@ -67,7 +68,7 @@ impl RendererWriter {
                                 }
                             }
                             log::warn!("renderer {id}: writer exit: {reason}");
-                            let _ = reap_tx.send(id.clone());
+                            let _ = reap_tx.send((id.clone(), process_generation));
                             break 'writer;
                         }
                     }
@@ -83,7 +84,7 @@ impl RendererWriter {
                     {
                         if let Err(error) = send_control(&stream, &msg, &[]) {
                             log::warn!("renderer {id}: audio writer exit: {error}");
-                            let _ = reap_tx.send(id.clone());
+                            let _ = reap_tx.send((id.clone(), process_generation));
                             break;
                         }
                     }

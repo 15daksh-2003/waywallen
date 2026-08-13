@@ -17,6 +17,13 @@ const PLUGIN_UPDATE_NOTIFICATION_ID: &str = "org.waywallen.waywallen.plugin-upda
 pub struct ApplyResult {
     pub renderer_id: String,
     pub entry: WallpaperEntry,
+    pub activation: ApplyActivation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApplyActivation {
+    Active,
+    Deferred,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

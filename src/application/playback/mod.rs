@@ -7,8 +7,8 @@ pub mod restore;
 
 pub use apply::*;
 pub use lifecycle::{
-    mute_all, pause_all, resume_all, run_auto_stop_restore, set_mute_all, set_pause_all,
-    toggle_mute_all, toggle_pause_all, unmute_all,
+    mute_all, pause_all, resume_all, set_mute_all, set_pause_all, toggle_mute_all,
+    toggle_pause_all, unmute_all,
 };
 pub(crate) use playlist::activate_resuming_with_first_frame_timeout;
 pub use playlist::{

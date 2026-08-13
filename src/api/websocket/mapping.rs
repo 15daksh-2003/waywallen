@@ -321,6 +321,7 @@ pub(super) fn display_snapshot_to_pb(
             .map(|l| pb::DisplayLinkInfo {
                 renderer_id: l.renderer_id,
                 z_order: l.z_order,
+                active: l.active,
             })
             .collect(),
         effective_layout: Some(layout_prefs_to_pb_resolved(&s.effective_layout)),
@@ -673,7 +674,11 @@ pub(super) fn renderer_snapshot_to_pb(
     pb::RendererInstance {
         renderer_id: s.id,
         fps,
-        status: s.status.as_str().to_string(),
+        status: if s.process_state == crate::wallframe::routing::RendererProcessState::Running {
+            s.status.as_str().to_string()
+        } else {
+            s.process_state.as_str().to_string()
+        },
         name: s.name,
         pid: s.pid,
         drm_render_major: s.drm_render_major,
@@ -693,6 +698,56 @@ pub(super) fn renderer_snapshot_to_pb(
             .into_iter()
             .map(runtime_condition_to_pb)
             .collect(),
+        process_state: match s.process_state {
+            crate::wallframe::routing::RendererProcessState::Starting => {
+                pb::RendererProcessState::Starting as i32
+            }
+            crate::wallframe::routing::RendererProcessState::Running => {
+                pb::RendererProcessState::Running as i32
+            }
+            crate::wallframe::routing::RendererProcessState::Stopping => {
+                pb::RendererProcessState::Stopping as i32
+            }
+            crate::wallframe::routing::RendererProcessState::Stopped => {
+                pb::RendererProcessState::Stopped as i32
+            }
+            crate::wallframe::routing::RendererProcessState::Killed => {
+                pb::RendererProcessState::Killed as i32
+            }
+            crate::wallframe::routing::RendererProcessState::Failed => {
+                pb::RendererProcessState::Failed as i32
+            }
+        },
+        activity_state: match s.process_state {
+            crate::wallframe::routing::RendererProcessState::Stopped
+            | crate::wallframe::routing::RendererProcessState::Killed
+            | crate::wallframe::routing::RendererProcessState::Failed => {
+                pb::RendererActivityState::Stopped as i32
+            }
+            _ => match s.status {
+                crate::wallframe::routing::RendererStatus::Playing => {
+                    pb::RendererActivityState::Playing as i32
+                }
+                crate::wallframe::routing::RendererStatus::Paused(
+                    crate::wallframe::routing::PausedRendererStatus::Paused,
+                ) => pb::RendererActivityState::Paused as i32,
+                crate::wallframe::routing::RendererStatus::Paused(
+                    crate::wallframe::routing::PausedRendererStatus::Muted,
+                ) => pb::RendererActivityState::Muted as i32,
+                crate::wallframe::routing::RendererStatus::Stopped => {
+                    pb::RendererActivityState::Stopped as i32
+                }
+            },
+        },
+        keep: s.retention.keep(),
+        process_generation: s.process_generation,
+        last_exit: s.last_exit.map(|exit| pb::RendererExit {
+            code: exit.code.unwrap_or_default(),
+            signal: exit.signal.unwrap_or_default(),
+            has_code: exit.code.is_some(),
+            has_signal: exit.signal.is_some(),
+            reason: exit.reason,
+        }),
     }
 }
 

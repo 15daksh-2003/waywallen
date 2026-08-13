@@ -30,6 +30,12 @@ class Renderer : public QObject {
     Q_PROPERTY(QString id READ id CONSTANT FINAL)
     Q_PROPERTY(quint32 fps READ fps NOTIFY fpsChanged FINAL)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged FINAL)
+    Q_PROPERTY(int processState READ processState NOTIFY processStateChanged FINAL)
+    Q_PROPERTY(int activityState READ activityState NOTIFY activityStateChanged FINAL)
+    Q_PROPERTY(bool keep READ keep NOTIFY keepChanged FINAL)
+    Q_PROPERTY(
+        quint64 processGeneration READ processGeneration NOTIFY processGenerationChanged FINAL)
+    Q_PROPERTY(QString lastExitReason READ lastExitReason NOTIFY lastExitChanged FINAL)
     Q_PROPERTY(QString name READ name NOTIFY nameChanged FINAL)
     Q_PROPERTY(quint32 pid READ pid NOTIFY pidChanged FINAL)
     Q_PROPERTY(quint32 textureWidth READ textureWidth NOTIFY textureSizeChanged FINAL)
@@ -37,11 +43,8 @@ class Renderer : public QObject {
     Q_PROPERTY(
         QVariantList runtimeConditions READ runtimeConditions NOTIFY runtimeConditionsChanged FINAL)
     Q_PROPERTY(QVariantList runtimeTags READ runtimeTags NOTIFY runtimeTagsChanged FINAL)
-    // DRM render-node id of the GPU this renderer is on. Populated from
-    // the renderer's `Ready` event during the synchronous spawn handshake,
-    // so by the time UI sees this object the value is already final.
-    Q_PROPERTY(quint32 drmRenderMajor READ drmRenderMajor CONSTANT FINAL)
-    Q_PROPERTY(quint32 drmRenderMinor READ drmRenderMinor CONSTANT FINAL)
+    Q_PROPERTY(quint32 drmRenderMajor READ drmRenderMajor NOTIFY drmRenderChanged FINAL)
+    Q_PROPERTY(quint32 drmRenderMinor READ drmRenderMinor NOTIFY drmRenderChanged FINAL)
 
 public:
     explicit Renderer(const proto::RendererInstance& info, QObject* parent = nullptr);
@@ -49,6 +52,11 @@ public:
     auto id() const -> const QString& { return m_id; }
     auto fps() const -> quint32 { return m_fps; }
     auto status() const -> const QString& { return m_status; }
+    auto processState() const -> int { return m_process_state; }
+    auto activityState() const -> int { return m_activity_state; }
+    auto keep() const -> bool { return m_keep; }
+    auto processGeneration() const -> quint64 { return m_process_generation; }
+    auto lastExitReason() const -> const QString& { return m_last_exit_reason; }
     auto name() const -> const QString& { return m_name; }
     auto pid() const -> quint32 { return m_pid; }
     auto textureWidth() const -> quint32 { return m_texture_width; }
@@ -64,9 +72,15 @@ public:
 
     Q_SIGNAL void fpsChanged();
     Q_SIGNAL void statusChanged();
+    Q_SIGNAL void processStateChanged();
+    Q_SIGNAL void activityStateChanged();
+    Q_SIGNAL void keepChanged();
+    Q_SIGNAL void processGenerationChanged();
+    Q_SIGNAL void lastExitChanged();
     Q_SIGNAL void nameChanged();
     Q_SIGNAL void pidChanged();
     Q_SIGNAL void textureSizeChanged();
+    Q_SIGNAL void drmRenderChanged();
     Q_SIGNAL void runtimeConditionsChanged();
     Q_SIGNAL void runtimeTagsChanged();
 
@@ -74,6 +88,11 @@ private:
     QString      m_id;
     quint32      m_fps;
     QString      m_status;
+    int          m_process_state;
+    int          m_activity_state;
+    bool         m_keep;
+    quint64      m_process_generation;
+    QString      m_last_exit_reason;
     QString      m_name;
     quint32      m_pid;
     quint32      m_texture_width;

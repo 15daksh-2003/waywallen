@@ -3,10 +3,11 @@ pub mod router;
 pub mod table;
 
 pub use router::{
-    AutoStopEvent, BlurEffectConfig, ConsumerImportFailureKind, ConsumerImportFailureOutcome,
+    BlurEffectConfig, ConsumerImportFailureKind, ConsumerImportFailureOutcome,
     DisplayConsumptionPermit, DisplayHandle, DisplayLinkSnapshot, DisplayOutEvent,
     DisplayRegistration, DisplaySnapshot, LayoutSource, LibrarySnapshot, PauseEffectConfig,
-    PauseEffectState, PresentationConfig, PresentationSnapshot, PresentationState,
+    PauseEffectState, PausedRendererStatus, PresentationConfig, PresentationSnapshot,
+    PresentationState, RendererExitSnapshot, RendererProcessState, RendererRetention,
     RendererSnapshot, RendererStatus, Router, RouterEvent, RuntimeCondition, RuntimeConditionKind,
     RuntimeConditionOrigin, PRESENTATION_CAP_PAUSE_BLUR,
 };

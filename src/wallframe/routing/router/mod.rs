@@ -18,6 +18,7 @@ const RESUME_RETRY_MAX: Duration = Duration::from_secs(10);
 const RUNTIME_WAITING_SOFT: Duration = Duration::from_secs(2);
 const RUNTIME_PROGRESS_HARD: Duration = Duration::from_secs(10);
 const RUNTIME_HEALTH_POLL: Duration = Duration::from_millis(500);
+const PROCESS_RESTART_MAX_FAILURES: u32 = 5;
 
 use crate::catalog::properties::WallpaperLayoutOverride;
 use crate::plugin::renderer_registry::RendererActivityMode;
@@ -41,8 +42,11 @@ use super::table::{Link, LinkDstRect, LinkId, LinkSrcRect, RoutingTable};
 mod composition;
 mod display_sync;
 mod lifecycle;
+mod slot;
 mod snapshot;
 
+use slot::RendererSlot;
+pub use slot::{RendererExitSnapshot, RendererProcessState, RendererRetention};
 use snapshot::project_link;
 
 /// Wire-translated event streamed from router to a display endpoint.
@@ -136,12 +140,6 @@ impl DisplayConsumptionPermit {
     pub fn is_current(&self) -> bool {
         self.current.load(Ordering::Acquire) == self.epoch
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct AutoStopEvent {
-    pub display_id: DisplayId,
-    pub stopped: bool,
 }
 
 enum AutoStateAction {
@@ -240,6 +238,7 @@ pub struct DisplayHandle {
 pub struct DisplayLinkSnapshot {
     pub renderer_id: RendererId,
     pub z_order: i32,
+    pub active: bool,
 }
 
 /// Transport-agnostic router event. The WebSocket API subscribes and
@@ -318,6 +317,7 @@ pub struct RuntimeCondition {
 pub enum RendererStatus {
     Playing,
     Paused(PausedRendererStatus),
+    Stopped,
 }
 
 impl Default for RendererStatus {
@@ -330,6 +330,7 @@ impl RendererStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Playing => "playing",
+            Self::Stopped => "stopped",
             Self::Paused(status) => match status {
                 PausedRendererStatus::Muted => "muted",
                 PausedRendererStatus::Paused => "paused",
@@ -346,6 +347,10 @@ pub struct RendererSnapshot {
     pub wp_type: String,
     pub name: String,
     pub status: RendererStatus,
+    pub process_state: RendererProcessState,
+    pub retention: RendererRetention,
+    pub process_generation: u64,
+    pub last_exit: Option<RendererExitSnapshot>,
     pub pid: u32,
     pub drm_render_major: u32,
     pub drm_render_minor: u32,
@@ -510,13 +515,13 @@ fn evaluate_renderer_conditions(
 
 struct Inner {
     table: RoutingTable,
+    renderer_slots: HashMap<RendererId, RendererSlot>,
     displays: HashMap<DisplayId, DisplayState>,
     renderer_tasks: HashMap<RendererId, JoinHandle<()>>,
-    /// The states of the paused renderers we know about.
-    /// Used to compute play/pause and mute/unmute state.
-    renderer_states: HashMap<RendererId, PausedRendererStatus>,
+    renderer_manual_paused: HashSet<RendererId>,
     resume_retries: HashMap<RendererId, ResumeRetry>,
     resume_retry_tasks: HashMap<RendererId, JoinHandle<()>>,
+    process_restart_tasks: HashMap<RendererId, JoinHandle<()>>,
     next_resume_retry_generation: u64,
     /// Set when the screen-saver / lock-screen is active.
     session_locked: bool,
@@ -555,7 +560,6 @@ pub struct Router {
     /// Fan-out channel for `RouterEvent`s. Always present; `send` errors
     /// when there are no subscribers are logged at debug and ignored.
     events_tx: broadcast::Sender<RouterEvent>,
-    auto_stop_tx: broadcast::Sender<AutoStopEvent>,
     /// Settings store used to resolve per-display fillmode/align when
     /// computing composition config. Set once at startup.
     settings: std::sync::OnceLock<Arc<SettingsStore>>,
@@ -573,15 +577,16 @@ impl Router {
 
     pub fn new(mgr: Arc<RendererManager>) -> Arc<Self> {
         let (events_tx, _) = broadcast::channel(128);
-        let (auto_stop_tx, _) = broadcast::channel(128);
         let router = Arc::new(Self {
             inner: TokioMutex::new(Inner {
                 table: RoutingTable::new(),
+                renderer_slots: HashMap::new(),
                 displays: HashMap::new(),
                 renderer_tasks: HashMap::new(),
-                renderer_states: HashMap::new(),
+                renderer_manual_paused: HashSet::new(),
                 resume_retries: HashMap::new(),
                 resume_retry_tasks: HashMap::new(),
+                process_restart_tasks: HashMap::new(),
                 next_resume_retry_generation: 0,
                 orphan_timers: HashMap::new(),
                 unbind_acks_pending: HashMap::new(),
@@ -603,11 +608,27 @@ impl Router {
             lifecycle_lock: TokioMutex::new(()),
             mgr,
             events_tx,
-            auto_stop_tx,
             settings: std::sync::OnceLock::new(),
             unbind_ack_notify: Notify::new(),
         });
         router
+    }
+
+    pub fn start_process_exit_listener(
+        self: &Arc<Self>,
+        mut exits: tokio::sync::mpsc::UnboundedReceiver<
+            crate::wallframe::renderer_manager::RendererProcessExit,
+        >,
+    ) {
+        let router = Arc::downgrade(self);
+        tokio::spawn(async move {
+            while let Some(exit) = exits.recv().await {
+                let Some(router) = router.upgrade() else {
+                    return;
+                };
+                router.on_renderer_process_exit(exit).await;
+            }
+        });
     }
 
     /// Wire the daemon's `SettingsStore` so `sync_display` can resolve
@@ -725,9 +746,11 @@ impl Router {
             return false;
         };
         inner
-            .renderer_states
+            .renderer_slots
             .get(&binding.renderer.id)
-            .is_some_and(|status| *status == PausedRendererStatus::Paused)
+            .is_some_and(|slot| {
+                slot.activity_state == RendererStatus::Paused(PausedRendererStatus::Paused)
+            })
     }
 
     fn resolved_audio_fade_ms(&self) -> u32 {
@@ -943,6 +966,14 @@ impl Router {
     // Renderer lifecycle
 
     pub async fn register_renderer(self: &Arc<Self>, handle: Arc<RendererHandle>) {
+        let _ = self.register_renderer_current(handle, None).await;
+    }
+
+    async fn register_renderer_current(
+        self: &Arc<Self>,
+        handle: Arc<RendererHandle>,
+        expected_start: Option<(u64, u64)>,
+    ) -> bool {
         let id = handle.id.clone();
         let task = {
             let mut events = handle.events();
@@ -1035,17 +1066,35 @@ impl Router {
         };
         {
             let mut inner = self.inner.lock().await;
+            if let Some((spec_revision, process_generation)) = expected_start {
+                let current = inner.renderer_slots.get(&id).is_some_and(|slot| {
+                    slot.spec_revision == spec_revision
+                        && slot.process_generation == process_generation
+                        && slot.process_state == RendererProcessState::Starting
+                });
+                if !current {
+                    task.abort();
+                    return false;
+                }
+            }
+            inner
+                .renderer_slots
+                .entry(id.clone())
+                .and_modify(|slot| slot.attach_process(&handle))
+                .or_insert_with(|| RendererSlot::running(&handle));
             inner.table.add_renderer(handle);
             inner.renderer_tasks.insert(id, task);
         }
         self.reconcile_lifecycle().await;
         self.refresh_runtime_health().await;
+        true
     }
 
     pub async fn unregister_renderer(self: &Arc<Self>, id: &str) {
         let affected: Vec<DisplayId> = {
             let mut inner = self.inner.lock().await;
             let removed = inner.table.remove_renderer(id);
+            inner.renderer_slots.remove(id);
             inner.wallpaper_layout_overrides.remove(id);
             if let Some(task) = inner.renderer_tasks.remove(id) {
                 task.abort();
@@ -1053,9 +1102,12 @@ impl Router {
             if let Some(task) = inner.orphan_timers.remove(id) {
                 task.abort();
             }
-            inner.renderer_states.remove(id);
+            inner.renderer_manual_paused.remove(id);
             inner.resume_retries.remove(id);
             if let Some(task) = inner.resume_retry_tasks.remove(id) {
+                task.abort();
+            }
+            if let Some(task) = inner.process_restart_tasks.remove(id) {
                 task.abort();
             }
             inner.release_waits.remove(id);
@@ -1076,6 +1128,108 @@ impl Router {
         }
     }
 
+    pub async fn on_renderer_process_exit(
+        self: &Arc<Self>,
+        exit: crate::wallframe::renderer_manager::RendererProcessExit,
+    ) {
+        let Some((renderer_id, remove_slot, process_state)) =
+            self.settle_renderer_process_exit(exit).await
+        else {
+            return;
+        };
+        if !remove_slot {
+            if process_state == RendererProcessState::Stopped {
+                self.start_retained_renderer(&renderer_id).await;
+            }
+            self.schedule_process_restart(&renderer_id).await;
+        }
+    }
+
+    async fn settle_renderer_process_exit(
+        self: &Arc<Self>,
+        exit: crate::wallframe::renderer_manager::RendererProcessExit,
+    ) -> Option<(RendererId, bool, RendererProcessState)> {
+        let renderer_id = exit.renderer_id.clone();
+        let (affected, remove_slot, process_state) = {
+            let mut inner = self.inner.lock().await;
+            let Some(slot) = inner.renderer_slots.get_mut(&exit.renderer_id) else {
+                return None;
+            };
+            if slot.process_generation != exit.process_generation {
+                log::debug!(
+                    "renderer {}: ignore stale process exit generation={} current={}",
+                    exit.renderer_id,
+                    exit.process_generation,
+                    slot.process_generation
+                );
+                return None;
+            }
+            slot.process_state = match exit.kind {
+                crate::wallframe::renderer_manager::RendererProcessExitKind::Stopped => {
+                    RendererProcessState::Stopped
+                }
+                crate::wallframe::renderer_manager::RendererProcessExitKind::Killed => {
+                    RendererProcessState::Killed
+                }
+                crate::wallframe::renderer_manager::RendererProcessExitKind::Failed => {
+                    RendererProcessState::Failed
+                }
+            };
+            slot.activity_state = RendererStatus::Stopped;
+            let process_state = slot.process_state;
+            slot.last_exit = Some(RendererExitSnapshot {
+                code: exit.code,
+                signal: exit.signal,
+                reason: exit.reason,
+            });
+            let remove_slot = slot.retention == RendererRetention::Drop;
+            inner.table.detach_renderer(&exit.renderer_id);
+            if let Some(task) = inner.renderer_tasks.remove(&exit.renderer_id) {
+                task.abort();
+            }
+            if let Some(task) = inner.orphan_timers.remove(&exit.renderer_id) {
+                task.abort();
+            }
+            inner.resume_retries.remove(&exit.renderer_id);
+            if let Some(task) = inner.resume_retry_tasks.remove(&exit.renderer_id) {
+                task.abort();
+            }
+            if let Some(task) = inner.process_restart_tasks.remove(&exit.renderer_id) {
+                task.abort();
+            }
+            inner.release_waits.remove(&exit.renderer_id);
+            inner.generation_poisoned.remove(&exit.renderer_id);
+            inner.renderer_conditions.remove(&exit.renderer_id);
+            inner.generation_recoveries.remove(&exit.renderer_id);
+            let affected = inner
+                .table
+                .links_for_renderer(&exit.renderer_id)
+                .into_iter()
+                .map(|link| link.display_id)
+                .collect::<Vec<_>>();
+            if remove_slot {
+                inner.renderer_manual_paused.remove(&exit.renderer_id);
+                inner.table.remove_renderer(&exit.renderer_id);
+                inner.renderer_slots.remove(&exit.renderer_id);
+            }
+            (affected, remove_slot, process_state)
+        };
+        for display_id in &affected {
+            self.sync_display(*display_id).await;
+        }
+        if remove_slot {
+            self.emit(RouterEvent::RendererRemoved(renderer_id.clone()));
+        } else if let Some(snapshot) = self.snapshot_renderer(&renderer_id).await {
+            self.emit(RouterEvent::RendererUpsert(snapshot));
+        }
+        if !affected.is_empty() {
+            self.emit(RouterEvent::DisplaysReplace(self.snapshot_displays().await));
+        }
+        self.reconcile_lifecycle().await;
+        self.refresh_runtime_health().await;
+        Some((renderer_id, remove_slot, process_state))
+    }
+
     pub async fn set_renderer_wallpaper_layout_override(
         self: &Arc<Self>,
         renderer_id: &str,
@@ -1083,7 +1237,7 @@ impl Router {
     ) -> bool {
         let display_ids: Vec<DisplayId> = {
             let mut inner = self.inner.lock().await;
-            if inner.table.get_renderer(renderer_id).is_none() {
+            if !inner.renderer_slots.contains_key(renderer_id) {
                 return false;
             }
             if layout.is_empty() {
@@ -1608,10 +1762,10 @@ impl Router {
                     continue;
                 };
                 let status = inner
-                    .renderer_states
+                    .renderer_slots
                     .get(&renderer_id)
-                    .map(|status| RendererStatus::Paused(*status))
-                    .unwrap_or(RendererStatus::Playing);
+                    .map(|slot| slot.activity_state)
+                    .unwrap_or(RendererStatus::Stopped);
                 let has_audience = inner
                     .table
                     .links_for_renderer(&renderer_id)
@@ -1742,15 +1896,14 @@ impl Router {
                     "renderer {renderer_id}: poisoned generation unbind acknowledgement timed out"
                 );
             }
-            if let Err(error) = self.mgr.kill(renderer_id).await {
+            if let Err(error) = self
+                .stop_renderer_drop(renderer_id, Duration::from_secs(1))
+                .await
+            {
                 log::warn!("renderer {renderer_id}: poisoned generation stop failed: {error}");
             }
             log::info!("renderer {renderer_id}: recovered as {new_id}");
         })
-    }
-
-    pub fn subscribe_auto_stop(self: &Arc<Self>) -> broadcast::Receiver<AutoStopEvent> {
-        self.auto_stop_tx.subscribe()
     }
 
     /// Number of currently registered displays. Cheap (O(1) on the
@@ -1794,29 +1947,23 @@ impl Router {
         ids
     }
 
-    /// Walk every renderer in the table and schedule a 5s reap timer
-    /// for those with no enabled links, except the optional `keep` id.
+    /// Schedule or remove slots that no longer have an assignment.
     pub async fn mark_orphans(self: &Arc<Self>, keep: Option<&str>) -> Vec<RendererId> {
-        // Snapshot candidates and grace eligibility in one critical section
-        // so all orphans in this batch agree on policy.
         let (candidates, lone_renderer_no_displays) = {
             let inner = self.inner.lock().await;
             let cs: Vec<RendererId> = inner
-                .table
-                .renderer_ids()
+                .renderer_slots
+                .keys()
+                .cloned()
                 .into_iter()
                 .filter(|rid| {
                     if Some(rid.as_str()) == keep {
                         return false;
                     }
-                    inner
-                        .table
-                        .links_for_renderer(rid)
-                        .iter()
-                        .all(|l| !l.enabled)
+                    inner.table.links_for_renderer(rid).is_empty()
                 })
                 .collect();
-            let lone = inner.displays.is_empty() && inner.table.renderer_ids().len() == 1;
+            let lone = inner.displays.is_empty() && inner.renderer_slots.len() == 1;
             (cs, lone)
         };
         for rid in &candidates {
@@ -1837,7 +1984,7 @@ impl Router {
     pub async fn mark_orphan(self: &Arc<Self>, renderer_id: RendererId) {
         let lone_renderer_no_displays = {
             let inner = self.inner.lock().await;
-            inner.displays.is_empty() && inner.table.renderer_ids().len() == 1
+            inner.displays.is_empty() && inner.renderer_slots.len() == 1
         };
         if lone_renderer_no_displays {
             self.schedule_orphan_grace(renderer_id).await;
@@ -1866,9 +2013,8 @@ impl Router {
 
     async fn kill_orphan_now(self: &Arc<Self>, renderer_id: &str) {
         log::info!("router: reaping orphan renderer {renderer_id} immediately");
-        self.unregister_renderer(renderer_id).await;
-        if let Err(e) = self.mgr.kill(renderer_id).await {
-            log::warn!("router: kill orphan {renderer_id}: {e}");
+        if let Err(error) = self.kill_renderer_drop(renderer_id).await {
+            log::warn!("router: kill orphan {renderer_id}: {error}");
         }
     }
 
@@ -1890,24 +2036,17 @@ impl Router {
             // Drop our own entry first so a concurrent re-mark sees an
             // empty slot and schedules a fresh timer.
             inner.orphan_timers.remove(renderer_id);
-            // Renderer might have been removed via `unregister_renderer`
-            // already (manual kill, etc.) — bail in that case.
-            if !inner.table.renderer_ids().iter().any(|r| r == renderer_id) {
+            if !inner.renderer_slots.contains_key(renderer_id) {
                 return;
             }
-            inner
-                .table
-                .links_for_renderer(renderer_id)
-                .iter()
-                .all(|l| !l.enabled)
+            inner.table.links_for_renderer(renderer_id).is_empty()
         };
         if !still_orphan {
             return;
         }
         log::info!("router: reaping orphan renderer {renderer_id} after grace");
-        self.unregister_renderer(renderer_id).await;
-        if let Err(e) = self.mgr.kill(renderer_id).await {
-            log::warn!("router: kill orphan {renderer_id}: {e}");
+        if let Err(error) = self.kill_renderer_drop(renderer_id).await {
+            log::warn!("router: kill orphan {renderer_id}: {error}");
         }
     }
 
@@ -1924,12 +2063,7 @@ impl Router {
     pub async fn snapshot_display(self: &Arc<Self>, id: DisplayId) -> Option<DisplaySnapshot> {
         let inner = self.inner.lock().await;
         let s = inner.displays.get(&id)?;
-        let link_rows: Vec<Link> = inner
-            .table
-            .links_for_display(id)
-            .into_iter()
-            .filter(|l| l.enabled)
-            .collect();
+        let link_rows = inner.table.links_for_display(id);
         let display_layout = self.resolved_layout(&s.info);
         let display_layout_source = self.display_layout_source(&s.info);
         let wallpaper_layout_override = link_rows.first().and_then(|l| {
@@ -1950,6 +2084,7 @@ impl Router {
             .map(|l| DisplayLinkSnapshot {
                 renderer_id: l.renderer_id,
                 z_order: l.z_order,
+                active: l.enabled,
             })
             .collect();
         Some(DisplaySnapshot {
@@ -1973,28 +2108,34 @@ impl Router {
         })
     }
 
-    /// Snapshot of a single renderer by id. Returns `None` if the
-    /// renderer has been unregistered from the routing table.
+    /// Snapshot of a single logical renderer slot by id.
     pub async fn snapshot_renderer(self: &Arc<Self>, id: &str) -> Option<RendererSnapshot> {
         let inner = self.inner.lock().await;
-        let handle = inner.table.get_renderer(id)?;
-        let status = inner
-            .renderer_states
-            .get(id)
-            .map(|status| RendererStatus::Paused(*status))
-            .unwrap_or(RendererStatus::Playing);
-        let (tw, th) = handle.texture_size();
+        let slot = inner.renderer_slots.get(id)?;
+        let handle = inner.table.get_renderer(id);
+        let status = slot.activity_state;
+        let (tw, th) = handle
+            .as_ref()
+            .map(|handle| handle.texture_size())
+            .unwrap_or_default();
         Some(RendererSnapshot {
-            id: handle.id.clone(),
-            wp_type: handle.wp_type.clone(),
-            name: handle.name.clone(),
+            id: id.to_string(),
+            wp_type: slot.spawn_request.wp_type.clone(),
+            name: slot.name.clone(),
             status,
-            pid: handle.pid.unwrap_or(0),
-            drm_render_major: handle.gpu.major,
-            drm_render_minor: handle.gpu.minor,
+            process_state: slot.process_state,
+            retention: slot.retention,
+            process_generation: slot.process_generation,
+            last_exit: slot.last_exit.clone(),
+            pid: handle.as_ref().and_then(|handle| handle.pid).unwrap_or(0),
+            drm_render_major: handle.as_ref().map(|handle| handle.gpu.major).unwrap_or(0),
+            drm_render_minor: handle.as_ref().map(|handle| handle.gpu.minor).unwrap_or(0),
             texture_width: tw,
             texture_height: th,
-            runtime_tags: handle.runtime_tags(),
+            runtime_tags: handle
+                .as_ref()
+                .map(|handle| handle.runtime_tags())
+                .unwrap_or_default(),
             conditions: inner
                 .renderer_conditions
                 .get(id)
@@ -2007,28 +2148,35 @@ impl Router {
     /// for UI stability.
     pub async fn snapshot_renderers(self: &Arc<Self>) -> Vec<RendererSnapshot> {
         let inner = self.inner.lock().await;
-        let mut ids = inner.table.renderer_ids();
+        let mut ids: Vec<_> = inner.renderer_slots.keys().cloned().collect();
         ids.sort_unstable();
         ids.into_iter()
             .filter_map(|id| {
-                let handle = inner.table.get_renderer(&id)?;
-                let status = inner
-                    .renderer_states
-                    .get(&id)
-                    .map(|status| RendererStatus::Paused(*status))
-                    .unwrap_or(RendererStatus::Playing);
-                let (tw, th) = handle.texture_size();
+                let slot = inner.renderer_slots.get(&id)?;
+                let handle = inner.table.get_renderer(&id);
+                let status = slot.activity_state;
+                let (tw, th) = handle
+                    .as_ref()
+                    .map(|handle| handle.texture_size())
+                    .unwrap_or_default();
                 Some(RendererSnapshot {
-                    id: handle.id.clone(),
-                    wp_type: handle.wp_type.clone(),
-                    name: handle.name.clone(),
+                    id: id.clone(),
+                    wp_type: slot.spawn_request.wp_type.clone(),
+                    name: slot.name.clone(),
                     status,
-                    pid: handle.pid.unwrap_or(0),
-                    drm_render_major: handle.gpu.major,
-                    drm_render_minor: handle.gpu.minor,
+                    process_state: slot.process_state,
+                    retention: slot.retention,
+                    process_generation: slot.process_generation,
+                    last_exit: slot.last_exit.clone(),
+                    pid: handle.as_ref().and_then(|handle| handle.pid).unwrap_or(0),
+                    drm_render_major: handle.as_ref().map(|handle| handle.gpu.major).unwrap_or(0),
+                    drm_render_minor: handle.as_ref().map(|handle| handle.gpu.minor).unwrap_or(0),
                     texture_width: tw,
                     texture_height: th,
-                    runtime_tags: handle.runtime_tags(),
+                    runtime_tags: handle
+                        .as_ref()
+                        .map(|handle| handle.runtime_tags())
+                        .unwrap_or_default(),
                     conditions: inner
                         .renderer_conditions
                         .get(&id)
@@ -2039,7 +2187,7 @@ impl Router {
             .collect()
     }
 
-    /// Snapshot of every registered display plus the enabled links
+    /// Snapshot of every registered display plus its assignments
     /// pointing at it, ordered by ascending id for UI stability.
     pub async fn snapshot_displays(self: &Arc<Self>) -> Vec<DisplaySnapshot> {
         let inner = self.inner.lock().await;
@@ -2048,12 +2196,7 @@ impl Router {
         ids.into_iter()
             .filter_map(|id| {
                 let s = inner.displays.get(&id)?;
-                let link_rows: Vec<Link> = inner
-                    .table
-                    .links_for_display(id)
-                    .into_iter()
-                    .filter(|l| l.enabled)
-                    .collect();
+                let link_rows = inner.table.links_for_display(id);
                 let display_layout = self.resolved_layout(&s.info);
                 let display_layout_source = self.display_layout_source(&s.info);
                 let wallpaper_layout_override = link_rows.first().and_then(|l| {
@@ -2074,6 +2217,7 @@ impl Router {
                     .map(|l| DisplayLinkSnapshot {
                         renderer_id: l.renderer_id,
                         z_order: l.z_order,
+                        active: l.enabled,
                     })
                     .collect();
                 Some(DisplaySnapshot {
@@ -2155,7 +2299,10 @@ impl Router {
         seq: u64,
         release_point: u64,
     ) {
-        let inner = self.inner.lock().await;
+        let mut inner = self.inner.lock().await;
+        if let Some(slot) = inner.renderer_slots.get_mut(renderer_id) {
+            slot.restart_failures = 0;
+        }
         let Some(renderer) = inner.table.get_renderer(renderer_id) else {
             return;
         };
@@ -2256,7 +2403,8 @@ impl Router {
                 } else {
                     (false, None)
                 };
-                let manual_paused = inner.manual_paused;
+                let manual_paused =
+                    inner.manual_paused || inner.renderer_manual_paused.contains(&rid);
                 let manual_muted = inner.manual_muted;
                 let other_playback_active = inner.other_playback_active;
                 let should_pause = manual_paused || !has_active_link || auto_pause_requested;
@@ -2265,10 +2413,10 @@ impl Router {
                     || !has_active_link
                     || auto_mute_decision.is_some();
                 let previous_state = inner
-                    .renderer_states
+                    .renderer_slots
                     .get(&rid)
-                    .map(|status| RendererStatus::Paused(*status))
-                    .unwrap_or(RendererStatus::Playing);
+                    .map(|slot| slot.activity_state)
+                    .unwrap_or(RendererStatus::Stopped);
                 let target_state = if should_pause {
                     RendererStatus::Paused(PausedRendererStatus::Paused)
                 } else if should_mute {
@@ -2281,6 +2429,9 @@ impl Router {
                 }
                 if previous_state == target_state {
                     continue;
+                }
+                if let Some(slot) = inner.renderer_slots.get_mut(&rid) {
+                    slot.activity_state = target_state;
                 }
                 let clear_cause = if has_active_link {
                     "pause-clear"
@@ -2308,9 +2459,6 @@ impl Router {
                         RendererStatus::Playing,
                         RendererStatus::Paused(PausedRendererStatus::Paused),
                     ) => {
-                        inner
-                            .renderer_states
-                            .insert(rid.clone(), PausedRendererStatus::Paused);
                         out.push((
                             rid,
                             ControlMsg::Pause {
@@ -2325,9 +2473,6 @@ impl Router {
                         RendererStatus::Playing,
                         RendererStatus::Paused(PausedRendererStatus::Muted),
                     ) => {
-                        inner
-                            .renderer_states
-                            .insert(rid.clone(), PausedRendererStatus::Muted);
                         out.push((
                             rid,
                             ControlMsg::Mute {
@@ -2342,7 +2487,6 @@ impl Router {
                         RendererStatus::Paused(PausedRendererStatus::Paused),
                         RendererStatus::Playing,
                     ) => {
-                        inner.renderer_states.remove(&rid);
                         out.push((
                             rid,
                             ControlMsg::Play {
@@ -2357,7 +2501,6 @@ impl Router {
                         RendererStatus::Paused(PausedRendererStatus::Muted),
                         RendererStatus::Playing,
                     ) => {
-                        inner.renderer_states.remove(&rid);
                         out.push((
                             rid,
                             ControlMsg::Unmute {
@@ -2372,9 +2515,6 @@ impl Router {
                         RendererStatus::Paused(PausedRendererStatus::Paused),
                         RendererStatus::Paused(PausedRendererStatus::Muted),
                     ) => {
-                        inner
-                            .renderer_states
-                            .insert(rid.clone(), PausedRendererStatus::Muted);
                         out.push((
                             rid.clone(),
                             ControlMsg::Mute {
@@ -2394,9 +2534,6 @@ impl Router {
                         RendererStatus::Paused(PausedRendererStatus::Muted),
                         RendererStatus::Paused(PausedRendererStatus::Paused),
                     ) => {
-                        inner
-                            .renderer_states
-                            .insert(rid.clone(), PausedRendererStatus::Paused);
                         out.push((
                             rid.clone(),
                             ControlMsg::Pause {
@@ -2412,6 +2549,31 @@ impl Router {
                             "state-switch",
                         ));
                     }
+                    (
+                        RendererStatus::Stopped,
+                        RendererStatus::Paused(PausedRendererStatus::Paused),
+                    ) => out.push((
+                        rid,
+                        ControlMsg::Pause {
+                            transition: ControlTransition {
+                                fade_ms: audio_fade_ms,
+                            },
+                        },
+                        pause_cause,
+                    )),
+                    (
+                        RendererStatus::Stopped,
+                        RendererStatus::Paused(PausedRendererStatus::Muted),
+                    ) => out.push((
+                        rid,
+                        ControlMsg::Mute {
+                            transition: ControlTransition {
+                                fade_ms: audio_fade_ms,
+                            },
+                        },
+                        mute_cause,
+                    )),
+                    (RendererStatus::Stopped, RendererStatus::Playing) => {}
                     _ => {}
                 }
             }
@@ -2464,7 +2626,10 @@ impl Router {
     async fn schedule_resume_retry(self: &Arc<Self>, renderer_id: &str, control: ResumeControl) {
         let scheduled = {
             let mut inner = self.inner.lock().await;
-            if inner.renderer_states.contains_key(renderer_id)
+            if inner
+                .renderer_slots
+                .get(renderer_id)
+                .is_none_or(|slot| slot.activity_state != RendererStatus::Playing)
                 || inner.table.get_renderer(renderer_id).is_none()
             {
                 inner.resume_retries.remove(renderer_id);
@@ -2519,7 +2684,10 @@ impl Router {
                 if retry.generation != generation {
                     return;
                 }
-                if inner.renderer_states.contains_key(&renderer_id)
+                if inner
+                    .renderer_slots
+                    .get(&renderer_id)
+                    .is_none_or(|slot| slot.activity_state != RendererStatus::Playing)
                     || inner.table.get_renderer(&renderer_id).is_none()
                 {
                     inner.resume_retries.remove(&renderer_id);
@@ -2539,7 +2707,10 @@ impl Router {
                 if retry.generation != generation {
                     return;
                 }
-                if inner.renderer_states.contains_key(&renderer_id)
+                if inner
+                    .renderer_slots
+                    .get(&renderer_id)
+                    .is_none_or(|slot| slot.activity_state != RendererStatus::Playing)
                     || inner.table.get_renderer(&renderer_id).is_none()
                 {
                     inner.resume_retries.remove(&renderer_id);
@@ -3112,6 +3283,33 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn reusable_renderer_is_selected_by_slot_identity() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        add_stub_renderer(&mgr, &router, "r2").await;
+        add_stub_renderer(&mgr, &router, "r1").await;
+        let request = crate::wallframe::renderer_manager::SpawnRequest {
+            wp_type: "scene".into(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            router
+                .reusable_renderer_for_target(&request, &[], false)
+                .await
+                .as_deref(),
+            Some("r1")
+        );
+
+        let mut different = request;
+        different.extras.insert("path".into(), "/other".into());
+        assert!(router
+            .reusable_renderer_for_target(&different, &[], false)
+            .await
+            .is_none());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn stop_renderers_unregisters_and_kills() {
         let mgr = Arc::new(RendererManager::new_default());
@@ -3200,7 +3398,7 @@ mod tests {
             "r1 must be reaped after the orphan grace window",
         );
 
-        // Third apply: same wallpaper as r2 → caller would `find_reusable`
+        // Third apply: the slot identity lookup reuses r2.
         // and reuse r2; relink_all("r2") is a no-op + mark_orphans keeps r2.
         router.relink_all_displays_to("r2").await;
         drain_executor().await;
@@ -4415,7 +4613,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_replay_stop_unlinks_and_reaps_renderer() {
+    async fn auto_replay_stop_retains_renderer_slot() {
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
         router.attach_settings(
@@ -4435,13 +4633,275 @@ mod tests {
             .update_display_window_state(h.id, ar::FLAG_FULLSCREEN)
             .await;
 
-        assert!(router
-            .snapshot_display(h.id)
-            .await
-            .unwrap()
-            .links
-            .is_empty());
+        let display = router.snapshot_display(h.id).await.unwrap();
+        assert_eq!(display.links.len(), 1);
+        assert!(!display.links[0].active);
         assert!(mgr.get("r1").await.is_none());
+        let snapshot = router.snapshot_renderer("r1").await.unwrap();
+        assert_eq!(snapshot.process_state, RendererProcessState::Stopped);
+        assert!(snapshot.retention.keep());
+        assert_eq!(snapshot.pid, 0);
+        assert!(snapshot.runtime_tags.is_empty());
+
+        let mut request = crate::wallframe::renderer_manager::SpawnRequest {
+            wp_type: "video".into(),
+            renderer_name: Some("video".into()),
+            ..Default::default()
+        };
+        request.extras.insert("path".into(), "/new.mp4".into());
+        let retained_id = router
+            .apply_retained_assignment(
+                request,
+                "video".into(),
+                &[h.id],
+                false,
+                WallpaperLayoutOverride::default(),
+            )
+            .await;
+        assert_eq!(retained_id, "r1");
+        assert!(mgr.get("r1").await.is_none());
+        let inner = router.inner.lock().await;
+        let slot = inner.renderer_slots.get("r1").unwrap();
+        assert_eq!(slot.spawn_request.wp_type, "video");
+        assert_eq!(slot.spawn_request.extras.get("path").unwrap(), "/new.mp4");
+        assert_eq!(slot.spec_revision, 2);
+    }
+
+    #[tokio::test]
+    async fn shared_renderer_stops_only_after_every_display_is_inhibited() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        router.attach_settings(
+            settings_with_auto_replay(auto_replay(&[(
+                AutoCondition::Fullscreen,
+                AutoAction::Stop,
+            )]))
+            .await,
+        );
+        let renderer = RendererHandle::test_stub("r1", "scene");
+        mgr.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer).await;
+        let first = router.register_display(reg("DP-1", 1920, 1080)).await;
+        let second = router.register_display(reg("DP-2", 1920, 1080)).await;
+
+        router
+            .update_display_window_state(first.id, ar::FLAG_FULLSCREEN)
+            .await;
+        assert!(mgr.get("r1").await.is_some());
+        assert_eq!(
+            router.snapshot_renderer("r1").await.unwrap().process_state,
+            RendererProcessState::Running
+        );
+
+        router
+            .update_display_window_state(second.id, ar::FLAG_FULLSCREEN)
+            .await;
+        assert!(mgr.get("r1").await.is_none());
+        assert_eq!(
+            router.snapshot_renderer("r1").await.unwrap().process_state,
+            RendererProcessState::Stopped
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_assignment_is_not_an_orphan() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        router.attach_settings(
+            settings_with_auto_replay(auto_replay(&[(
+                AutoCondition::Fullscreen,
+                AutoAction::Stop,
+            )]))
+            .await,
+        );
+        let renderer = RendererHandle::test_stub("r1", "scene");
+        mgr.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer).await;
+        let display = router.register_display(reg("DP-1", 1920, 1080)).await;
+
+        router
+            .update_display_window_state(display.id, ar::FLAG_FULLSCREEN)
+            .await;
+
+        assert!(router.mark_orphans(None).await.is_empty());
+        assert!(router.snapshot_renderer("r1").await.is_some());
+        let display = router.snapshot_display(display.id).await.unwrap();
+        assert_eq!(display.links.len(), 1);
+        assert!(!display.links[0].active);
+    }
+
+    #[tokio::test]
+    async fn retained_apply_during_stop_commits_latest_spec() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        let renderer = RendererHandle::test_stub("r1", "scene");
+        mgr.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer).await;
+        let display = router.register_display(reg("DP-1", 1920, 1080)).await;
+        {
+            let mut inner = router.inner.lock().await;
+            inner
+                .renderer_slots
+                .get_mut("r1")
+                .unwrap()
+                .begin_stop(RendererRetention::Keep);
+            for link in inner.table.links_for_renderer("r1") {
+                inner.table.set_link_enabled(link.id, false);
+            }
+        }
+        let mut request = crate::wallframe::renderer_manager::SpawnRequest {
+            wp_type: "video".into(),
+            renderer_name: Some("video".into()),
+            ..Default::default()
+        };
+        request.extras.insert("path".into(), "/latest.mp4".into());
+
+        let retained_id = router
+            .apply_retained_assignment(
+                request,
+                "video".into(),
+                &[display.id],
+                false,
+                WallpaperLayoutOverride::default(),
+            )
+            .await;
+
+        assert_eq!(retained_id, "r1");
+        let exit = mgr.stop("r1").await.unwrap();
+        router.on_renderer_process_exit(exit).await;
+        let inner = router.inner.lock().await;
+        let slot = inner.renderer_slots.get("r1").unwrap();
+        assert_eq!(slot.process_state, RendererProcessState::Stopped);
+        assert_eq!(
+            slot.spawn_request.extras.get("path").unwrap(),
+            "/latest.mp4"
+        );
+        assert_eq!(slot.spec_revision, 2);
+    }
+
+    #[tokio::test]
+    async fn manual_pause_intent_survives_retained_stop() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        let renderer = RendererHandle::test_stub("r1", "scene");
+        mgr.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer).await;
+
+        assert!(router.set_renderer_paused("r1", true).await);
+        router
+            .inner
+            .lock()
+            .await
+            .renderer_slots
+            .get_mut("r1")
+            .unwrap()
+            .begin_stop(RendererRetention::Keep);
+        let exit = mgr.stop("r1").await.unwrap();
+        router.on_renderer_process_exit(exit).await;
+
+        assert!(router
+            .inner
+            .lock()
+            .await
+            .renderer_manual_paused
+            .contains("r1"));
+        let resumed = RendererHandle::test_stub("r1", "scene");
+        mgr.register_test_handle(resumed.clone()).await;
+        router.register_renderer(resumed).await;
+        assert!(router.is_paused("r1").await);
+    }
+
+    #[tokio::test]
+    async fn resume_during_stopping_starts_after_old_process_exits() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        let renderer = RendererHandle::test_stub("r1", "scene");
+        mgr.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer).await;
+        router.register_display(reg("DP-1", 1920, 1080)).await;
+
+        router.begin_retained_stop("r1").await;
+        assert_eq!(
+            router.snapshot_renderer("r1").await.unwrap().process_state,
+            RendererProcessState::Stopping
+        );
+
+        let exit = mgr.stop("r1").await.unwrap();
+        router.on_renderer_process_exit(exit).await;
+
+        let inner = router.inner.lock().await;
+        let slot = inner.renderer_slots.get("r1").unwrap();
+        assert_eq!(slot.process_state, RendererProcessState::Failed);
+        assert!(slot
+            .last_exit
+            .as_ref()
+            .is_some_and(|exit| exit.reason.contains("test-stub")));
+        assert!(inner.process_restart_tasks.contains_key("r1"));
+    }
+
+    #[tokio::test]
+    async fn killed_process_is_retained_and_stale_exit_is_ignored() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        let renderer = RendererHandle::test_stub("r1", "scene");
+        mgr.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer).await;
+
+        router
+            .on_renderer_process_exit(crate::wallframe::renderer_manager::RendererProcessExit {
+                renderer_id: "r1".into(),
+                process_generation: 0,
+                kind: crate::wallframe::renderer_manager::RendererProcessExitKind::Killed,
+                code: None,
+                signal: Some(libc::SIGKILL),
+                reason: "stale".into(),
+            })
+            .await;
+        assert_eq!(
+            router.snapshot_renderer("r1").await.unwrap().process_state,
+            RendererProcessState::Running
+        );
+
+        router
+            .on_renderer_process_exit(crate::wallframe::renderer_manager::RendererProcessExit {
+                renderer_id: "r1".into(),
+                process_generation: 1,
+                kind: crate::wallframe::renderer_manager::RendererProcessExitKind::Killed,
+                code: None,
+                signal: Some(libc::SIGKILL),
+                reason: "signal: 9".into(),
+            })
+            .await;
+        let snapshot = router.snapshot_renderer("r1").await.unwrap();
+        assert_eq!(snapshot.process_state, RendererProcessState::Killed);
+        assert!(snapshot.retention.keep());
+        assert_eq!(snapshot.last_exit.unwrap().signal, Some(libc::SIGKILL));
+    }
+
+    #[tokio::test]
+    async fn killing_stopped_renderer_drops_slot() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        let renderer = RendererHandle::test_stub("r1", "scene");
+        mgr.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer).await;
+        router
+            .inner
+            .lock()
+            .await
+            .renderer_slots
+            .get_mut("r1")
+            .unwrap()
+            .begin_stop(RendererRetention::Keep);
+        let exit = mgr.stop("r1").await.unwrap();
+        router.on_renderer_process_exit(exit).await;
+        assert_eq!(
+            router.snapshot_renderer("r1").await.unwrap().process_state,
+            RendererProcessState::Stopped
+        );
+
+        router.kill_renderer_drop("r1").await.unwrap();
+        assert!(router.snapshot_renderer("r1").await.is_none());
     }
 
     #[tokio::test]

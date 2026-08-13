@@ -58,6 +58,7 @@ void DisplayListQuery::reload() {
                     QVariantMap lm;
                     lm[u"rendererId"_s] = l.rendererId();
                     lm[u"zOrder"_s]     = static_cast<int>(l.zOrder());
+                    lm[u"active"_s]     = l.active();
                     links.append(lm);
                 }
                 m[u"links"_s] = links;
