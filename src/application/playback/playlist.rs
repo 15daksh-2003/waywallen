@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +14,14 @@ use crate::wallframe::scheduler::DisplayId;
 use crate::DaemonContext;
 
 use super::resolve;
+
+#[derive(Clone, Copy)]
+enum AutoAttachUpdate {
+    Preserve,
+    Inherit,
+    Disable,
+    ClearGlobal,
+}
 
 fn apply_source(source: PlaylistApplySource, activation_source: ApplySource) -> ApplySource {
     match source {
@@ -120,6 +128,7 @@ async fn persist_assignments(
     app: &Arc<DaemonContext>,
     display_ids: &[DisplayId],
     playlist_id: Option<i64>,
+    auto_attach: AutoAttachUpdate,
 ) {
     let mut keys = Vec::new();
     for display_id in display_ids {
@@ -129,11 +138,17 @@ async fn persist_assignments(
     }
     app.settings.update(|settings| {
         for key in &keys {
-            settings
-                .displays
-                .entry(key.clone())
-                .or_default()
-                .active_playlist_id = playlist_id;
+            let prefs = settings.displays.entry(key.clone()).or_default();
+            prefs.active_playlist_id = playlist_id;
+            match auto_attach {
+                AutoAttachUpdate::Preserve => {}
+                AutoAttachUpdate::Inherit => prefs.playlist_auto_attach_disabled = false,
+                AutoAttachUpdate::Disable => prefs.playlist_auto_attach_disabled = true,
+                AutoAttachUpdate::ClearGlobal => prefs.playlist_auto_attach_disabled = false,
+            }
+        }
+        if matches!(auto_attach, AutoAttachUpdate::ClearGlobal) {
+            settings.global.auto_attach_playlist_id = None;
         }
     });
     app.settings.flush_now().await;
@@ -213,7 +228,7 @@ async fn activate_inner(
             app.shutdown_subscribe(),
         )
         .await?;
-    persist_assignments(app, &targets, Some(playlist_id)).await;
+    persist_assignments(app, &targets, Some(playlist_id), AutoAttachUpdate::Inherit).await;
     publish_changed(app);
     Ok(())
 }
@@ -233,7 +248,13 @@ pub async fn attach_shared(
         )
         .await?;
     if attached {
-        persist_assignments(app, &[display_id], Some(playlist_id)).await;
+        persist_assignments(
+            app,
+            &[display_id],
+            Some(playlist_id),
+            AutoAttachUpdate::Inherit,
+        )
+        .await;
         publish_changed(app);
     }
     Ok(attached)
@@ -246,7 +267,7 @@ pub async fn deactivate(app: &Arc<DaemonContext>, display_ids: &[DisplayId]) -> 
         display_ids.to_vec()
     };
     app.playlists.deactivate(&targets).await;
-    persist_assignments(app, &targets, None).await;
+    persist_assignments(app, &targets, None, AutoAttachUpdate::Preserve).await;
     publish_changed(app);
     Ok(())
 }
@@ -256,7 +277,7 @@ pub async fn deactivate_for_playlist(app: &Arc<DaemonContext>, playlist_id: i64)
     if displays.is_empty() {
         return;
     }
-    persist_assignments(app, &displays, None).await;
+    persist_assignments(app, &displays, None, AutoAttachUpdate::Preserve).await;
     publish_changed(app);
 }
 
@@ -283,12 +304,68 @@ pub async fn rebuild_for_playlist(app: &Arc<DaemonContext>, playlist_id: i64) {
         .await
     {
         Ok(cleared) if !cleared.is_empty() => {
-            persist_assignments(app, &cleared, None).await;
+            persist_assignments(app, &cleared, None, AutoAttachUpdate::Preserve).await;
             publish_changed(app);
         }
         Ok(_) => {}
         Err(error) => log::warn!("playlist rebuild {playlist_id} failed: {error:#}"),
     }
+}
+
+pub(super) async fn stop_for_wallpaper_override(
+    app: &Arc<DaemonContext>,
+    display_ids: &[DisplayId],
+    all_displays: bool,
+) -> Result<Vec<crate::application::StoppedPlaylist>> {
+    if display_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let targets: HashSet<DisplayId> = display_ids.iter().copied().collect();
+    let mut groups: BTreeMap<i64, Vec<DisplayId>> = BTreeMap::new();
+    for status in app.playlists.status().await {
+        if targets.contains(&status.display_id) {
+            groups
+                .entry(status.active_id)
+                .or_default()
+                .push(status.display_id);
+        }
+    }
+    for ids in groups.values_mut() {
+        ids.sort_unstable();
+        ids.dedup();
+    }
+
+    let mut stopped = Vec::with_capacity(groups.len());
+    for (id, display_ids) in groups {
+        let name = repository::get(&app.db, id)
+            .await?
+            .map(|playlist| playlist.name)
+            .unwrap_or_default();
+        stopped.push(crate::application::StoppedPlaylist {
+            id,
+            name,
+            all_displays: all_displays && display_ids.len() == targets.len(),
+            display_ids,
+        });
+    }
+
+    app.playlists.deactivate(display_ids).await;
+    persist_assignments(
+        app,
+        display_ids,
+        None,
+        if all_displays {
+            AutoAttachUpdate::ClearGlobal
+        } else {
+            AutoAttachUpdate::Disable
+        },
+    )
+    .await;
+    if !stopped.is_empty() {
+        publish_changed(app);
+    }
+    Ok(stopped)
 }
 
 pub async fn set_interval_for_playlist(

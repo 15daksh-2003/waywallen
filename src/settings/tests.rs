@@ -167,6 +167,8 @@ fn display_prefs_is_empty_tracks_last_wallpaper() {
     assert!(!p.is_empty());
     p.last_wallpaper = None;
     assert!(p.is_empty());
+    p.playlist_auto_attach_disabled = true;
+    assert!(!p.is_empty());
 }
 
 #[test]
@@ -227,6 +229,40 @@ async fn resolved_last_wallpaper_prefers_per_display_then_global() {
         store.resolved_last_wallpaper("DP-2").as_deref(),
         Some("wp-global"),
     );
+}
+
+#[tokio::test]
+async fn resolved_playlist_prefers_display_and_honors_auto_attach_override() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.toml");
+    let store = SettingsStore::load_or_default(path).await;
+
+    store.update(|settings| settings.global.auto_attach_playlist_id = Some(9));
+    assert_eq!(store.resolved_playlist_id("HDMI-A-1"), Some(9));
+
+    store.update(|settings| {
+        settings.displays.insert(
+            "HDMI-A-1".into(),
+            DisplayPrefs {
+                playlist_auto_attach_disabled: true,
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(store.resolved_playlist_id("HDMI-A-1"), None);
+    assert_eq!(store.resolved_playlist_id("DP-2"), Some(9));
+    let encoded = toml::to_string(&store.snapshot()).unwrap();
+    let decoded: Settings = toml::from_str(&encoded).unwrap();
+    assert!(decoded.displays["HDMI-A-1"].playlist_auto_attach_disabled);
+
+    store.update(|settings| {
+        settings
+            .displays
+            .get_mut("HDMI-A-1")
+            .unwrap()
+            .active_playlist_id = Some(3);
+    });
+    assert_eq!(store.resolved_playlist_id("HDMI-A-1"), Some(3));
 }
 
 #[test]

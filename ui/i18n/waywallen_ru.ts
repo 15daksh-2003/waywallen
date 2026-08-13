@@ -1470,6 +1470,22 @@ Unsaved frame state may be lost.</source>
         <translation>Не удалось применить</translation>
     </message>
     <message>
+        <source>Display #%1</source>
+        <translation>Монитор #%1</translation>
+    </message>
+    <message>
+        <source>Playlist #%1</source>
+        <translation>Плейлист #%1</translation>
+    </message>
+    <message>
+        <source>Playlist &quot;%1&quot; stopped on all displays</source>
+        <translation>Плейлист «%1» остановлен на всех мониторах</translation>
+    </message>
+    <message>
+        <source>Playlist &quot;%1&quot; stopped on %2</source>
+        <translation>Плейлист «%1» остановлен на %2</translation>
+    </message>
+    <message>
         <source>Portal apply failed</source>
         <translation>Не удалось применить через портал</translation>
     </message>

@@ -298,6 +298,8 @@ export class WallpaperApplyQuery : public Query,
     Q_PROPERTY(QString rendererName READ rendererName WRITE setRendererName NOTIFY
                    rendererNameChanged FINAL)
     Q_PROPERTY(QString rendererId READ rendererId NOTIFY rendererIdChanged FINAL)
+    Q_PROPERTY(
+        QVariantList stoppedPlaylists READ stoppedPlaylists NOTIFY stoppedPlaylistsChanged FINAL)
 
 public:
     WallpaperApplyQuery(QObject* parent = nullptr);
@@ -312,6 +314,7 @@ public:
     void setRendererName(const QString&);
 
     auto rendererId() const -> const QString&;
+    auto stoppedPlaylists() const -> const QVariantList&;
 
     void reload() override;
 
@@ -319,12 +322,14 @@ public:
     Q_SIGNAL void displayIdsChanged();
     Q_SIGNAL void rendererNameChanged();
     Q_SIGNAL void rendererIdChanged();
+    Q_SIGNAL void stoppedPlaylistsChanged();
 
 private:
     model::Wallpaper m_wallpaper;
     QVariantList     m_display_ids;
     QString          m_renderer_name;
     QString          m_renderer_id;
+    QVariantList     m_stopped_playlists;
 };
 
 /// Apply via `org.freedesktop.portal.Wallpaper` — image-only, no

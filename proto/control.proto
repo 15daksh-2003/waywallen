@@ -620,6 +620,13 @@ message WallpaperApplyResponse {
   string wp_type = 3;
   string name = 4;
   bool deferred = 5;
+  repeated WallpaperApplyStoppedPlaylist stopped_playlists = 6;
+}
+message WallpaperApplyStoppedPlaylist {
+  int64 playlist_id = 1;
+  string playlist_name = 2;
+  repeated uint64 display_ids = 3;
+  bool all_displays = 4;
 }
 
 // Apply a wallpaper via the org.freedesktop.portal.Wallpaper portal —

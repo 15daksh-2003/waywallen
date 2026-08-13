@@ -556,10 +556,17 @@ void WallpaperApplyQuery::setRendererName(const QString& v) {
 }
 
 auto WallpaperApplyQuery::rendererId() const -> const QString& { return m_renderer_id; }
+auto WallpaperApplyQuery::stoppedPlaylists() const -> const QVariantList& {
+    return m_stopped_playlists;
+}
 
 void WallpaperApplyQuery::reload() {
     if (m_wallpaper.id_proto().isEmpty()) return;
 
+    if (! m_stopped_playlists.isEmpty()) {
+        m_stopped_playlists.clear();
+        Q_EMIT stoppedPlaylistsChanged();
+    }
     setStatus(Status::Querying);
     auto backend = App::instance()->backend();
 
@@ -588,6 +595,22 @@ void WallpaperApplyQuery::reload() {
         self->inspect_set(result, [self](const proto::Response& rsp) {
             self->m_renderer_id = rsp.wallpaperApply().rendererId();
             Q_EMIT self->rendererIdChanged();
+
+            QVariantList stopped;
+            for (const auto& playlist : rsp.wallpaperApply().stoppedPlaylists()) {
+                QVariantMap item;
+                item[u"playlistId"_s]   = static_cast<qint64>(playlist.playlistId());
+                item[u"playlistName"_s] = playlist.playlistName();
+                item[u"allDisplays"_s]  = playlist.allDisplays();
+                QVariantList display_ids;
+                for (const auto id : playlist.displayIds()) {
+                    display_ids.append(QVariant::fromValue(static_cast<quint64>(id)));
+                }
+                item[u"displayIds"_s] = display_ids;
+                stopped.append(item);
+            }
+            self->m_stopped_playlists = std::move(stopped);
+            Q_EMIT self->stoppedPlaylistsChanged();
         });
         co_return;
     });

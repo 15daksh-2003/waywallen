@@ -297,6 +297,16 @@ pub async fn apply_wallpaper(
     if request.require_display && target_ids.is_empty() {
         return Err(Error::NoDisplayRegistered);
     }
+    let stopped_playlists = if request.source == ApplySource::UserWallpaper {
+        super::playlist::stop_for_wallpaper_override(
+            app,
+            &target_ids,
+            request.display_ids.is_none(),
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
     let duplicate_renderers = should_duplicate_renderers(
         app.settings.global().duplicate_renderers_for_same_wallpaper,
         !target_ids.is_empty(),
@@ -354,6 +364,7 @@ pub async fn apply_wallpaper(
     Ok(ApplyResult {
         renderer_id,
         entry,
+        stopped_playlists,
         activation: if deferred {
             ApplyActivation::Deferred
         } else {

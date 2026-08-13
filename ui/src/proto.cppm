@@ -53,6 +53,7 @@ using proto::SettingSchema;
 
 using proto::WallpaperApplyRequest;
 using proto::WallpaperApplyResponse;
+using proto::WallpaperApplyStoppedPlaylist;
 using proto::WallpaperApplyViaPortalRequest;
 using proto::WallpaperApplyViaPortalResponse;
 using proto::WallpaperEntry;

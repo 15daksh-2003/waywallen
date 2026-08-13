@@ -18,6 +18,14 @@ pub struct ApplyResult {
     pub renderer_id: String,
     pub entry: WallpaperEntry,
     pub activation: ApplyActivation,
+    pub stopped_playlists: Vec<StoppedPlaylist>,
+}
+
+pub struct StoppedPlaylist {
+    pub id: i64,
+    pub name: String,
+    pub display_ids: Vec<DisplayId>,
+    pub all_displays: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,5 +1,9 @@
 use super::*;
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Daemon-wide layout defaults applied to displays that have no
 /// `[displays.<name>]` override.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26,6 +30,9 @@ pub struct DisplayPrefs {
     pub last_wallpaper: Option<String>,
     pub alias: Option<String>,
     pub active_playlist_id: Option<i64>,
+    /// Prevent this display from inheriting the global auto-attach playlist.
+    #[serde(skip_serializing_if = "is_false")]
+    pub playlist_auto_attach_disabled: bool,
 }
 
 impl DisplayPrefs {
@@ -38,6 +45,7 @@ impl DisplayPrefs {
             && self.last_wallpaper.is_none()
             && self.alias.is_none()
             && self.active_playlist_id.is_none()
+            && !self.playlist_auto_attach_disabled
     }
 }
 

@@ -197,6 +197,18 @@ impl SettingsStore {
         g.global.last_wallpaper.clone()
     }
 
+    pub fn resolved_playlist_id(&self, display_key: &str) -> Option<i64> {
+        let g = self.inner.read().expect("settings poisoned");
+        let prefs = g.displays.get(display_key);
+        if let Some(id) = prefs.and_then(|prefs| prefs.active_playlist_id) {
+            return Some(id);
+        }
+        if prefs.is_some_and(|prefs| prefs.playlist_auto_attach_disabled) {
+            return None;
+        }
+        g.global.auto_attach_playlist_id
+    }
+
     /// Snapshot just the cloned per-display preferences.
     /// Used to expose overrides over the control plane.
     pub fn display_prefs(&self, display_name: &str) -> Option<DisplayPrefs> {

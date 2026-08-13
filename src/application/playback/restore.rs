@@ -9,17 +9,8 @@ use crate::DaemonContext;
 const SETTLE: Duration = Duration::from_secs(2);
 const IDLE_PARK: Duration = Duration::from_secs(3600);
 
-fn resolve_playlist_id(active: Option<i64>, auto_attach: Option<i64>) -> Option<i64> {
-    active.or(auto_attach)
-}
-
 fn resolve_pid(app: &Arc<DaemonContext>, key: &str) -> Option<i64> {
-    resolve_playlist_id(
-        app.settings
-            .display_prefs(key)
-            .and_then(|p| p.active_playlist_id),
-        app.settings.global().auto_attach_playlist_id,
-    )
+    app.settings.resolved_playlist_id(key)
 }
 
 fn group_displays_by_playlist(
@@ -274,13 +265,6 @@ mod tests {
         remove_pending_display(&mut pending, 11);
         assert!(!pending.contains_key(&1));
         assert_eq!(pending.get(&2).unwrap().1, vec![20]);
-    }
-
-    #[test]
-    fn resolve_playlist_id_prefers_active_then_auto_attach() {
-        assert_eq!(resolve_playlist_id(Some(3), Some(9)), Some(3));
-        assert_eq!(resolve_playlist_id(None, Some(9)), Some(9));
-        assert_eq!(resolve_playlist_id(None, None), None);
     }
 
     #[test]

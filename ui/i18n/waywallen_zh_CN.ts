@@ -1464,6 +1464,22 @@ Unsaved frame state may be lost.</source>
         <translation>应用失败</translation>
     </message>
     <message>
+        <source>Display #%1</source>
+        <translation>显示器 #%1</translation>
+    </message>
+    <message>
+        <source>Playlist #%1</source>
+        <translation>播放列表 #%1</translation>
+    </message>
+    <message>
+        <source>Playlist &quot;%1&quot; stopped on all displays</source>
+        <translation>播放列表“%1”已在所有显示器上停止</translation>
+    </message>
+    <message>
+        <source>Playlist &quot;%1&quot; stopped on %2</source>
+        <translation>播放列表“%1”已在 %2 上停止</translation>
+    </message>
+    <message>
         <source>Portal apply failed</source>
         <translation>桌面门户应用失败</translation>
     </message>
