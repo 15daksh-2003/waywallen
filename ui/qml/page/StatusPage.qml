@@ -378,13 +378,6 @@ MD.Page {
                                     visible: rendererItem.modelData.keep
                                     text: "keep"
                                 }
-                                W.RendererRuntimeTag {
-                                    visible: !!rendererItem.modelData.lastExitReason
-                                    runtimeTag: ({
-                                        key: qsTr("Exit"),
-                                        value: rendererItem.modelData.lastExitReason || ""
-                                    })
-                                }
                                 W.Tag {
                                     visible: rendererItem.modelData.running
                                     text: (rendererItem.modelData.fps || 0) + " fps"
