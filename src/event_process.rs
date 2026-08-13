@@ -163,6 +163,7 @@ fn spawn_wallpaper_recall(state: Arc<DaemonContext>) {
                                             &wp_id,
                                             &ids,
                                             crate::application::APPLY_FIRST_FRAME_TIMEOUT,
+                                            crate::application::ApplySource::DisplayRecall,
                                         )
                                         .await
                                         .map(|_| ())

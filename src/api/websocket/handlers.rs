@@ -58,11 +58,8 @@ pub(super) async fn dispatch_inner(
                 user_property_overrides: Default::default(),
                 default_user_properties: Default::default(),
             };
-            // renderer_manager returns typed spawn errors directly.
-            let id = state.renderer_manager.spawn(spawn_req).await?;
-            if let Some(handle) = state.renderer_manager.get(&id).await {
-                state.router.register_renderer(handle).await;
-            }
+            // Wallframe returns typed spawn errors directly.
+            let id = state.router.spawn_renderer(spawn_req).await?;
             Res::RendererSpawn(pb::RendererSpawnResponse { renderer_id: id })
         }
 
@@ -1214,6 +1211,7 @@ pub(super) async fn dispatch_inner(
                 state,
                 &r.wallpaper_id,
                 application::ApplyRequest {
+                    source: application::ApplySource::UserWallpaper,
                     display_ids: (!r.display_ids.is_empty()).then_some(r.display_ids),
                     renderer_name: (!r.renderer_name.is_empty()).then_some(r.renderer_name),
                     first_frame_timeout: Some(application::APPLY_FIRST_FRAME_TIMEOUT),
@@ -1236,8 +1234,12 @@ pub(super) async fn dispatch_inner(
         }
 
         Req::WallpaperApplyViaPortal(r) => {
-            let res =
-                crate::application::apply_wallpaper_via_portal(state, &r.wallpaper_id).await?;
+            let res = crate::application::apply_wallpaper_via_portal(
+                state,
+                &r.wallpaper_id,
+                application::ApplySource::UserWallpaper,
+            )
+            .await?;
             Res::WallpaperApplyViaPortal(pb::WallpaperApplyViaPortalResponse {
                 wallpaper_id: res.wallpaper_id,
                 uri: res.uri,

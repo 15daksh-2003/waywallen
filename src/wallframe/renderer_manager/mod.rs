@@ -1028,10 +1028,16 @@ impl RendererManager {
             .collect()
     }
 
-    pub async fn wait_for_first_frame(&self, id: &str, timeout: Duration) -> Result<()> {
+    pub(super) async fn wait_for_first_frame_generation(
+        &self,
+        id: &str,
+        process_generation: RendererProcessGeneration,
+        timeout: Duration,
+    ) -> Result<()> {
         let handle = self
             .get(id)
             .await
+            .filter(|handle| handle.process_generation == process_generation)
             .ok_or_else(|| Error::RendererNotFound(id.to_string()))?;
         if handle.frame_ready_seen() {
             return Ok(());
@@ -1055,9 +1061,11 @@ impl RendererManager {
                     )));
                 }
                 _ = liveness.tick() => {
-                    if self.get(id).await.is_none() {
+                    if !self.get(id).await.is_some_and(|current| {
+                        current.process_generation == process_generation
+                    }) {
                         return Err(Error::RendererFrameFailed(format!(
-                            "renderer '{id}' exited before its first frame"
+                            "renderer '{id}' generation {process_generation} exited before its first frame"
                         )));
                     }
 

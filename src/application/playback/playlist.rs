@@ -2,20 +2,35 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::application::ApplySource;
 use crate::error::{Error, Result};
 use crate::model::repo::playlists as repository;
-use crate::playback::playlist::{Activation, ApplyPort, ApplyRequest, ApplySharing, Definition};
+use crate::playback::playlist::{
+    Activation, ApplyPort, ApplyRequest, ApplySharing, ApplySource as PlaylistApplySource,
+    Definition,
+};
 use crate::playback::Mode;
 use crate::wallframe::scheduler::DisplayId;
 use crate::DaemonContext;
 
 use super::resolve;
 
-fn apply_port(app: &Arc<DaemonContext>) -> ApplyPort {
+fn apply_source(source: PlaylistApplySource, activation_source: ApplySource) -> ApplySource {
+    match source {
+        PlaylistApplySource::Activation => activation_source,
+        PlaylistApplySource::Rotation => ApplySource::PlaylistRotation,
+        PlaylistApplySource::Jump => ApplySource::UserPlaylistJump,
+        PlaylistApplySource::Rebuild => ApplySource::PlaylistRebuild,
+        PlaylistApplySource::Attach => ApplySource::PlaylistAttach,
+    }
+}
+
+fn apply_port(app: &Arc<DaemonContext>, activation_source: ApplySource) -> ApplyPort {
     let app = app.clone();
     ApplyPort::new(move |request: ApplyRequest| {
         let app = app.clone();
         async move {
+            let source = apply_source(request.source, activation_source);
             match request.sharing {
                 ApplySharing::Independent => match request.first_frame_timeout {
                     Some(timeout) => {
@@ -24,6 +39,7 @@ fn apply_port(app: &Arc<DaemonContext>) -> ApplyPort {
                             &request.entry_id,
                             &request.display_ids,
                             timeout,
+                            source,
                         )
                         .await?;
                     }
@@ -32,6 +48,7 @@ fn apply_port(app: &Arc<DaemonContext>) -> ApplyPort {
                             &app,
                             &request.entry_id,
                             &request.display_ids,
+                            source,
                         )
                         .await?;
                     }
@@ -42,6 +59,7 @@ fn apply_port(app: &Arc<DaemonContext>) -> ApplyPort {
                         &request.entry_id,
                         &request.display_ids,
                         request.first_frame_timeout,
+                        source,
                     )
                     .await?;
                 }
@@ -131,7 +149,15 @@ pub async fn activate(
     display_ids: &[DisplayId],
     playlist_id: i64,
 ) -> Result<()> {
-    activate_inner(app, display_ids, playlist_id, false, None).await
+    activate_inner(
+        app,
+        display_ids,
+        playlist_id,
+        false,
+        None,
+        ApplySource::UserPlaylistActivation,
+    )
+    .await
 }
 
 pub async fn activate_resuming_with_first_frame_timeout(
@@ -140,7 +166,15 @@ pub async fn activate_resuming_with_first_frame_timeout(
     playlist_id: i64,
     timeout: Duration,
 ) -> Result<()> {
-    activate_inner(app, display_ids, playlist_id, true, Some(timeout)).await
+    activate_inner(
+        app,
+        display_ids,
+        playlist_id,
+        true,
+        Some(timeout),
+        ApplySource::StartupRestore,
+    )
+    .await
 }
 
 async fn activate_inner(
@@ -149,6 +183,7 @@ async fn activate_inner(
     playlist_id: i64,
     resume: bool,
     first_frame_timeout: Option<Duration>,
+    activation_source: ApplySource,
 ) -> Result<()> {
     let definition = definition(app, playlist_id).await?;
     let targets = if display_ids.is_empty() {
@@ -174,7 +209,7 @@ async fn activate_inner(
                 resume_by_display,
                 first_frame_timeout,
             },
-            apply_port(app),
+            apply_port(app, activation_source),
             app.shutdown_subscribe(),
         )
         .await?;
@@ -194,7 +229,7 @@ pub async fn attach_shared(
             display_id,
             playlist_id,
             crate::application::APPLY_FIRST_FRAME_TIMEOUT,
-            apply_port(app),
+            apply_port(app, ApplySource::UserPlaylistActivation),
         )
         .await?;
     if attached {
@@ -227,7 +262,11 @@ pub async fn deactivate_for_playlist(app: &Arc<DaemonContext>, playlist_id: i64)
 
 pub async fn jump_to(app: &Arc<DaemonContext>, playlist_id: i64, entry_id: &str) -> Result<()> {
     app.playlists
-        .jump_to(playlist_id, entry_id, apply_port(app))
+        .jump_to(
+            playlist_id,
+            entry_id,
+            apply_port(app, ApplySource::UserPlaylistActivation),
+        )
         .await
 }
 
@@ -235,7 +274,14 @@ pub async fn rebuild_for_playlist(app: &Arc<DaemonContext>, playlist_id: i64) {
     let Ok(definition) = definition(app, playlist_id).await else {
         return;
     };
-    match app.playlists.rebuild(definition, apply_port(app)).await {
+    match app
+        .playlists
+        .rebuild(
+            definition,
+            apply_port(app, ApplySource::UserPlaylistActivation),
+        )
+        .await
+    {
         Ok(cleared) if !cleared.is_empty() => {
             persist_assignments(app, &cleared, None).await;
             publish_changed(app);

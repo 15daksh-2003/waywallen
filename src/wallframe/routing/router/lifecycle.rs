@@ -1,6 +1,69 @@
 use super::*;
 
+pub(super) const AUTO_REPLAY_START_DELAY: Duration = Duration::from_secs(2);
+
+struct RendererStartEffect {
+    renderer_id: RendererId,
+    process_generation: u64,
+    spec_revision: u64,
+    start_token: u64,
+    cause: RendererStartCause,
+    spawn_request: crate::wallframe::renderer_manager::SpawnRequest,
+}
+
+enum AdvanceStart {
+    Start(RendererStartEffect),
+    Schedule(PendingRendererStart),
+    Cancel,
+    Wait,
+}
+
 impl Router {
+    pub(super) async fn spawn_unassigned_renderer(
+        self: &Arc<Self>,
+        mut spawn_request: crate::wallframe::renderer_manager::SpawnRequest,
+    ) -> crate::error::Result<RendererId> {
+        spawn_request.default_user_properties =
+            crate::catalog::properties::normalize_renderer_user_properties(
+                spawn_request.default_user_properties,
+            );
+        let renderer_id = uuid::Uuid::new_v4().to_string();
+        let effect = {
+            let mut inner = self.inner.lock().await;
+            inner.next_start_token = inner
+                .next_start_token
+                .checked_add(1)
+                .expect("renderer start token exhausted");
+            let start_token = inner.next_start_token;
+            let process_generation = self.mgr.reserve_process_generation();
+            let name = spawn_request.renderer_name.clone().unwrap_or_default();
+            let mut slot = RendererSlot::retained(spawn_request.clone(), name);
+            let transition = slot.transition(RendererLifecycleEvent::StartRequested {
+                generation: process_generation,
+                start_token,
+                reactivate_failed: false,
+            });
+            debug_assert_eq!(transition, RendererTransition::Changed);
+            inner.renderer_slots.insert(renderer_id.clone(), slot);
+            RendererStartEffect {
+                renderer_id: renderer_id.clone(),
+                process_generation,
+                spec_revision: 1,
+                start_token,
+                cause: RendererStartCause::ExplicitSpawn,
+                spawn_request,
+            }
+        };
+        if let Some(snapshot) = self.snapshot_renderer(&renderer_id).await {
+            self.emit(RouterEvent::RendererUpsert(snapshot));
+        }
+        if let Err(error) = self.execute_renderer_start(effect).await {
+            self.unregister_renderer(&renderer_id).await;
+            return Err(error);
+        }
+        Ok(renderer_id)
+    }
+
     pub async fn set_renderer_paused(self: &Arc<Self>, renderer_id: &str, paused: bool) -> bool {
         let changed = {
             let mut inner = self.inner.lock().await;
@@ -23,14 +86,37 @@ impl Router {
         self: &Arc<Self>,
         renderer_id: &str,
     ) -> crate::error::Result<()> {
-        self.stop_renderer_drop(renderer_id, Duration::from_secs(1))
+        self.stop_renderer_drop_current(renderer_id, Duration::from_secs(1), None)
             .await
+    }
+
+    pub async fn kill_renderer_generation_drop(
+        self: &Arc<Self>,
+        renderer_id: &str,
+        process_generation: u64,
+    ) -> crate::error::Result<()> {
+        self.stop_renderer_drop_current(
+            renderer_id,
+            Duration::from_secs(1),
+            Some(process_generation),
+        )
+        .await
     }
 
     pub(super) async fn stop_renderer_drop(
         self: &Arc<Self>,
         renderer_id: &str,
         ack_timeout: Duration,
+    ) -> crate::error::Result<()> {
+        self.stop_renderer_drop_current(renderer_id, ack_timeout, None)
+            .await
+    }
+
+    async fn stop_renderer_drop_current(
+        self: &Arc<Self>,
+        renderer_id: &str,
+        ack_timeout: Duration,
+        expected_generation: Option<u64>,
     ) -> crate::error::Result<()> {
         let process_generation = {
             let mut inner = self.inner.lock().await;
@@ -39,6 +125,10 @@ impl Router {
                     renderer_id.to_string(),
                 ));
             };
+            if expected_generation.is_some() && slot.state.generation() != expected_generation {
+                return Ok(());
+            }
+            slot.pending_start = None;
             let transition = slot.transition(RendererLifecycleEvent::StopRequested { keep: false });
             let process_generation = match (&slot.state, transition) {
                 (RendererLifecycleState::Stopping { generation, .. }, _) => Some(*generation),
@@ -53,6 +143,8 @@ impl Router {
             }
             process_generation
         };
+        self.deadlines
+            .cancel(deadline::DeadlineKey::renderer_start(renderer_id));
         let Some(process_generation) = process_generation else {
             self.unregister_renderer(renderer_id).await;
             return Ok(());
@@ -197,10 +289,11 @@ impl Router {
                 }
             }
         }
-        self.reconcile_assignment_activation().await;
+        self.reconcile_assignment_activation(RendererStartCause::AutoReplayResume)
+            .await;
     }
 
-    async fn reconcile_assignment_activation(self: &Arc<Self>) {
+    async fn reconcile_assignment_activation(self: &Arc<Self>, resume_cause: RendererStartCause) {
         let (mut changed_displays, mut reenabled_renderers, mut stopped_renderers) = {
             let mut inner = self.inner.lock().await;
             let display_ids = inner.displays.keys().copied().collect::<Vec<_>>();
@@ -258,10 +351,11 @@ impl Router {
                 .map(|renderer_id| self.finish_retained_stop(renderer_id)),
         )
         .await;
-        futures_util::future::join_all(reenabled_renderers.iter().map(|renderer_id| async move {
-            self.start_retained_renderer(renderer_id, false).await;
-            self.schedule_process_restart(renderer_id).await;
-        }))
+        futures_util::future::join_all(
+            reenabled_renderers
+                .iter()
+                .map(|renderer_id| self.request_renderer_start(renderer_id, resume_cause)),
+        )
         .await;
         if !changed_displays.is_empty() {
             self.reconcile_buffer_flags().await;
@@ -281,21 +375,31 @@ impl Router {
             }
         };
         if changed {
-            self.reconcile_assignment_activation().await;
+            self.reconcile_assignment_activation(RendererStartCause::ManualStopResume)
+                .await;
             self.reconcile_lifecycle().await;
         }
     }
 
     pub(super) async fn begin_retained_stop(self: &Arc<Self>, renderer_id: &str) {
-        let generation = {
+        let (generation, cancelled_start) = {
             let mut inner = self.inner.lock().await;
-            inner.renderer_slots.get_mut(renderer_id).and_then(|slot| {
-                (slot.transition(RendererLifecycleEvent::StopRequested { keep: true })
-                    == RendererTransition::Changed)
-                    .then(|| slot.state.generation())
-                    .flatten()
-            })
+            let Some(slot) = inner.renderer_slots.get_mut(renderer_id) else {
+                return;
+            };
+            let cancelled_start = slot.pending_start.take().is_some();
+            let generation = (slot
+                .transition(RendererLifecycleEvent::StopRequested { keep: true })
+                == RendererTransition::Changed)
+                .then(|| slot.state.generation())
+                .flatten();
+            (generation, cancelled_start)
         };
+        if cancelled_start {
+            log::debug!("renderer {renderer_id}: cancel pending start; activation stopped");
+        }
+        self.deadlines
+            .cancel(deadline::DeadlineKey::renderer_start(renderer_id));
         if generation.is_none() {
             return;
         }
@@ -342,225 +446,380 @@ impl Router {
         }
     }
 
-    pub async fn start_retained_renderer(
+    pub(super) async fn request_renderer_start(
         self: &Arc<Self>,
         renderer_id: &str,
-        reactivate_failed: bool,
-    ) {
-        loop {
-            let process_generation = self.mgr.reserve_process_generation();
-            let (spec_revision, spawn_request) = {
-                let mut inner = self.inner.lock().await;
-                let has_demand = inner
-                    .table
-                    .links_for_renderer(renderer_id)
-                    .iter()
-                    .any(|link| link.enabled && inner.displays.contains_key(&link.display_id));
-                if !has_demand || inner.table.get_renderer(renderer_id).is_some() {
-                    return;
-                }
-                let Some(slot) = inner.renderer_slots.get_mut(renderer_id) else {
-                    return;
-                };
-                if slot.transition(RendererLifecycleEvent::StartRequested {
-                    generation: process_generation,
-                    reactivate_failed,
-                }) != RendererTransition::Changed
-                {
-                    return;
-                }
-                (slot.spec_revision, slot.spawn_request.clone())
-            };
-            if let Some(snapshot) = self.snapshot_renderer(renderer_id).await {
-                self.emit(RouterEvent::RendererUpsert(snapshot));
-            }
-            match self
-                .mgr
-                .spawn_for_generation(renderer_id.to_string(), process_generation, spawn_request)
-                .await
-            {
-                Ok(()) => {
-                    let Some(handle) = self.mgr.get(renderer_id).await else {
-                        return;
-                    };
-                    debug_assert_eq!(handle.process_generation, process_generation);
-                    if !self
-                        .register_renderer_current(
-                            handle,
-                            Some((spec_revision, process_generation)),
-                        )
-                        .await
-                    {
-                        let tracked = {
-                            let mut inner = self.inner.lock().await;
-                            let no_live_handle = inner.table.get_renderer(renderer_id).is_none();
-                            inner
-                                .renderer_slots
-                                .get_mut(renderer_id)
-                                .filter(|_| no_live_handle)
-                                .is_some_and(|slot| {
-                                    if matches!(
-                                        slot.state,
-                                        RendererLifecycleState::Starting { generation }
-                                            if generation == process_generation
-                                    ) {
-                                        let _ = slot.transition(
-                                            RendererLifecycleEvent::StopRequested { keep: true },
-                                        );
-                                    }
-                                    matches!(
-                                        slot.state,
-                                        RendererLifecycleState::Stopping { generation, .. }
-                                            if generation == process_generation
-                                    )
-                                })
-                        };
-                        if tracked {
-                            if let Some(snapshot) = self.snapshot_renderer(renderer_id).await {
-                                self.emit(RouterEvent::RendererUpsert(snapshot));
-                            }
-                        }
-                        match self
-                            .mgr
-                            .stop_generation(renderer_id, process_generation)
-                            .await
-                        {
-                            Ok(Some(exit)) if tracked => {
-                                self.settle_renderer_process_exit(exit).await;
-                                continue;
-                            }
-                            Ok(Some(exit)) => log::debug!(
-                                "renderer {renderer_id}: discarded stale spawned generation {}",
-                                exit.process_generation
-                            ),
-                            Ok(None) | Err(crate::error::Error::RendererNotFound(_)) => {}
-                            Err(error) => log::warn!(
-                                "renderer {renderer_id}: stale generation cleanup failed: {error}"
-                            ),
-                        }
-                        return;
-                    }
-                    let displays = {
-                        let inner = self.inner.lock().await;
-                        inner
-                            .table
-                            .links_for_renderer(renderer_id)
-                            .into_iter()
-                            .filter(|link| link.enabled)
-                            .map(|link| link.display_id)
-                            .collect::<Vec<_>>()
-                    };
-                    for display_id in displays {
-                        self.sync_display(display_id).await;
-                    }
-                    self.reconcile_buffer_flags().await;
-                    if let Some(snapshot) = self.snapshot_renderer(renderer_id).await {
-                        self.emit(RouterEvent::RendererUpsert(snapshot));
-                    }
-                    return;
-                }
-                Err(error) => {
-                    log::warn!("renderer {renderer_id}: retained start failed: {error}");
-                    let remove = {
-                        let mut inner = self.inner.lock().await;
-                        if let Some(slot) = inner.renderer_slots.get_mut(renderer_id) {
-                            let transition = slot.transition(RendererLifecycleEvent::SpawnFailed {
-                                generation: process_generation,
-                                failure: RendererExitSnapshot {
-                                    code: None,
-                                    signal: None,
-                                    reason: error.to_string(),
-                                },
-                            });
-                            if transition == RendererTransition::Remove {
-                                log::debug!(
-                                    "renderer {renderer_id}: remove failed dropped generation={process_generation}"
-                                );
-                            }
-                            transition == RendererTransition::Remove
-                        } else {
-                            false
-                        }
-                    };
-                    if remove {
-                        self.unregister_renderer(renderer_id).await;
-                        return;
-                    }
-                    if let Some(snapshot) = self.snapshot_renderer(renderer_id).await {
-                        self.emit(RouterEvent::RendererUpsert(snapshot));
-                    }
-                    return;
-                }
-            }
-        }
-    }
-
-    pub(super) async fn schedule_process_restart(self: &Arc<Self>, renderer_id: &str) {
-        let (spec_revision, failures, initial_delay) = {
+        cause: RendererStartCause,
+    ) -> crate::error::Result<()> {
+        let now = tokio::time::Instant::now();
+        let pending = {
             let mut inner = self.inner.lock().await;
-            if inner.process_restart_tasks.contains_key(renderer_id) {
-                return;
-            }
             let has_demand = inner
                 .table
                 .links_for_renderer(renderer_id)
                 .iter()
                 .any(|link| link.enabled && inner.displays.contains_key(&link.display_id));
-            let Some(slot) = inner.renderer_slots.get_mut(renderer_id) else {
-                return;
-            };
-            if !has_demand
-                || !matches!(
-                    slot.state,
-                    RendererLifecycleState::Killed { keep: true, .. }
-                )
-                || slot.restart_failures >= PROCESS_RESTART_MAX_FAILURES
-            {
-                return;
+            if !has_demand {
+                if let Some(slot) = inner.renderer_slots.get_mut(renderer_id) {
+                    slot.pending_start = None;
+                }
+                None
+            } else {
+                let Some(slot_snapshot) = inner.renderer_slots.get(renderer_id) else {
+                    return Ok(());
+                };
+                let existing = slot_snapshot.pending_start;
+                let restart_failures = slot_snapshot.restart_failures;
+                if cause == RendererStartCause::ProcessRestart
+                    && existing
+                        .is_some_and(|pending| pending.cause == RendererStartCause::ProcessRestart)
+                {
+                    existing
+                } else if cause == RendererStartCause::ProcessRestart
+                    && restart_failures >= PROCESS_RESTART_MAX_FAILURES
+                {
+                    if let Some(slot) = inner.renderer_slots.get_mut(renderer_id) {
+                        slot.pending_start = None;
+                    }
+                    log::warn!(
+                        "renderer {renderer_id}: restart limit {PROCESS_RESTART_MAX_FAILURES} reached"
+                    );
+                    None
+                } else {
+                    let mut next_cause = cause;
+                    let mut not_before = match cause {
+                        RendererStartCause::AutoReplayResume => now + AUTO_REPLAY_START_DELAY,
+                        RendererStartCause::ProcessRestart => {
+                            now + resume_retry_delay(restart_failures.saturating_add(1))
+                        }
+                        _ => now,
+                    };
+                    if let Some(current) = existing {
+                        if !cause.preempts_pending() {
+                            match (current.cause, cause) {
+                                (
+                                    RendererStartCause::AutoReplayResume,
+                                    RendererStartCause::AutoReplayResume,
+                                )
+                                | (
+                                    RendererStartCause::ProcessRestart,
+                                    RendererStartCause::ProcessRestart,
+                                ) => {
+                                    log::debug!(
+                                        "renderer {renderer_id}: keep pending start cause={} token={}",
+                                        current.cause.as_str(),
+                                        current.token
+                                    );
+                                    return Ok(());
+                                }
+                                (RendererStartCause::ProcessRestart, _)
+                                | (_, RendererStartCause::ProcessRestart) => {
+                                    next_cause = RendererStartCause::ProcessRestart;
+                                    not_before = not_before.max(current.not_before);
+                                }
+                                _ => {
+                                    log::debug!(
+                                        "renderer {renderer_id}: coalesce {} into pending {} token={}",
+                                        cause.as_str(),
+                                        current.cause.as_str(),
+                                        current.token
+                                    );
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                    if cause == RendererStartCause::ProcessRestart {
+                        if let Some(slot) = inner.renderer_slots.get_mut(renderer_id) {
+                            slot.restart_failures = slot.restart_failures.saturating_add(1);
+                        }
+                    }
+                    inner.next_start_token = inner
+                        .next_start_token
+                        .checked_add(1)
+                        .expect("renderer start token exhausted");
+                    let pending = PendingRendererStart {
+                        cause: next_cause,
+                        not_before,
+                        token: inner.next_start_token,
+                    };
+                    if let Some(slot) = inner.renderer_slots.get_mut(renderer_id) {
+                        slot.pending_start = Some(pending);
+                    }
+                    Some(pending)
+                }
             }
-            slot.restart_failures += 1;
-            (
-                slot.spec_revision,
-                slot.restart_failures,
-                resume_retry_delay(slot.restart_failures),
-            )
         };
-        log::warn!("renderer {renderer_id}: restart attempt {failures}/{PROCESS_RESTART_MAX_FAILURES} in {initial_delay:?}");
-        let weak = Arc::downgrade(self);
-        let id = renderer_id.to_string();
-        let task_id = id.clone();
-        let task = tokio::spawn(async move {
-            tokio::time::sleep(initial_delay).await;
-            let Some(router) = weak.upgrade() else { return };
-            let should_start = {
-                let inner = router.inner.lock().await;
-                let has_demand = inner
-                    .table
-                    .links_for_renderer(&task_id)
-                    .iter()
-                    .any(|link| link.enabled && inner.displays.contains_key(&link.display_id));
-                inner.renderer_slots.get(&task_id).is_some_and(|slot| {
-                    has_demand
-                        && slot.spec_revision == spec_revision
-                        && matches!(
-                            slot.state,
-                            RendererLifecycleState::Killed { keep: true, .. }
-                        )
-                })
+        let key = deadline::DeadlineKey::renderer_start(renderer_id);
+        let Some(pending) = pending else {
+            self.deadlines.cancel(key);
+            return Ok(());
+        };
+        log::debug!(
+            "renderer {renderer_id}: pending start cause={} token={} wait={:?}",
+            pending.cause.as_str(),
+            pending.token,
+            pending.not_before.saturating_duration_since(now)
+        );
+        self.advance_renderer_start(renderer_id, pending.token)
+            .await
+    }
+
+    async fn advance_renderer_start(
+        self: &Arc<Self>,
+        renderer_id: &str,
+        token: u64,
+    ) -> crate::error::Result<()> {
+        let action = {
+            let mut inner = self.inner.lock().await;
+            let has_demand = inner
+                .table
+                .links_for_renderer(renderer_id)
+                .iter()
+                .any(|link| link.enabled && inner.displays.contains_key(&link.display_id));
+            let has_live_handle = inner.table.get_renderer(renderer_id).is_some();
+            let Some(slot) = inner.renderer_slots.get(renderer_id) else {
+                return Ok(());
             };
-            if should_start {
-                router.start_retained_renderer(&task_id, false).await;
+            let Some(pending) = slot.pending_start.filter(|pending| pending.token == token) else {
+                return Ok(());
+            };
+            if !has_demand {
+                if let Some(slot) = inner.renderer_slots.get_mut(renderer_id) {
+                    slot.pending_start = None;
+                }
+                AdvanceStart::Cancel
+            } else if pending.not_before > tokio::time::Instant::now() {
+                AdvanceStart::Schedule(pending)
+            } else if slot.state.is_running() {
+                if let Some(slot) = inner.renderer_slots.get_mut(renderer_id) {
+                    slot.pending_start = None;
+                }
+                AdvanceStart::Cancel
+            } else if has_live_handle
+                || matches!(
+                    slot.state,
+                    RendererLifecycleState::Starting { .. }
+                        | RendererLifecycleState::Stopping { .. }
+                )
+            {
+                AdvanceStart::Wait
+            } else {
+                let process_generation = self.mgr.reserve_process_generation();
+                let slot = inner
+                    .renderer_slots
+                    .get_mut(renderer_id)
+                    .expect("renderer slot disappeared while locked");
+                if slot.transition(RendererLifecycleEvent::StartRequested {
+                    generation: process_generation,
+                    start_token: pending.token,
+                    reactivate_failed: pending.cause.allows_failed(),
+                }) != RendererTransition::Changed
+                {
+                    slot.pending_start = None;
+                    AdvanceStart::Cancel
+                } else {
+                    slot.pending_start = None;
+                    AdvanceStart::Start(RendererStartEffect {
+                        renderer_id: renderer_id.to_owned(),
+                        process_generation,
+                        spec_revision: slot.spec_revision,
+                        start_token: pending.token,
+                        cause: pending.cause,
+                        spawn_request: slot.spawn_request.clone(),
+                    })
+                }
             }
-            router
-                .inner
-                .lock()
-                .await
-                .process_restart_tasks
-                .remove(&task_id);
-        });
-        let mut inner = self.inner.lock().await;
-        if let Some(previous) = inner.process_restart_tasks.insert(id, task) {
-            previous.abort();
+        };
+        match action {
+            AdvanceStart::Start(effect) => {
+                self.deadlines
+                    .cancel(deadline::DeadlineKey::renderer_start(renderer_id));
+                if let Some(snapshot) = self.snapshot_renderer(renderer_id).await {
+                    self.emit(RouterEvent::RendererUpsert(snapshot));
+                }
+                self.execute_renderer_start(effect).await
+            }
+            AdvanceStart::Schedule(pending) => {
+                self.deadlines.schedule(
+                    deadline::DeadlineKey::renderer_start(renderer_id),
+                    pending.token,
+                    pending.not_before,
+                );
+                Ok(())
+            }
+            AdvanceStart::Cancel => {
+                self.deadlines
+                    .cancel(deadline::DeadlineKey::renderer_start(renderer_id));
+                Ok(())
+            }
+            AdvanceStart::Wait => Ok(()),
+        }
+    }
+
+    async fn execute_renderer_start(
+        self: &Arc<Self>,
+        effect: RendererStartEffect,
+    ) -> crate::error::Result<()> {
+        let renderer_id = effect.renderer_id.clone();
+        log::info!(
+            "renderer {renderer_id}: start cause={} generation={}",
+            effect.cause.as_str(),
+            effect.process_generation
+        );
+        match self
+            .mgr
+            .spawn_for_generation(
+                renderer_id.clone(),
+                effect.process_generation,
+                effect.spawn_request,
+            )
+            .await
+        {
+            Ok(()) => {
+                let Some(handle) = self.mgr.get(&renderer_id).await else {
+                    return Ok(());
+                };
+                if !self
+                    .register_renderer_current(
+                        handle,
+                        Some((
+                            effect.spec_revision,
+                            effect.process_generation,
+                            effect.start_token,
+                        )),
+                    )
+                    .await
+                {
+                    let tracked = {
+                        let mut inner = self.inner.lock().await;
+                        let no_live_handle = inner.table.get_renderer(&renderer_id).is_none();
+                        inner
+                            .renderer_slots
+                            .get_mut(&renderer_id)
+                            .filter(|_| no_live_handle)
+                            .is_some_and(|slot| {
+                                if matches!(
+                                    slot.state,
+                                    RendererLifecycleState::Starting { generation }
+                                        if generation == effect.process_generation
+                                ) {
+                                    let _ =
+                                        slot.transition(RendererLifecycleEvent::StopRequested {
+                                            keep: true,
+                                        });
+                                }
+                                matches!(
+                                    slot.state,
+                                    RendererLifecycleState::Stopping { generation, .. }
+                                        if generation == effect.process_generation
+                                )
+                            })
+                    };
+                    match self
+                        .mgr
+                        .stop_generation(&renderer_id, effect.process_generation)
+                        .await
+                    {
+                        Ok(Some(exit)) if tracked => {
+                            self.settle_renderer_process_exit(exit).await;
+                            Box::pin(self.resume_renderer_after_exit(&renderer_id)).await;
+                        }
+                        Ok(Some(exit)) => log::debug!(
+                            "renderer {renderer_id}: discarded stale spawned generation {}",
+                            exit.process_generation
+                        ),
+                        Ok(None) | Err(crate::error::Error::RendererNotFound(_)) => {}
+                        Err(error) => log::warn!(
+                            "renderer {renderer_id}: stale generation cleanup failed: {error}"
+                        ),
+                    }
+                    return Ok(());
+                }
+                let displays = {
+                    let inner = self.inner.lock().await;
+                    inner
+                        .table
+                        .links_for_renderer(&renderer_id)
+                        .into_iter()
+                        .filter(|link| link.enabled)
+                        .map(|link| link.display_id)
+                        .collect::<Vec<_>>()
+                };
+                for display_id in displays {
+                    self.sync_display(display_id).await;
+                }
+                self.reconcile_buffer_flags().await;
+                if let Some(snapshot) = self.snapshot_renderer(&renderer_id).await {
+                    self.emit(RouterEvent::RendererUpsert(snapshot));
+                }
+                Ok(())
+            }
+            Err(error) => {
+                log::warn!("renderer {renderer_id}: retained start failed: {error}");
+                let remove = {
+                    let mut inner = self.inner.lock().await;
+                    if let Some(slot) = inner.renderer_slots.get_mut(&renderer_id) {
+                        if slot.active_start_token != Some(effect.start_token) {
+                            false
+                        } else {
+                            slot.transition(RendererLifecycleEvent::SpawnFailed {
+                                generation: effect.process_generation,
+                                failure: RendererExitSnapshot {
+                                    code: None,
+                                    signal: None,
+                                    reason: error.to_string(),
+                                },
+                            }) == RendererTransition::Remove
+                        }
+                    } else {
+                        false
+                    }
+                };
+                if remove {
+                    self.unregister_renderer(&renderer_id).await;
+                } else if let Some(snapshot) = self.snapshot_renderer(&renderer_id).await {
+                    self.emit(RouterEvent::RendererUpsert(snapshot));
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub(super) async fn resume_renderer_after_exit(self: &Arc<Self>, renderer_id: &str) {
+        let state = {
+            let inner = self.inner.lock().await;
+            let Some(slot) = inner.renderer_slots.get(renderer_id) else {
+                return;
+            };
+            (slot.state.clone(), slot.pending_start)
+        };
+        if let Some(pending) = state.1 {
+            if matches!(state.0, RendererLifecycleState::Killed { keep: true, .. })
+                && pending.cause != RendererStartCause::ProcessRestart
+            {
+                let _ = self
+                    .request_renderer_start(renderer_id, RendererStartCause::ProcessRestart)
+                    .await;
+            } else {
+                let _ = self
+                    .advance_renderer_start(renderer_id, pending.token)
+                    .await;
+            }
+        } else if matches!(state.0, RendererLifecycleState::Killed { keep: true, .. }) {
+            let _ = self
+                .request_renderer_start(renderer_id, RendererStartCause::ProcessRestart)
+                .await;
+        }
+    }
+
+    pub(super) async fn on_deadline_reached(self: &Arc<Self>, event: deadline::DeadlineReached) {
+        match event.key.kind {
+            deadline::DeadlineKind::RendererStart => {
+                let _ = self
+                    .advance_renderer_start(&event.key.owner, event.token)
+                    .await;
+            }
         }
     }
 

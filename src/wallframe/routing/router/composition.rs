@@ -1,34 +1,360 @@
 use super::*;
 
+#[derive(Debug, Clone)]
+pub struct ApplyAssignment {
+    pub spawn_request: crate::wallframe::renderer_manager::SpawnRequest,
+    pub display_ids: Vec<DisplayId>,
+    pub duplicate_renderers: bool,
+    pub wallpaper_layout_override: WallpaperLayoutOverride,
+    pub preempt_pending_start: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignmentActivation {
+    Active,
+    Deferred,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveRenderer {
+    pub renderer_id: RendererId,
+    pub process_generation: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApplyReceipt {
+    pub renderer_id: RendererId,
+    pub activation: AssignmentActivation,
+    pub active_renderers: Vec<ActiveRenderer>,
+}
+
+struct AssignmentCommit {
+    primary_renderer_id: RendererId,
+    selected_renderers: Vec<RendererId>,
+    affected_displays: Vec<DisplayId>,
+    dropped_renderers: Vec<RendererId>,
+    removed_renderers: Vec<RendererId>,
+    cancelled_starts: Vec<RendererId>,
+}
+
 impl Router {
-    async fn replace_failed_assignment(
+    pub async fn wait_for_first_frame(
         self: &Arc<Self>,
-        request: &crate::wallframe::renderer_manager::SpawnRequest,
-        target_ids: &[DisplayId],
-    ) -> Option<RendererId> {
-        let mut inner = self.inner.lock().await;
-        let existing = target_ids
-            .iter()
-            .flat_map(|display_id| inner.table.links_for_display(*display_id))
-            .map(|link| link.renderer_id)
-            .collect::<HashSet<_>>();
-        let renderer_id = (existing.len() == 1)
-            .then(|| existing.into_iter().next())
-            .flatten()?;
-        let links_match = inner
-            .table
-            .links_for_renderer(&renderer_id)
-            .iter()
-            .all(|link| target_ids.contains(&link.display_id));
-        let slot = inner.renderer_slots.get_mut(&renderer_id)?;
-        if !links_match || !slot.state.is_failed() {
-            return None;
+        renderer: &ActiveRenderer,
+        timeout: Duration,
+    ) -> crate::error::Result<()> {
+        self.mgr
+            .wait_for_first_frame_generation(
+                &renderer.renderer_id,
+                renderer.process_generation,
+                timeout,
+            )
+            .await
+    }
+
+    pub async fn apply_assignment(
+        self: &Arc<Self>,
+        mut request: ApplyAssignment,
+    ) -> crate::error::Result<ApplyReceipt> {
+        request.spawn_request.default_user_properties =
+            crate::catalog::properties::normalize_renderer_user_properties(
+                request.spawn_request.default_user_properties,
+            );
+        let renderer_name = request
+            .spawn_request
+            .renderer_name
+            .clone()
+            .unwrap_or_default();
+        let commit = {
+            let mut inner = self.inner.lock().await;
+            let groups = if request.display_ids.is_empty() {
+                vec![Vec::new()]
+            } else if request.duplicate_renderers {
+                request
+                    .display_ids
+                    .iter()
+                    .map(|display_id| vec![*display_id])
+                    .collect::<Vec<_>>()
+            } else {
+                vec![request.display_ids.clone()]
+            };
+            let mut primary_renderer_id = None;
+            let mut selected_renderers = Vec::new();
+            let mut affected_displays = Vec::new();
+            let mut displaced_renderers = HashSet::new();
+
+            for group in groups {
+                let existing = if group.is_empty() {
+                    inner.renderer_slots.keys().cloned().collect::<HashSet<_>>()
+                } else {
+                    group
+                        .iter()
+                        .flat_map(|display_id| inner.table.links_for_display(*display_id))
+                        .map(|link| link.renderer_id)
+                        .collect::<HashSet<_>>()
+                };
+                displaced_renderers.extend(existing.iter().cloned());
+                let has_demand = group.iter().any(|display_id| {
+                    inner.displays.get(display_id).is_some_and(|display| {
+                        !inner.manual_stopped && !display.auto_replay.stop_applied
+                    })
+                });
+                let reusable_running = has_demand
+                    .then(|| {
+                        let mut ids = inner
+                            .renderer_slots
+                            .iter()
+                            .filter_map(|(renderer_id, slot)| {
+                                let renderer_name_matches = request
+                                    .spawn_request
+                                    .renderer_name
+                                    .as_deref()
+                                    .is_none_or(|name| name == slot.name);
+                                let identity_matches = slot.state.is_running()
+                                    && inner.table.get_renderer(renderer_id).is_some()
+                                    && slot.spawn_request.wp_type == request.spawn_request.wp_type
+                                    && renderer_name_matches
+                                    && slot.spawn_request.extras == request.spawn_request.extras
+                                    && slot.spawn_request.default_user_properties
+                                        == request.spawn_request.default_user_properties;
+                                let target_matches = !request.duplicate_renderers
+                                    || inner
+                                        .table
+                                        .links_for_renderer(renderer_id)
+                                        .iter()
+                                        .all(|link| group.contains(&link.display_id));
+                                (identity_matches && target_matches).then(|| renderer_id.clone())
+                            })
+                            .collect::<Vec<_>>();
+                        ids.sort();
+                        ids.into_iter().next()
+                    })
+                    .flatten();
+                let reusable_terminal = (existing.len() == 1)
+                    .then(|| existing.iter().next().cloned())
+                    .flatten()
+                    .filter(|renderer_id| {
+                        inner
+                            .table
+                            .links_for_renderer(renderer_id)
+                            .iter()
+                            .all(|link| group.contains(&link.display_id))
+                            && inner.renderer_slots.get(renderer_id).is_some_and(|slot| {
+                                matches!(
+                                    slot.state,
+                                    RendererLifecycleState::Stopping { keep: true, .. }
+                                        | RendererLifecycleState::Stopped { keep: true, .. }
+                                        | RendererLifecycleState::Killed { keep: true, .. }
+                                        | RendererLifecycleState::Failed { .. }
+                                )
+                            })
+                    });
+                let renderer_id = reusable_running
+                    .or(reusable_terminal)
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                if !inner.renderer_slots.contains_key(&renderer_id) {
+                    inner.renderer_slots.insert(
+                        renderer_id.clone(),
+                        RendererSlot::retained(
+                            request.spawn_request.clone(),
+                            renderer_name.clone(),
+                        ),
+                    );
+                } else if !inner
+                    .renderer_slots
+                    .get(&renderer_id)
+                    .is_some_and(|slot| slot.state.is_running())
+                {
+                    inner
+                        .renderer_slots
+                        .get_mut(&renderer_id)
+                        .expect("selected renderer slot disappeared")
+                        .replace_spec(
+                            request.spawn_request.clone(),
+                            renderer_name.clone(),
+                            request.preempt_pending_start,
+                        );
+                }
+                if request.wallpaper_layout_override.is_empty() {
+                    inner.wallpaper_layout_overrides.remove(&renderer_id);
+                } else {
+                    inner
+                        .wallpaper_layout_overrides
+                        .insert(renderer_id.clone(), request.wallpaper_layout_override);
+                }
+                for display_id in group {
+                    if !inner.displays.contains_key(&display_id) {
+                        continue;
+                    }
+                    let enabled = !inner.manual_stopped
+                        && !inner
+                            .displays
+                            .get(&display_id)
+                            .is_some_and(|display| display.auto_replay.stop_applied);
+                    inner
+                        .table
+                        .add_link_with_enabled(renderer_id.clone(), display_id, enabled);
+                    if let Some(display) = inner.displays.get(&display_id) {
+                        display.invalidate_consumption();
+                    }
+                    affected_displays.push(display_id);
+                }
+                primary_renderer_id.get_or_insert_with(|| renderer_id.clone());
+                selected_renderers.push(renderer_id);
+            }
+
+            selected_renderers.sort();
+            selected_renderers.dedup();
+            let selected = selected_renderers.iter().cloned().collect::<HashSet<_>>();
+            let mut dropped_renderers = Vec::new();
+            let mut removed_renderers = Vec::new();
+            let mut cancelled_starts = Vec::new();
+            for renderer_id in displaced_renderers {
+                if selected.contains(&renderer_id)
+                    || !inner.table.links_for_renderer(&renderer_id).is_empty()
+                {
+                    continue;
+                }
+                let has_process = inner
+                    .renderer_slots
+                    .get(&renderer_id)
+                    .is_some_and(|slot| slot.state.has_process());
+                if has_process {
+                    if let Some(slot) = inner.renderer_slots.get_mut(&renderer_id) {
+                        slot.pending_start = None;
+                        let _ =
+                            slot.transition(RendererLifecycleEvent::StopRequested { keep: false });
+                    }
+                    inner
+                        .unbind_acks_pending
+                        .entry(renderer_id.clone())
+                        .or_default();
+                    cancelled_starts.push(renderer_id.clone());
+                    dropped_renderers.push(renderer_id);
+                } else if inner.renderer_slots.remove(&renderer_id).is_some() {
+                    inner.wallpaper_layout_overrides.remove(&renderer_id);
+                    inner.renderer_manual_paused.remove(&renderer_id);
+                    cancelled_starts.push(renderer_id.clone());
+                    removed_renderers.push(renderer_id);
+                }
+            }
+            for renderer_id in &selected_renderers {
+                let has_demand = inner
+                    .table
+                    .links_for_renderer(renderer_id)
+                    .iter()
+                    .any(|link| link.enabled && inner.displays.contains_key(&link.display_id));
+                if !has_demand
+                    && inner
+                        .renderer_slots
+                        .get_mut(renderer_id)
+                        .is_some_and(|slot| slot.pending_start.take().is_some())
+                {
+                    cancelled_starts.push(renderer_id.clone());
+                }
+            }
+            AssignmentCommit {
+                primary_renderer_id: primary_renderer_id
+                    .expect("assignment must select at least one renderer"),
+                selected_renderers,
+                affected_displays,
+                dropped_renderers,
+                removed_renderers,
+                cancelled_starts,
+            }
+        };
+
+        for renderer_id in &commit.cancelled_starts {
+            self.deadlines
+                .cancel(deadline::DeadlineKey::renderer_start(renderer_id));
         }
-        slot.replace_spec(
-            request.clone(),
-            request.renderer_name.clone().unwrap_or_default(),
-        );
-        Some(renderer_id)
+        for renderer_id in &commit.removed_renderers {
+            self.emit(RouterEvent::RendererRemoved(renderer_id.clone()));
+        }
+        let mut affected_displays = commit.affected_displays;
+        affected_displays.sort_unstable();
+        affected_displays.dedup();
+        for display_id in &affected_displays {
+            self.sync_display(*display_id).await;
+        }
+        for renderer_id in &commit.dropped_renderers {
+            if let Err(error) = self
+                .stop_renderer_drop(renderer_id, Duration::from_secs(1))
+                .await
+            {
+                log::warn!(
+                    "renderer {renderer_id}: assignment replacement cleanup failed: {error}"
+                );
+            }
+        }
+
+        let cause = RendererStartCause::ExplicitApply {
+            preempt_pending: request.preempt_pending_start,
+        };
+        let mut start_error = None;
+        for renderer_id in &commit.selected_renderers {
+            let failed_background = {
+                let inner = self.inner.lock().await;
+                !request.preempt_pending_start
+                    && inner
+                        .renderer_slots
+                        .get(renderer_id)
+                        .is_some_and(|slot| slot.state.is_failed())
+            };
+            if !failed_background {
+                if let Err(error) = self.request_renderer_start(renderer_id, cause).await {
+                    start_error.get_or_insert(error);
+                }
+            }
+        }
+
+        let mut active_renderers = Vec::new();
+        for renderer_id in &commit.selected_renderers {
+            let state = self
+                .inner
+                .lock()
+                .await
+                .renderer_slots
+                .get(renderer_id)
+                .map(|slot| slot.state.clone());
+            match state {
+                Some(RendererLifecycleState::Running { generation, .. }) => {
+                    active_renderers.push(ActiveRenderer {
+                        renderer_id: renderer_id.clone(),
+                        process_generation: generation,
+                    });
+                }
+                Some(RendererLifecycleState::Failed { failure })
+                    if request.preempt_pending_start =>
+                {
+                    if start_error.is_none() {
+                        start_error =
+                            Some(crate::error::Error::RendererSpawnFailed(failure.reason));
+                    }
+                }
+                _ => {}
+            }
+            if let Some(snapshot) = self.snapshot_renderer(renderer_id).await {
+                self.emit(RouterEvent::RendererUpsert(snapshot));
+            }
+        }
+        self.reconcile_lifecycle().await;
+        self.reconcile_buffer_flags().await;
+        if !affected_displays.is_empty() {
+            self.emit(RouterEvent::DisplaysReplace(self.snapshot_displays().await));
+        }
+        if let Some(error) = start_error {
+            return Err(error);
+        }
+        Ok(ApplyReceipt {
+            renderer_id: commit.primary_renderer_id,
+            activation: if active_renderers.is_empty() {
+                AssignmentActivation::Deferred
+            } else {
+                AssignmentActivation::Active
+            },
+            active_renderers,
+        })
     }
 
     pub async fn reusable_renderer_for_target(
@@ -169,178 +495,6 @@ impl Router {
         }
         self.set_renderer_wallpaper_layout_override(renderer_id, layout)
             .await
-    }
-
-    pub async fn displays_have_no_activation(self: &Arc<Self>, display_ids: &[DisplayId]) -> bool {
-        let inner = self.inner.lock().await;
-        if inner.manual_stopped {
-            return true;
-        }
-        if display_ids.is_empty() {
-            return false;
-        }
-        display_ids.iter().all(|display_id| {
-            inner
-                .displays
-                .get(display_id)
-                .is_some_and(|display| display.auto_replay.stop_applied)
-        })
-    }
-
-    pub async fn apply_retained_assignment(
-        self: &Arc<Self>,
-        spawn_request: crate::wallframe::renderer_manager::SpawnRequest,
-        renderer_name: String,
-        display_ids: &[DisplayId],
-        duplicate_renderers: bool,
-        wallpaper_layout_override: WallpaperLayoutOverride,
-    ) -> RendererId {
-        let mut removed = Vec::new();
-        let mut to_drop = Vec::new();
-        let mut applied = Vec::new();
-        let mut applied_slots = Vec::new();
-        let first_id = {
-            let mut inner = self.inner.lock().await;
-            let groups: Vec<Vec<DisplayId>> = if display_ids.is_empty() {
-                vec![Vec::new()]
-            } else if duplicate_renderers {
-                display_ids.iter().map(|id| vec![*id]).collect()
-            } else {
-                vec![display_ids.to_vec()]
-            };
-            let mut first_id = None;
-            for group in groups {
-                let existing: HashSet<RendererId> = if group.is_empty() {
-                    inner.renderer_slots.keys().cloned().collect()
-                } else {
-                    group
-                        .iter()
-                        .flat_map(|display_id| inner.table.links_for_display(*display_id))
-                        .map(|link| link.renderer_id)
-                        .collect()
-                };
-                let reusable = (existing.len() == 1)
-                    .then(|| existing.iter().next().cloned())
-                    .flatten()
-                    .filter(|renderer_id| {
-                        inner
-                            .table
-                            .links_for_renderer(renderer_id)
-                            .iter()
-                            .all(|link| group.contains(&link.display_id))
-                            && inner.renderer_slots.get(renderer_id).is_some_and(|slot| {
-                                matches!(
-                                    slot.state,
-                                    RendererLifecycleState::Stopping { keep: true, .. }
-                                        | RendererLifecycleState::Stopped { keep: true, .. }
-                                        | RendererLifecycleState::Killed { keep: true, .. }
-                                        | RendererLifecycleState::Failed { .. }
-                                )
-                            })
-                    });
-                let renderer_id = reusable.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                if let Some(slot) = inner.renderer_slots.get_mut(&renderer_id) {
-                    slot.replace_spec(spawn_request.clone(), renderer_name.clone());
-                } else {
-                    inner.renderer_slots.insert(
-                        renderer_id.clone(),
-                        RendererSlot::retained(spawn_request.clone(), renderer_name.clone()),
-                    );
-                }
-                if wallpaper_layout_override.is_empty() {
-                    inner.wallpaper_layout_overrides.remove(&renderer_id);
-                } else {
-                    inner
-                        .wallpaper_layout_overrides
-                        .insert(renderer_id.clone(), wallpaper_layout_override);
-                }
-                for display_id in &group {
-                    for link in inner.table.links_for_display(*display_id) {
-                        inner.table.remove_link(link.id);
-                    }
-                    inner
-                        .table
-                        .add_link_with_enabled(renderer_id.clone(), *display_id, false);
-                    applied.push(*display_id);
-                }
-                first_id.get_or_insert_with(|| renderer_id.clone());
-                applied_slots.push(renderer_id.clone());
-                for old_id in existing {
-                    if old_id == renderer_id || !inner.table.links_for_renderer(&old_id).is_empty()
-                    {
-                        continue;
-                    }
-                    let has_process = inner
-                        .renderer_slots
-                        .get(&old_id)
-                        .is_some_and(|slot| slot.state.has_process());
-                    if has_process {
-                        to_drop.push(old_id);
-                    } else {
-                        inner.renderer_slots.remove(&old_id);
-                        inner.wallpaper_layout_overrides.remove(&old_id);
-                        removed.push(old_id);
-                    }
-                }
-            }
-            first_id.expect("retained assignment requires a slot")
-        };
-        for renderer_id in removed {
-            self.emit(RouterEvent::RendererRemoved(renderer_id));
-        }
-        for display_id in applied {
-            self.sync_display(display_id).await;
-        }
-        for renderer_id in to_drop {
-            if let Err(error) = self.kill_renderer_drop(&renderer_id).await {
-                log::warn!("renderer {renderer_id}: deferred replacement cleanup failed: {error}");
-            }
-        }
-        applied_slots.sort();
-        applied_slots.dedup();
-        for renderer_id in applied_slots {
-            if let Some(snapshot) = self.snapshot_renderer(&renderer_id).await {
-                self.emit(RouterEvent::RendererUpsert(snapshot));
-            }
-        }
-        self.emit(RouterEvent::DisplaysReplace(self.snapshot_displays().await));
-        first_id
-    }
-
-    pub async fn apply_active_assignment(
-        self: &Arc<Self>,
-        spawn_request: crate::wallframe::renderer_manager::SpawnRequest,
-        display_ids: &[DisplayId],
-        exclusive_target: bool,
-        wallpaper_layout_override: WallpaperLayoutOverride,
-    ) -> crate::error::Result<RendererId> {
-        let renderer_id = if let Some(renderer_id) = self
-            .replace_failed_assignment(&spawn_request, display_ids)
-            .await
-        {
-            self.start_retained_renderer(&renderer_id, true).await;
-            renderer_id
-        } else if let Some(renderer_id) = self
-            .reusable_renderer_for_target(&spawn_request, display_ids, exclusive_target)
-            .await
-        {
-            renderer_id
-        } else {
-            let to_stop = self.renderers_fully_replaced_by(Some(display_ids)).await;
-            if !to_stop.is_empty() {
-                self.stop_renderers_orderly(&to_stop, Duration::from_secs(1))
-                    .await;
-            }
-            let renderer_id = self.mgr.spawn(spawn_request).await?;
-            if let Some(handle) = self.mgr.get(&renderer_id).await {
-                self.register_renderer(handle).await;
-            }
-            renderer_id
-        };
-        self.set_renderer_wallpaper_layout_override(&renderer_id, wallpaper_layout_override)
-            .await;
-        self.relink_displays_to(display_ids, &renderer_id).await;
-        Ok(renderer_id)
     }
 
     // Routing policy

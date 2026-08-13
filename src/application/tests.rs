@@ -32,3 +32,29 @@ fn duplicate_only_when_setting_and_targets() {
         RendererSharingPolicy::Shared
     ));
 }
+
+#[test]
+fn apply_sources_project_to_start_preemption_once() {
+    let background = [
+        ApplySource::QueueRotation,
+        ApplySource::PlaylistRotation,
+        ApplySource::PlaylistRebuild,
+    ];
+    for source in background {
+        assert!(!source.preempts_pending_start(), "{}", source.as_str());
+    }
+
+    let immediate = [
+        ApplySource::UserWallpaper,
+        ApplySource::UserQueueStep,
+        ApplySource::UserPlaylistActivation,
+        ApplySource::UserPlaylistJump,
+        ApplySource::StartupRestore,
+        ApplySource::DisplayRecall,
+        ApplySource::PlaylistAttach,
+        ApplySource::PluginRestart,
+    ];
+    for source in immediate {
+        assert!(source.preempts_pending_start(), "{}", source.as_str());
+    }
+}

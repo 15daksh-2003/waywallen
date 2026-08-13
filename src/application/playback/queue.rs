@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::application::ApplySource;
 use crate::error::{Error, Result};
 use crate::model::repo;
 use crate::playback::{Mode, RotationConfig};
@@ -36,7 +37,7 @@ pub async fn step_pick(app: &Arc<DaemonContext>, delta: i32) -> Result<String> {
 
 pub async fn step(app: &Arc<DaemonContext>, delta: i32) -> Result<String> {
     let entry_id = step_pick(app, delta).await?;
-    apply_wallpaper_by_id(app, &entry_id).await?;
+    apply_wallpaper_by_id(app, &entry_id, ApplySource::UserQueueStep).await?;
     app.rotation.kick();
     Ok(entry_id)
 }
@@ -250,7 +251,13 @@ pub async fn run_rotator(
                     match step_pick(&app, 1).await {
                         Ok(id) => {
                             if let Err(e) =
-                                apply_wallpaper_to_displays(&app, &id, &unowned).await
+                                apply_wallpaper_to_displays(
+                                    &app,
+                                    &id,
+                                    &unowned,
+                                    ApplySource::QueueRotation,
+                                )
+                                .await
                             {
                                 log::warn!("rotator apply failed: {e:#}");
                             }

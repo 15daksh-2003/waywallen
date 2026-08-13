@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 
 use super::cursor::PlaylistCursor;
 use super::engine::{self, Definition, DisplayStatus};
-use super::port::{ApplyPort, ApplyRequest, ApplySharing};
+use super::port::{ApplyPort, ApplyRequest, ApplySharing, ApplySource};
 use crate::error::Result;
 use crate::playback::rotation::{make_handle, RotationHandle};
 use crate::wallframe::scheduler::DisplayId;
@@ -79,6 +79,7 @@ impl Sessions {
         if let Some(entry_id) = first {
             apply
                 .apply(ApplyRequest {
+                    source: ApplySource::Activation,
                     entry_id,
                     display_ids: targets.to_vec(),
                     sharing: ApplySharing::Shared,
@@ -126,6 +127,7 @@ impl Sessions {
         if let Some(entry_id) = session.cursor.lock().await.current.clone() {
             apply
                 .apply(ApplyRequest {
+                    source: ApplySource::Attach,
                     entry_id,
                     display_ids: vec![display_id],
                     sharing: ApplySharing::Shared,
@@ -176,6 +178,7 @@ impl Sessions {
         if !display_ids.is_empty() {
             apply
                 .apply(ApplyRequest {
+                    source: ApplySource::Jump,
                     entry_id: entry_id.to_owned(),
                     display_ids,
                     sharing: ApplySharing::Shared,
@@ -273,6 +276,7 @@ impl Sessions {
             if !display_ids.is_empty() {
                 apply
                     .apply(ApplyRequest {
+                        source: ApplySource::Rebuild,
                         entry_id,
                         display_ids,
                         sharing: ApplySharing::Shared,

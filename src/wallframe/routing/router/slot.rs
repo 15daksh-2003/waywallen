@@ -7,6 +7,62 @@ pub enum RendererActivity {
     Muted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RendererStartCause {
+    ExplicitApply { preempt_pending: bool },
+    ExplicitSpawn,
+    AutoReplayResume,
+    ManualStopResume,
+    DisplayReconnect,
+    ProcessRestart,
+}
+
+impl RendererStartCause {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitApply {
+                preempt_pending: true,
+            } => "explicit-immediate",
+            Self::ExplicitApply {
+                preempt_pending: false,
+            } => "explicit-coalescing",
+            Self::ExplicitSpawn => "explicit-spawn",
+            Self::AutoReplayResume => "auto-replay",
+            Self::ManualStopResume => "manual-stop-resume",
+            Self::DisplayReconnect => "display-reconnect",
+            Self::ProcessRestart => "process-restart",
+        }
+    }
+
+    pub fn allows_failed(self) -> bool {
+        matches!(
+            self,
+            Self::ExplicitApply {
+                preempt_pending: true
+            } | Self::ExplicitSpawn
+                | Self::DisplayReconnect
+        )
+    }
+
+    pub fn preempts_pending(self) -> bool {
+        matches!(
+            self,
+            Self::ExplicitApply {
+                preempt_pending: true
+            } | Self::ExplicitSpawn
+                | Self::ManualStopResume
+                | Self::DisplayReconnect
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct PendingRendererStart {
+    pub cause: RendererStartCause,
+    pub not_before: tokio::time::Instant,
+    pub token: u64,
+}
+
 impl RendererActivity {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -117,6 +173,7 @@ impl RendererLifecycleState {
 pub(super) enum RendererLifecycleEvent {
     StartRequested {
         generation: u64,
+        start_token: u64,
         reactivate_failed: bool,
     },
     ProcessAttached {
@@ -135,7 +192,9 @@ pub(super) enum RendererLifecycleEvent {
         generation: u64,
         failure: RendererExitSnapshot,
     },
-    SpecReplaced,
+    SpecReplaced {
+        reactivate_failed: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +210,8 @@ pub(super) struct RendererSlot {
     pub spec_revision: u64,
     pub state: RendererLifecycleState,
     pub restart_failures: u32,
+    pub pending_start: Option<PendingRendererStart>,
+    pub active_start_token: Option<u64>,
 }
 
 impl RendererSlot {
@@ -164,6 +225,8 @@ impl RendererSlot {
                 activity: RendererActivity::Playing,
             },
             restart_failures: 0,
+            pending_start: None,
+            active_start_token: None,
         }
     }
 
@@ -180,6 +243,8 @@ impl RendererSlot {
                 last_exit: None,
             },
             restart_failures: 0,
+            pending_start: None,
+            active_start_token: None,
         }
     }
 
@@ -187,12 +252,13 @@ impl RendererSlot {
         &mut self,
         spawn_request: crate::wallframe::renderer_manager::SpawnRequest,
         name: String,
+        reactivate_failed: bool,
     ) {
         self.spawn_request = spawn_request;
         self.name = name;
         self.spec_revision = self.spec_revision.wrapping_add(1).max(1);
         self.restart_failures = 0;
-        let _ = self.transition(RendererLifecycleEvent::SpecReplaced);
+        let _ = self.transition(RendererLifecycleEvent::SpecReplaced { reactivate_failed });
     }
 
     pub fn transition(&mut self, event: RendererLifecycleEvent) -> RendererTransition {
@@ -202,14 +268,17 @@ impl RendererSlot {
         match event {
             RendererLifecycleEvent::StartRequested {
                 generation,
+                start_token,
                 reactivate_failed,
             } => match &self.state {
                 State::Stopped { keep: true, .. } | State::Killed { keep: true, .. } => {
                     self.state = State::Starting { generation };
+                    self.active_start_token = Some(start_token);
                     RendererTransition::Changed
                 }
                 State::Failed { .. } if reactivate_failed => {
                     self.state = State::Starting { generation };
+                    self.active_start_token = Some(start_token);
                     RendererTransition::Changed
                 }
                 _ => RendererTransition::Unchanged,
@@ -222,6 +291,7 @@ impl RendererSlot {
                         generation,
                         activity: RendererActivity::Playing,
                     };
+                    self.active_start_token = None;
                     RendererTransition::Changed
                 }
                 _ => RendererTransition::Unchanged,
@@ -287,6 +357,7 @@ impl RendererSlot {
                     RendererProcessExitKind::Failed if keep => State::Failed { failure: exit },
                     RendererProcessExitKind::Failed => return RendererTransition::Remove,
                 };
+                self.active_start_token = None;
                 if keep {
                     RendererTransition::Changed
                 } else {
@@ -309,15 +380,21 @@ impl RendererSlot {
                 };
                 if keep {
                     self.state = State::Failed { failure };
+                    self.active_start_token = None;
                     RendererTransition::Changed
                 } else {
                     RendererTransition::Remove
                 }
             }
-            RendererLifecycleEvent::SpecReplaced => match self.state {
-                State::Stopped { keep: true, .. }
-                | State::Killed { keep: true, .. }
-                | State::Failed { .. } => {
+            RendererLifecycleEvent::SpecReplaced { reactivate_failed } => match self.state {
+                State::Stopped { keep: true, .. } | State::Killed { keep: true, .. } => {
+                    self.state = State::Stopped {
+                        keep: true,
+                        last_exit: None,
+                    };
+                    RendererTransition::Changed
+                }
+                State::Failed { .. } if reactivate_failed => {
                     self.state = State::Stopped {
                         keep: true,
                         last_exit: None,
@@ -349,6 +426,8 @@ mod tests {
             spec_revision: 1,
             state,
             restart_failures: 0,
+            pending_start: None,
+            active_start_token: None,
         }
     }
 
@@ -404,6 +483,7 @@ mod tests {
         assert_eq!(
             slot.transition(RendererLifecycleEvent::StartRequested {
                 generation: 8,
+                start_token: 1,
                 reactivate_failed: false,
             }),
             RendererTransition::Unchanged
@@ -411,6 +491,7 @@ mod tests {
         assert_eq!(
             slot.transition(RendererLifecycleEvent::StartRequested {
                 generation: 8,
+                start_token: 2,
                 reactivate_failed: true,
             }),
             RendererTransition::Changed
@@ -427,7 +508,9 @@ mod tests {
             failure: exit("failed"),
         });
         assert_eq!(
-            slot.transition(RendererLifecycleEvent::SpecReplaced),
+            slot.transition(RendererLifecycleEvent::SpecReplaced {
+                reactivate_failed: true,
+            }),
             RendererTransition::Changed
         );
         assert!(matches!(

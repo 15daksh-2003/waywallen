@@ -148,29 +148,32 @@ async fn handle_client(
     } = router.register_display(registration).await;
     log::info!("display {display_id} registered with router");
 
-    let send_ack_stream = stream.try_clone().context("clone for accepted")?;
-    tokio::task::spawn_blocking(move || {
-        codec::send_event(
-            &send_ack_stream,
-            &Event::DisplayAccepted {
-                display_id,
-                presentation: presentation_to_wire(presentation),
-            },
-            &[],
-        )
-    })
-    .await
-    .context("accepted join")?
-    .map_err(|e| Error::Internal(anyhow!("send display_accepted: {e}")))?;
+    let result = async {
+        let send_ack_stream = stream.try_clone().context("clone for accepted")?;
+        tokio::task::spawn_blocking(move || {
+            codec::send_event(
+                &send_ack_stream,
+                &Event::DisplayAccepted {
+                    display_id,
+                    presentation: presentation_to_wire(presentation),
+                },
+                &[],
+            )
+        })
+        .await
+        .context("accepted join")?
+        .map_err(|e| Error::Internal(anyhow!("send display_accepted: {e}")))?;
 
-    let result = run_frame_loop(
-        stream,
-        router.clone(),
-        display_id,
-        session_id,
-        rx,
-        shutdown_rx,
-    )
+        run_frame_loop(
+            stream,
+            router.clone(),
+            display_id,
+            session_id,
+            rx,
+            shutdown_rx,
+        )
+        .await
+    }
     .await;
     router.unregister_display(display_id).await;
     result
@@ -609,10 +612,10 @@ async fn run_frame_loop(
                     }
                     if let (Some(r), Some(cfg)) = (bound_renderer.as_ref(), latest_config.as_ref()) {
                         if let Some((tx, ty)) = display_point_to_texture(x, y, cfg) {
-                            // RendererManager.send_pointer_motion gates on the
-                            // renderer's manifest events list.
-                            if let Err(e) = router.renderer_manager()
-                                .send_pointer_motion(
+                            // Pointer forwarding gates on the renderer's
+                            // manifest events list.
+                            if let Err(e) = router
+                                .forward_pointer_motion(
                                     &r.id,
                                     RendererPointerMotion {
                                         x: tx,
@@ -639,8 +642,8 @@ async fn run_frame_loop(
                     }
                     if let (Some(r), Some(cfg)) = (bound_renderer.as_ref(), latest_config.as_ref()) {
                         if let Some((tx, ty)) = display_point_to_texture(x, y, cfg) {
-                            if let Err(e) = router.renderer_manager()
-                                .send_pointer_button(
+                            if let Err(e) = router
+                                .forward_pointer_button(
                                     &r.id,
                                     RendererPointerButton {
                                         x: tx,
@@ -678,8 +681,8 @@ async fn run_frame_loop(
                         if let Some((tx, ty)) = display_point_to_texture(x, y, cfg) {
                             // delta_x/delta_y are scroll quantities, not
                             // spatial; forward unchanged.
-                            if let Err(e) = router.renderer_manager()
-                                .send_pointer_axis(
+                            if let Err(e) = router
+                                .forward_pointer_axis(
                                     &r.id,
                                     RendererPointerAxis {
                                         x: tx,

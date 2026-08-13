@@ -82,6 +82,7 @@ async fn restart_affected_renderers(
             &wallpaper_id,
             &display_ids,
             crate::application::APPLY_FIRST_FRAME_TIMEOUT,
+            crate::application::ApplySource::PluginRestart,
         )
         .await?;
     }

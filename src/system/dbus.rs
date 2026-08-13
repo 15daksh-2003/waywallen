@@ -126,7 +126,7 @@ impl Daemon1 {
     }
 
     async fn apply_by_id(&self, id: String) -> zbus::fdo::Result<String> {
-        application::apply_wallpaper_by_id(&self.app, &id)
+        application::apply_wallpaper_by_id(&self.app, &id, application::ApplySource::UserWallpaper)
             .await
             .map(|r| r.renderer_id)
             .map_err(zbus::fdo::Error::from)
@@ -135,10 +135,14 @@ impl Daemon1 {
     /// Apply an image wallpaper via `org.freedesktop.portal.Wallpaper`.
     /// Returns the portal URI used for the request.
     async fn apply_via_portal(&self, id: String) -> zbus::fdo::Result<String> {
-        application::apply_wallpaper_via_portal(&self.app, &id)
-            .await
-            .map(|r| r.uri)
-            .map_err(zbus::fdo::Error::from)
+        application::apply_wallpaper_via_portal(
+            &self.app,
+            &id,
+            application::ApplySource::UserWallpaper,
+        )
+        .await
+        .map(|r| r.uri)
+        .map_err(zbus::fdo::Error::from)
     }
 
     /// Toggle shuffle on the active playlist. Persisted to settings so

@@ -6,7 +6,7 @@ use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
 
 use super::cursor::PlaylistCursor;
-use super::port::{ApplyPort, ApplyRequest, ApplySharing};
+use super::port::{ApplyPort, ApplyRequest, ApplySharing, ApplySource};
 use super::session;
 use crate::error::{Error, Result};
 use crate::playback::rotation::{make_handle, RotationConfig, RotationHandle};
@@ -189,6 +189,7 @@ impl Engine {
         if let Some(entry_id) = first {
             let result = apply
                 .apply(ApplyRequest {
+                    source: ApplySource::Activation,
                     entry_id,
                     display_ids: vec![display_id],
                     sharing: ApplySharing::Independent,
@@ -250,6 +251,7 @@ impl Engine {
             }
             apply
                 .apply(ApplyRequest {
+                    source: ApplySource::Jump,
                     entry_id: entry_id.to_owned(),
                     display_ids: vec![display_id],
                     sharing: ApplySharing::Independent,
@@ -388,6 +390,7 @@ impl Engine {
             if needs_apply && !entry_id.is_empty() {
                 apply
                     .apply(ApplyRequest {
+                        source: ApplySource::Rebuild,
                         entry_id,
                         display_ids: vec![display_id],
                         sharing: ApplySharing::Independent,
@@ -440,6 +443,7 @@ pub(super) async fn run_playlist_rotator(
                     if display_ids.is_empty() { continue; }
                     if let Some(entry_id) = cursor.lock().await.next(1) {
                         if let Err(error) = apply.apply(ApplyRequest {
+                            source: ApplySource::Rotation,
                             entry_id,
                             display_ids: display_ids.clone(),
                             sharing,
@@ -525,5 +529,6 @@ mod tests {
         assert_eq!(requests[0].entry_id, "42");
         assert_eq!(requests[0].display_ids, vec![7]);
         assert_eq!(requests[0].sharing, ApplySharing::Independent);
+        assert_eq!(requests[0].source, ApplySource::Activation);
     }
 }

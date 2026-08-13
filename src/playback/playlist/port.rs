@@ -12,8 +12,18 @@ pub enum ApplySharing {
     Shared,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplySource {
+    Activation,
+    Rotation,
+    Jump,
+    Rebuild,
+    Attach,
+}
+
 #[derive(Debug, Clone)]
 pub struct ApplyRequest {
+    pub source: ApplySource,
     pub entry_id: String,
     pub display_ids: Vec<DisplayId>,
     pub sharing: ApplySharing,
