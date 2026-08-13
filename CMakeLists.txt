@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 project(waywallen
-    VERSION 0.3.3
+    VERSION 0.3.4
     LANGUAGES C CXX
     DESCRIPTION "waywallen: Rust daemon + Qt/QML UI + renderer subprocess plugins"
 )

@@ -1,3 +1,29 @@
+<release version="0.3.4" date="2026-08-13">
+  <description>
+    <p>Added:</p>
+    <ul>
+      <li>Synchronized playlists can share playback across multiple displays. #185 by @barrence01</li>
+      <li>Wallhaven purity filtering.</li>
+      <li>The changelog opens automatically after an update.</li>
+      <li>Playlists can be created directly from the playlist sheet.</li>
+    </ul>
+    <p>Fixes:</p>
+    <ul>
+      <li>Manual wallpaper changes stop playlist playback only on affected displays.</li>
+      <li>Shared playlists restore reliably after restarts, display hotplug, and per-display changes.</li>
+      <li>Renderer startup reports early process exits without waiting for a timeout.</li>
+      <li>MPRIS updates follow renderer runtime subscriptions.</li>
+      <li>BBCode links are converted correctly.</li>
+      <li>Bridge protocol decoding rejects oversized collections. #190 by @15daksh-2003</li>
+    </ul>
+    <p>Improved:</p>
+    <ul>
+      <li>Retained renderer states and replay debouncing reduce repeated process restarts.</li>
+      <li>FFmpeg 9 runtime loading support.</li>
+      <li>Vulkan header dependency detection and diagnostics. #189 by @15daksh-2003</li>
+    </ul>
+  </description>
+</release>
 <release version="0.3.3" date="2026-08-10">
   <description>
     <p>Fixes:</p>
