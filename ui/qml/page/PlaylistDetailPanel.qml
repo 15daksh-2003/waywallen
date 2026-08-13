@@ -71,6 +71,7 @@ ColumnLayout {
 
                     MD.TextField {
                         Layout.fillWidth: true
+                        mdState.size: MD.Enum.S
                         enabled: control.canMutate()
                         placeholderText: qsTr("Name")
                         text: control.playlist ? control.playlist.name : ""
@@ -94,6 +95,7 @@ ColumnLayout {
 
                         MD.ComboBox {
                             Layout.fillWidth: true
+                            mdState.size: MD.Enum.S
                             enabled: control.canMutate()
                             model: [qsTr("Sequential"), qsTr("Shuffle"), qsTr("Random")]
                             currentIndex: control.playlist ? Math.max(0, control.playlist.mode - 1) : 0
@@ -120,6 +122,7 @@ ColumnLayout {
                                 id: fieldH
 
                                 implicitWidth: 48
+                                mdState.size: MD.Enum.S
                                 enabled: control.canMutate()
                                 inputMethodHints: Qt.ImhDigitsOnly
                                 validator: IntValidator { bottom: 0; top: 999 }
@@ -141,6 +144,7 @@ ColumnLayout {
                                 id: fieldM
 
                                 implicitWidth: 48
+                                mdState.size: MD.Enum.S
                                 enabled: control.canMutate()
                                 inputMethodHints: Qt.ImhDigitsOnly
                                 validator: IntValidator { bottom: 0; top: 59 }
@@ -162,6 +166,7 @@ ColumnLayout {
                                 id: fieldS
 
                                 implicitWidth: 48
+                                mdState.size: MD.Enum.S
                                 enabled: control.canMutate()
                                 inputMethodHints: Qt.ImhDigitsOnly
                                 validator: IntValidator { bottom: 0; top: 59 }

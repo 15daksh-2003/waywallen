@@ -474,6 +474,7 @@ MD.Page {
                     MD.ComboBox {
                         id: m_ui_language
                         Layout.preferredWidth: 180
+                        mdState.size: MD.Enum.S
                         model: W.App.availableUiLanguages.map(language => language.label)
                         onActivated: index => {
                             const languages = W.App.availableUiLanguages;
@@ -696,6 +697,7 @@ MD.Page {
                         MD.ComboBox {
                             id: autoReplayActionBox
                             Layout.preferredWidth: 180
+                            mdState.size: MD.Enum.S
                             model: root.kAutoActions.map(o => o.label)
                             onActivated: idx => root._updateAutoReplayAction(
                                 autoReplayItem.modelData.key,
@@ -970,6 +972,7 @@ MD.Page {
                     MD.ComboBox {
                         id: m_queue_box
                         Layout.preferredWidth: 180
+                        mdState.size: MD.Enum.S
                         model: root.kQueueModes.map(o => o.label)
                         onActivated: idx => root._mut(g => {
                             g.queueMode = root.kQueueModes[idx].value;

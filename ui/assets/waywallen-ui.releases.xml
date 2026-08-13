@@ -14,12 +14,14 @@
       <li>Renderer startup reports early process exits without waiting for a timeout.</li>
       <li>MPRIS updates follow renderer runtime subscriptions.</li>
       <li>BBCode links are converted correctly.</li>
+      <li>Empty outlined text fields no longer leave a placeholder gap in the border.</li>
       <li>Bridge protocol decoding rejects oversized collections. #190 by @15daksh-2003</li>
     </ul>
     <p>Improved:</p>
     <ul>
       <li>Retained renderer states and replay debouncing reduce repeated process restarts.</li>
       <li>FFmpeg 9 runtime loading support.</li>
+      <li>Text fields and combo boxes use compact sizing.</li>
       <li>Vulkan header dependency detection and diagnostics. #189 by @15daksh-2003</li>
     </ul>
   </description>

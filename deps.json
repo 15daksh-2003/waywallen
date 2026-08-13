@@ -68,7 +68,7 @@
     }
   },
   {
-    "commit": "c5892749856ea48ca0fe9dd9c2088bff94ddaf88",
+    "commit": "015614c40005cd3964ce073c6a15baf29e932d52",
     "dest": "build/_flatpak_deps/qml_material-src",
     "disable-shallow-clone": true,
     "type": "git",

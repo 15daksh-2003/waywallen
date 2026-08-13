@@ -673,6 +673,7 @@ MD.Page {
                             MD.ComboBox {
                                 id: fillmodeBox
                                 Layout.fillWidth: true
+                                mdState.size: MD.Enum.S
                                 model: root.kFillModeLabels
                                 currentIndex: {
                                     if (!root.selected)

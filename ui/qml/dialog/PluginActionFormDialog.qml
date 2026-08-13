@@ -80,6 +80,7 @@ MD.Dialog {
                 MD.TextField {
                     id: input
                     Layout.fillWidth: true
+                    mdState.size: MD.Enum.S
                     placeholderText: fieldItem.modelData.placeholder || ""
                     echoMode: fieldItem.modelData.secret ? TextInput.Password : TextInput.Normal
                     inputMethodHints: fieldItem.modelData.secret

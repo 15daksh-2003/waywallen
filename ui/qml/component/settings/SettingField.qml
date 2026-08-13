@@ -281,6 +281,7 @@ ColumnLayout {
             id: stf
             text: root.value
             placeholderText: root.label
+            mdState.size: MD.Enum.S
             // Commit on every edit (incl. paste) so Apply enables without
             // needing an explicit Enter/focus-out.
             onTextEdited: root._emit(text)
@@ -298,6 +299,7 @@ ColumnLayout {
         id: choiceField
         MD.ComboBox {
             id: cb
+            mdState.size: MD.Enum.S
             model: root.schema.choices
             currentIndex: Math.max(0, root.schema.choices.indexOf(root.value))
             onActivated: root._emit(root.schema.choices[currentIndex])

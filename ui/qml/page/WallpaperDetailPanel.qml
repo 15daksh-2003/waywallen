@@ -653,6 +653,7 @@ Item {
 
                             MD.ComboBox {
                                 Layout.fillWidth: true
+                                mdState.size: MD.Enum.S
                                 model: root.kFillModeLabels
                                 currentIndex: root.fillmodeIndex(m_wallpaper_layout_flow.currentFillmode)
                                 onActivated: idx => {
@@ -903,6 +904,7 @@ Item {
                     id: m_combo
                     visible: m_prop_delegate.type === "combo" && m_prop_delegate.supported
                     Layout.fillWidth: true
+                    mdState.size: MD.Enum.S
                     model: m_prop_delegate.optionLabels || []
                     onActivated: idx => {
                         const values = m_prop_delegate.optionValues || [];

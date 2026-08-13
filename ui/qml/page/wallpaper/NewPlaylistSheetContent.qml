@@ -32,6 +32,7 @@ ColumnLayout {
         MD.TextField {
             id: newPlaylistNameField
             Layout.fillWidth: true
+            mdState.size: MD.Enum.S
             placeholderText: qsTr("Name")
             onAccepted: if (createPlaylistButton.enabled) control.sheetState.createPlaylist(text)
         }

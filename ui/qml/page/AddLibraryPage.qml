@@ -104,6 +104,7 @@ MD.Page {
                 MD.TextField {
                     id: pathInput
                     Layout.fillWidth: true
+                    mdState.size: MD.Enum.S
                     placeholderText: (root.selectedSource && root.selectedSource.libraryLabel)
                                      ? root.selectedSource.libraryLabel
                                      : qsTr("Library Path")

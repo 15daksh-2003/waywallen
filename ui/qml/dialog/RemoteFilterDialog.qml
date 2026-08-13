@@ -184,6 +184,7 @@ MD.Dialog {
                         }
                         MD.ComboBox {
                             Layout.fillWidth: true
+                            mdState.size: MD.Enum.S
                             popupMaximumHeight: 320
                             model: root.selectOptions(filterRow.modelData)
                             currentIndex: root.selectIndex(filterRow.modelData)

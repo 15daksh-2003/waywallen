@@ -68,6 +68,7 @@ MD.Dialog {
 
     contentItem: MD.TextField {
         id: displayNameField
+        mdState.size: MD.Enum.S
         placeholderText: qsTr("Display name")
         onTextEdited: {
             control.pendingAlias = text;
