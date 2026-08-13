@@ -246,7 +246,7 @@ async fn apply_duplicate_renderers(
     let mut first_active_renderer_id: Option<String> = None;
     for did in target_ids {
         let single = [*did];
-        if app.router.displays_are_auto_stopped(&single).await {
+        if app.router.displays_have_no_activation(&single).await {
             let renderer_id = app
                 .router
                 .apply_retained_assignment(
@@ -319,7 +319,7 @@ pub async fn apply_wallpaper(
         !target_ids.is_empty(),
         request.sharing,
     );
-    let deferred = app.router.displays_are_auto_stopped(&target_ids).await;
+    let deferred = app.router.displays_have_no_activation(&target_ids).await;
     let renderer_id = if deferred {
         app.router
             .apply_retained_assignment(

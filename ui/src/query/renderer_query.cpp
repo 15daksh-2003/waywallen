@@ -7,6 +7,7 @@ module;
 module waywallen;
 import :query.renderer;
 import :app;
+import :renderer;
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -70,20 +71,19 @@ void RendererListQuery::reload() {
 
             QVariantList instances;
             for (const auto& inst : list_rsp.instances()) {
+                Renderer    renderer { inst };
                 QVariantMap m;
                 m[u"id"_s]                 = inst.rendererId();
                 m[u"fps"_s]                = inst.fps();
-                m[u"status"_s]             = inst.status();
-                m[u"process_state"_s]      = static_cast<int>(inst.processState());
-                m[u"activity_state"_s]     = static_cast<int>(inst.activityState());
-                m[u"keep"_s]               = inst.keep();
-                m[u"process_generation"_s] = QVariant::fromValue(inst.processGeneration());
-                m[u"last_exit_reason"_s] =
-                    inst.hasLastExit() ? inst.lastExit().reason() : QString {};
-                m[u"name"_s]           = inst.name();
-                m[u"pid"_s]            = inst.pid();
-                m[u"texture_width"_s]  = inst.textureWidth();
-                m[u"texture_height"_s] = inst.textureHeight();
+                m[u"state"_s]              = static_cast<int>(renderer.state());
+                m[u"status"_s]             = renderer.status();
+                m[u"keep"_s]               = renderer.keep();
+                m[u"process_generation"_s] = QVariant::fromValue(renderer.processGeneration());
+                m[u"last_exit_reason"_s]   = renderer.lastExitReason();
+                m[u"name"_s]               = inst.name();
+                m[u"pid"_s]                = inst.pid();
+                m[u"texture_width"_s]      = inst.textureWidth();
+                m[u"texture_height"_s]     = inst.textureHeight();
                 instances.append(m);
             }
             self->m_instances = std::move(instances);

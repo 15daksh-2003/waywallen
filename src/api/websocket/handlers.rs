@@ -115,6 +115,11 @@ pub(super) async fn dispatch_inner(
             Res::GlobalMuteSet(pb::GlobalMuteSetResponse { muted })
         }
 
+        Req::GlobalStopSet(r) => {
+            let stopped = application::set_stop_all(state, r.stopped).await?;
+            Res::GlobalStopSet(pb::GlobalStopSetResponse { stopped })
+        }
+
         Req::RendererMouse(r) => {
             // Subscription-gated: skipped silently when the renderer's
             // renderer has not registered the pointer event.

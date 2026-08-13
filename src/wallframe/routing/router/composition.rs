@@ -1,6 +1,36 @@
 use super::*;
 
 impl Router {
+    async fn replace_failed_assignment(
+        self: &Arc<Self>,
+        request: &crate::wallframe::renderer_manager::SpawnRequest,
+        target_ids: &[DisplayId],
+    ) -> Option<RendererId> {
+        let mut inner = self.inner.lock().await;
+        let existing = target_ids
+            .iter()
+            .flat_map(|display_id| inner.table.links_for_display(*display_id))
+            .map(|link| link.renderer_id)
+            .collect::<HashSet<_>>();
+        let renderer_id = (existing.len() == 1)
+            .then(|| existing.into_iter().next())
+            .flatten()?;
+        let links_match = inner
+            .table
+            .links_for_renderer(&renderer_id)
+            .iter()
+            .all(|link| target_ids.contains(&link.display_id));
+        let slot = inner.renderer_slots.get_mut(&renderer_id)?;
+        if !links_match || !slot.state.is_failed() {
+            return None;
+        }
+        slot.replace_spec(
+            request.clone(),
+            request.renderer_name.clone().unwrap_or_default(),
+        );
+        Some(renderer_id)
+    }
+
     pub async fn reusable_renderer_for_target(
         self: &Arc<Self>,
         request: &crate::wallframe::renderer_manager::SpawnRequest,
@@ -19,7 +49,7 @@ impl Router {
                     .renderer_name
                     .as_deref()
                     .is_none_or(|name| name == slot.name);
-                let identity_matches = slot.process_state == RendererProcessState::Running
+                let identity_matches = slot.state.is_running()
                     && inner.table.get_renderer(renderer_id).is_some()
                     && slot.spawn_request.wp_type == request.wp_type
                     && renderer_name_matches
@@ -141,11 +171,14 @@ impl Router {
             .await
     }
 
-    pub async fn displays_are_auto_stopped(self: &Arc<Self>, display_ids: &[DisplayId]) -> bool {
+    pub async fn displays_have_no_activation(self: &Arc<Self>, display_ids: &[DisplayId]) -> bool {
+        let inner = self.inner.lock().await;
+        if inner.manual_stopped {
+            return true;
+        }
         if display_ids.is_empty() {
             return false;
         }
-        let inner = self.inner.lock().await;
         display_ids.iter().all(|display_id| {
             inner
                 .displays
@@ -168,18 +201,24 @@ impl Router {
         let mut applied_slots = Vec::new();
         let first_id = {
             let mut inner = self.inner.lock().await;
-            let groups: Vec<Vec<DisplayId>> = if duplicate_renderers {
+            let groups: Vec<Vec<DisplayId>> = if display_ids.is_empty() {
+                vec![Vec::new()]
+            } else if duplicate_renderers {
                 display_ids.iter().map(|id| vec![*id]).collect()
             } else {
                 vec![display_ids.to_vec()]
             };
             let mut first_id = None;
             for group in groups {
-                let existing: HashSet<RendererId> = group
-                    .iter()
-                    .flat_map(|display_id| inner.table.links_for_display(*display_id))
-                    .map(|link| link.renderer_id)
-                    .collect();
+                let existing: HashSet<RendererId> = if group.is_empty() {
+                    inner.renderer_slots.keys().cloned().collect()
+                } else {
+                    group
+                        .iter()
+                        .flat_map(|display_id| inner.table.links_for_display(*display_id))
+                        .map(|link| link.renderer_id)
+                        .collect()
+                };
                 let reusable = (existing.len() == 1)
                     .then(|| existing.iter().next().cloned())
                     .flatten()
@@ -190,32 +229,22 @@ impl Router {
                             .iter()
                             .all(|link| group.contains(&link.display_id))
                             && inner.renderer_slots.get(renderer_id).is_some_and(|slot| {
-                                slot.retention == RendererRetention::Keep
-                                    && !matches!(
-                                        slot.process_state,
-                                        RendererProcessState::Starting
-                                            | RendererProcessState::Running
-                                    )
+                                matches!(
+                                    slot.state,
+                                    RendererLifecycleState::Stopping { keep: true, .. }
+                                        | RendererLifecycleState::Stopped { keep: true, .. }
+                                        | RendererLifecycleState::Killed { keep: true, .. }
+                                        | RendererLifecycleState::Failed { .. }
+                                )
                             })
                     });
                 let renderer_id = reusable.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                 if let Some(slot) = inner.renderer_slots.get_mut(&renderer_id) {
                     slot.replace_spec(spawn_request.clone(), renderer_name.clone());
-                    slot.retention = RendererRetention::Keep;
                 } else {
                     inner.renderer_slots.insert(
                         renderer_id.clone(),
-                        RendererSlot {
-                            spawn_request: spawn_request.clone(),
-                            name: renderer_name.clone(),
-                            spec_revision: 1,
-                            process_generation: 0,
-                            process_state: RendererProcessState::Stopped,
-                            activity_state: RendererStatus::Stopped,
-                            retention: RendererRetention::Keep,
-                            last_exit: None,
-                            restart_failures: 0,
-                        },
+                        RendererSlot::retained(spawn_request.clone(), renderer_name.clone()),
                     );
                 }
                 if wallpaper_layout_override.is_empty() {
@@ -241,11 +270,11 @@ impl Router {
                     {
                         continue;
                     }
-                    let has_process = inner.table.get_renderer(&old_id).is_some();
+                    let has_process = inner
+                        .renderer_slots
+                        .get(&old_id)
+                        .is_some_and(|slot| slot.state.has_process());
                     if has_process {
-                        if let Some(slot) = inner.renderer_slots.get_mut(&old_id) {
-                            slot.retention = RendererRetention::Drop;
-                        }
                         to_drop.push(old_id);
                     } else {
                         inner.renderer_slots.remove(&old_id);
@@ -254,7 +283,7 @@ impl Router {
                     }
                 }
             }
-            first_id.expect("retained assignment requires at least one display")
+            first_id.expect("retained assignment requires a slot")
         };
         for renderer_id in removed {
             self.emit(RouterEvent::RendererRemoved(renderer_id));
@@ -286,6 +315,12 @@ impl Router {
         wallpaper_layout_override: WallpaperLayoutOverride,
     ) -> crate::error::Result<RendererId> {
         let renderer_id = if let Some(renderer_id) = self
+            .replace_failed_assignment(&spawn_request, display_ids)
+            .await
+        {
+            self.start_retained_renderer(&renderer_id, true).await;
+            renderer_id
+        } else if let Some(renderer_id) = self
             .reusable_renderer_for_target(&spawn_request, display_ids, exclusive_target)
             .await
         {
@@ -379,10 +414,11 @@ impl Router {
                 for link in existing {
                     inner.table.remove_link(link.id);
                 }
-                let enabled = !inner
-                    .displays
-                    .get(did)
-                    .is_some_and(|display| display.auto_replay.stop_applied);
+                let enabled = !inner.manual_stopped
+                    && !inner
+                        .displays
+                        .get(did)
+                        .is_some_and(|display| display.auto_replay.stop_applied);
                 inner
                     .table
                     .add_link_with_enabled(new_renderer_id.to_string(), *did, enabled);
@@ -440,10 +476,11 @@ impl Router {
                 for link in existing {
                     inner.table.remove_link(link.id);
                 }
-                let enabled = !inner
-                    .displays
-                    .get(did)
-                    .is_some_and(|display| display.auto_replay.stop_applied);
+                let enabled = !inner.manual_stopped
+                    && !inner
+                        .displays
+                        .get(did)
+                        .is_some_and(|display| display.auto_replay.stop_applied);
                 inner
                     .table
                     .add_link_with_enabled(new_renderer_id.to_string(), *did, enabled);

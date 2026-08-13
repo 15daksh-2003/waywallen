@@ -1,41 +1,19 @@
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RendererRetention {
-    Keep,
-    Drop,
+pub enum RendererActivity {
+    Playing,
+    Paused,
+    Muted,
 }
 
-impl RendererRetention {
-    pub fn keep(self) -> bool {
-        self == Self::Keep
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RendererProcessState {
-    Starting,
-    Running,
-    Stopping,
-    Stopped,
-    Killed,
-    Failed,
-}
-
-impl RendererProcessState {
+impl RendererActivity {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Starting => "starting",
-            Self::Running => "running",
-            Self::Stopping => "stopping",
-            Self::Stopped => "stopped",
-            Self::Killed => "killed",
-            Self::Failed => "failed",
+            Self::Playing => "playing",
+            Self::Paused => "paused",
+            Self::Muted => "muted",
         }
-    }
-
-    pub fn has_process(self) -> bool {
-        matches!(self, Self::Starting | Self::Running | Self::Stopping)
     }
 }
 
@@ -46,15 +24,132 @@ pub struct RendererExitSnapshot {
     pub reason: String,
 }
 
+impl From<&crate::wallframe::renderer_manager::RendererProcessExit> for RendererExitSnapshot {
+    fn from(exit: &crate::wallframe::renderer_manager::RendererProcessExit) -> Self {
+        Self {
+            code: exit.code,
+            signal: exit.signal,
+            reason: exit.reason.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RendererLifecycleState {
+    Starting {
+        generation: u64,
+    },
+    Running {
+        generation: u64,
+        activity: RendererActivity,
+    },
+    Stopping {
+        generation: u64,
+        keep: bool,
+    },
+    Stopped {
+        keep: bool,
+        last_exit: Option<RendererExitSnapshot>,
+    },
+    Killed {
+        keep: bool,
+        last_exit: RendererExitSnapshot,
+    },
+    Failed {
+        failure: RendererExitSnapshot,
+    },
+}
+
+impl RendererLifecycleState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Starting { .. } => "starting",
+            Self::Running { activity, .. } => activity.as_str(),
+            Self::Stopping { .. } => "stopping",
+            Self::Stopped { .. } => "stopped",
+            Self::Killed { .. } => "killed",
+            Self::Failed { .. } => "failed",
+        }
+    }
+
+    pub fn generation(&self) -> Option<u64> {
+        match self {
+            Self::Starting { generation }
+            | Self::Running { generation, .. }
+            | Self::Stopping { generation, .. } => Some(*generation),
+            Self::Stopped { .. } | Self::Killed { .. } | Self::Failed { .. } => None,
+        }
+    }
+
+    pub fn activity(&self) -> Option<RendererActivity> {
+        match self {
+            Self::Running { activity, .. } => Some(*activity),
+            _ => None,
+        }
+    }
+
+    pub fn has_process(&self) -> bool {
+        matches!(
+            self,
+            Self::Starting { .. } | Self::Running { .. } | Self::Stopping { .. }
+        )
+    }
+
+    pub fn is_running(&self) -> bool {
+        matches!(self, Self::Running { .. })
+    }
+
+    pub fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed { .. })
+    }
+
+    pub fn last_exit(&self) -> Option<&RendererExitSnapshot> {
+        match self {
+            Self::Stopped { last_exit, .. } => last_exit.as_ref(),
+            Self::Killed { last_exit, .. } => Some(last_exit),
+            Self::Failed { failure } => Some(failure),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum RendererLifecycleEvent {
+    StartRequested {
+        generation: u64,
+        reactivate_failed: bool,
+    },
+    ProcessAttached {
+        generation: u64,
+    },
+    ActivityResolved(RendererActivity),
+    StopRequested {
+        keep: bool,
+    },
+    ProcessExited {
+        generation: u64,
+        kind: crate::wallframe::renderer_manager::RendererProcessExitKind,
+        exit: RendererExitSnapshot,
+    },
+    SpawnFailed {
+        generation: u64,
+        failure: RendererExitSnapshot,
+    },
+    SpecReplaced,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RendererTransition {
+    Changed,
+    Unchanged,
+    Remove,
+}
+
 pub(super) struct RendererSlot {
     pub spawn_request: crate::wallframe::renderer_manager::SpawnRequest,
     pub name: String,
     pub spec_revision: u64,
-    pub process_generation: u64,
-    pub process_state: RendererProcessState,
-    pub activity_state: RendererStatus,
-    pub retention: RendererRetention,
-    pub last_exit: Option<RendererExitSnapshot>,
+    pub state: RendererLifecycleState,
     pub restart_failures: u32,
 }
 
@@ -64,11 +159,26 @@ impl RendererSlot {
             spawn_request: handle.spawn_request(),
             name: handle.name.clone(),
             spec_revision: 1,
-            process_generation: handle.process_generation,
-            process_state: RendererProcessState::Running,
-            activity_state: RendererStatus::Playing,
-            retention: RendererRetention::Keep,
-            last_exit: None,
+            state: RendererLifecycleState::Running {
+                generation: handle.process_generation,
+                activity: RendererActivity::Playing,
+            },
+            restart_failures: 0,
+        }
+    }
+
+    pub fn retained(
+        spawn_request: crate::wallframe::renderer_manager::SpawnRequest,
+        name: String,
+    ) -> Self {
+        Self {
+            spawn_request,
+            name,
+            spec_revision: 1,
+            state: RendererLifecycleState::Stopped {
+                keep: true,
+                last_exit: None,
+            },
             restart_failures: 0,
         }
     }
@@ -81,33 +191,142 @@ impl RendererSlot {
         self.spawn_request = spawn_request;
         self.name = name;
         self.spec_revision = self.spec_revision.wrapping_add(1).max(1);
-        self.last_exit = None;
         self.restart_failures = 0;
+        let _ = self.transition(RendererLifecycleEvent::SpecReplaced);
     }
 
-    pub fn attach_process(&mut self, handle: &RendererHandle) {
-        self.spawn_request = handle.spawn_request();
-        self.name = handle.name.clone();
-        self.process_generation = handle.process_generation;
-        self.process_state = RendererProcessState::Running;
-        self.last_exit = None;
-    }
+    pub fn transition(&mut self, event: RendererLifecycleEvent) -> RendererTransition {
+        use crate::wallframe::renderer_manager::RendererProcessExitKind;
+        use RendererLifecycleState as State;
 
-    pub fn begin_start(&mut self, process_generation: u64) -> (u64, u64) {
-        self.process_generation = process_generation;
-        self.process_state = RendererProcessState::Starting;
-        self.retention = RendererRetention::Keep;
-        (self.spec_revision, self.process_generation)
-    }
-
-    pub fn begin_stop(&mut self, retention: RendererRetention) -> Option<u64> {
-        if !self.process_state.has_process() {
-            return None;
+        match event {
+            RendererLifecycleEvent::StartRequested {
+                generation,
+                reactivate_failed,
+            } => match &self.state {
+                State::Stopped { keep: true, .. } | State::Killed { keep: true, .. } => {
+                    self.state = State::Starting { generation };
+                    RendererTransition::Changed
+                }
+                State::Failed { .. } if reactivate_failed => {
+                    self.state = State::Starting { generation };
+                    RendererTransition::Changed
+                }
+                _ => RendererTransition::Unchanged,
+            },
+            RendererLifecycleEvent::ProcessAttached { generation } => match self.state {
+                State::Starting {
+                    generation: current,
+                } if current == generation => {
+                    self.state = State::Running {
+                        generation,
+                        activity: RendererActivity::Playing,
+                    };
+                    RendererTransition::Changed
+                }
+                _ => RendererTransition::Unchanged,
+            },
+            RendererLifecycleEvent::ActivityResolved(activity) => match &mut self.state {
+                State::Running {
+                    activity: current, ..
+                } if *current != activity => {
+                    *current = activity;
+                    RendererTransition::Changed
+                }
+                _ => RendererTransition::Unchanged,
+            },
+            RendererLifecycleEvent::StopRequested { keep } => match &mut self.state {
+                State::Starting { generation } | State::Running { generation, .. } => {
+                    self.state = State::Stopping {
+                        generation: *generation,
+                        keep,
+                    };
+                    RendererTransition::Changed
+                }
+                State::Stopping { keep: current, .. } if *current && !keep => {
+                    *current = false;
+                    RendererTransition::Changed
+                }
+                State::Stopped { keep: current, .. } | State::Killed { keep: current, .. }
+                    if *current && !keep =>
+                {
+                    *current = false;
+                    RendererTransition::Remove
+                }
+                State::Failed { .. } if !keep => RendererTransition::Remove,
+                _ => RendererTransition::Unchanged,
+            },
+            RendererLifecycleEvent::ProcessExited {
+                generation,
+                kind,
+                exit,
+            } => {
+                let keep = match &self.state {
+                    State::Starting {
+                        generation: current,
+                    }
+                    | State::Running {
+                        generation: current,
+                        ..
+                    } if *current == generation => true,
+                    State::Stopping {
+                        generation: current,
+                        keep,
+                    } if *current == generation => *keep,
+                    _ => return RendererTransition::Unchanged,
+                };
+                self.state = match kind {
+                    RendererProcessExitKind::Stopped => State::Stopped {
+                        keep,
+                        last_exit: Some(exit),
+                    },
+                    RendererProcessExitKind::Killed => State::Killed {
+                        keep,
+                        last_exit: exit,
+                    },
+                    RendererProcessExitKind::Failed if keep => State::Failed { failure: exit },
+                    RendererProcessExitKind::Failed => return RendererTransition::Remove,
+                };
+                if keep {
+                    RendererTransition::Changed
+                } else {
+                    RendererTransition::Remove
+                }
+            }
+            RendererLifecycleEvent::SpawnFailed {
+                generation,
+                failure,
+            } => {
+                let keep = match self.state {
+                    State::Starting {
+                        generation: current,
+                    } if current == generation => true,
+                    State::Stopping {
+                        generation: current,
+                        keep,
+                    } if current == generation => keep,
+                    _ => return RendererTransition::Unchanged,
+                };
+                if keep {
+                    self.state = State::Failed { failure };
+                    RendererTransition::Changed
+                } else {
+                    RendererTransition::Remove
+                }
+            }
+            RendererLifecycleEvent::SpecReplaced => match self.state {
+                State::Stopped { keep: true, .. }
+                | State::Killed { keep: true, .. }
+                | State::Failed { .. } => {
+                    self.state = State::Stopped {
+                        keep: true,
+                        last_exit: None,
+                    };
+                    RendererTransition::Changed
+                }
+                _ => RendererTransition::Unchanged,
+            },
         }
-        self.process_state = RendererProcessState::Stopping;
-        self.activity_state = RendererStatus::Stopped;
-        self.retention = retention;
-        Some(self.process_generation)
     }
 }
 
@@ -115,35 +334,128 @@ impl RendererSlot {
 mod tests {
     use super::*;
 
-    fn slot() -> RendererSlot {
+    fn exit(reason: &str) -> RendererExitSnapshot {
+        RendererExitSnapshot {
+            code: None,
+            signal: None,
+            reason: reason.into(),
+        }
+    }
+
+    fn slot(state: RendererLifecycleState) -> RendererSlot {
         RendererSlot {
             spawn_request: Default::default(),
             name: "image".into(),
             spec_revision: 1,
-            process_generation: 7,
-            process_state: RendererProcessState::Running,
-            activity_state: RendererStatus::Playing,
-            retention: RendererRetention::Keep,
-            last_exit: None,
+            state,
             restart_failures: 0,
         }
     }
 
     #[test]
-    fn stop_keeps_process_generation() {
-        let mut slot = slot();
-        assert_eq!(slot.begin_stop(RendererRetention::Keep), Some(7));
-        assert_eq!(slot.process_state, RendererProcessState::Stopping);
-        assert!(slot.retention.keep());
+    fn keep_is_carried_through_stop_completion() {
+        let mut slot = slot(RendererLifecycleState::Running {
+            generation: 7,
+            activity: RendererActivity::Playing,
+        });
+        assert_eq!(
+            slot.transition(RendererLifecycleEvent::StopRequested { keep: true }),
+            RendererTransition::Changed
+        );
+        assert_eq!(
+            slot.transition(RendererLifecycleEvent::ProcessExited {
+                generation: 7,
+                kind: crate::wallframe::renderer_manager::RendererProcessExitKind::Stopped,
+                exit: exit("stopped"),
+            }),
+            RendererTransition::Changed
+        );
+        assert!(matches!(
+            slot.state,
+            RendererLifecycleState::Stopped { keep: true, .. }
+        ));
     }
 
     #[test]
-    fn replacing_spec_does_not_change_process_generation() {
-        let mut slot = slot();
-        slot.process_state = RendererProcessState::Stopped;
-        slot.replace_spec(Default::default(), "video".into());
-        assert_eq!(slot.spec_revision, 2);
-        assert_eq!(slot.process_generation, 7);
-        assert_eq!(slot.name, "video");
+    fn drop_is_irreversible_while_stopping() {
+        let mut slot = slot(RendererLifecycleState::Stopping {
+            generation: 7,
+            keep: true,
+        });
+        assert_eq!(
+            slot.transition(RendererLifecycleEvent::StopRequested { keep: false }),
+            RendererTransition::Changed
+        );
+        assert_eq!(
+            slot.transition(RendererLifecycleEvent::StopRequested { keep: true }),
+            RendererTransition::Unchanged
+        );
+        assert!(matches!(
+            slot.state,
+            RendererLifecycleState::Stopping { keep: false, .. }
+        ));
+    }
+
+    #[test]
+    fn failed_requires_explicit_reactivation() {
+        let mut slot = slot(RendererLifecycleState::Failed {
+            failure: exit("failed"),
+        });
+        assert_eq!(
+            slot.transition(RendererLifecycleEvent::StartRequested {
+                generation: 8,
+                reactivate_failed: false,
+            }),
+            RendererTransition::Unchanged
+        );
+        assert_eq!(
+            slot.transition(RendererLifecycleEvent::StartRequested {
+                generation: 8,
+                reactivate_failed: true,
+            }),
+            RendererTransition::Changed
+        );
+        assert!(matches!(
+            slot.state,
+            RendererLifecycleState::Starting { generation: 8 }
+        ));
+    }
+
+    #[test]
+    fn replacing_failed_spec_makes_it_startable() {
+        let mut slot = slot(RendererLifecycleState::Failed {
+            failure: exit("failed"),
+        });
+        assert_eq!(
+            slot.transition(RendererLifecycleEvent::SpecReplaced),
+            RendererTransition::Changed
+        );
+        assert!(matches!(
+            slot.state,
+            RendererLifecycleState::Stopped {
+                keep: true,
+                last_exit: None
+            }
+        ));
+    }
+
+    #[test]
+    fn stale_exit_does_not_replace_current_generation() {
+        let mut slot = slot(RendererLifecycleState::Running {
+            generation: 8,
+            activity: RendererActivity::Playing,
+        });
+        assert_eq!(
+            slot.transition(RendererLifecycleEvent::ProcessExited {
+                generation: 7,
+                kind: crate::wallframe::renderer_manager::RendererProcessExitKind::Failed,
+                exit: exit("stale"),
+            }),
+            RendererTransition::Unchanged
+        );
+        assert!(matches!(
+            slot.state,
+            RendererLifecycleState::Running { generation: 8, .. }
+        ));
     }
 }

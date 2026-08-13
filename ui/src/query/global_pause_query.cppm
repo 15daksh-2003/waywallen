@@ -72,4 +72,24 @@ private:
     bool m_muted = false;
 };
 
+export class GlobalStopSetQuery : public Query,
+                                  public QueryExtra<control::v1::Response, GlobalStopSetQuery> {
+    Q_OBJECT
+    QML_ELEMENT
+
+    Q_PROPERTY(bool stopped READ stopped WRITE setStopped NOTIFY stoppedChanged FINAL)
+
+public:
+    GlobalStopSetQuery(QObject* parent = nullptr);
+
+    bool stopped() const;
+    void setStopped(bool stopped);
+    void reload() override;
+
+    Q_SIGNAL void stoppedChanged();
+
+private:
+    bool m_stopped = false;
+};
+
 } // namespace waywallen

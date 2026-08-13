@@ -1336,6 +1336,10 @@ Unsaved frame state may be lost.</source>
         <translation>Приостановить всё</translation>
     </message>
     <message>
+        <source>Stop all</source>
+        <translation>Остановить всё</translation>
+    </message>
+    <message>
         <source>No renderers</source>
         <translation>Рендереров нет</translation>
     </message>

@@ -92,6 +92,7 @@ message Request {
     GlobalPauseToggleRequest    global_pause_toggle = 75;
     GlobalPauseSetRequest       global_pause_set = 76;
     GlobalMuteSetRequest        global_mute_set = 77;
+    GlobalStopSetRequest        global_stop_set = 78;
   }
 }
 
@@ -171,6 +172,7 @@ message Response {
     GlobalPauseToggleResponse  global_pause_toggle = 75;
     GlobalPauseSetResponse     global_pause_set = 76;
     GlobalMuteSetResponse      global_mute_set = 77;
+    GlobalStopSetResponse      global_stop_set = 78;
   }
 }
 
@@ -293,22 +295,11 @@ message RendererRuntimeTag {
   string value = 2;
 }
 
-enum RendererProcessState {
-  RENDERER_PROCESS_STATE_UNSPECIFIED = 0;
-  RENDERER_PROCESS_STATE_STARTING = 1;
-  RENDERER_PROCESS_STATE_RUNNING = 2;
-  RENDERER_PROCESS_STATE_STOPPING = 3;
-  RENDERER_PROCESS_STATE_STOPPED = 4;
-  RENDERER_PROCESS_STATE_KILLED = 5;
-  RENDERER_PROCESS_STATE_FAILED = 6;
-}
-
-enum RendererActivityState {
-  RENDERER_ACTIVITY_STATE_UNSPECIFIED = 0;
-  RENDERER_ACTIVITY_STATE_PLAYING = 1;
-  RENDERER_ACTIVITY_STATE_PAUSED = 2;
-  RENDERER_ACTIVITY_STATE_MUTED = 3;
-  RENDERER_ACTIVITY_STATE_STOPPED = 4;
+enum RendererActivity {
+  RENDERER_ACTIVITY_UNSPECIFIED = 0;
+  RENDERER_ACTIVITY_PLAYING = 1;
+  RENDERER_ACTIVITY_PAUSED = 2;
+  RENDERER_ACTIVITY_MUTED = 3;
 }
 
 message RendererExit {
@@ -319,10 +310,42 @@ message RendererExit {
   string reason = 5;
 }
 
+message RendererStartingState { uint64 generation = 1; }
+message RendererRunningState {
+  uint64 generation = 1;
+  RendererActivity activity = 2;
+}
+message RendererStoppingState {
+  uint64 generation = 1;
+  bool keep = 2;
+}
+message RendererStoppedState {
+  bool keep = 1;
+  RendererExit last_exit = 2;
+}
+message RendererKilledState {
+  bool keep = 1;
+  RendererExit last_exit = 2;
+}
+message RendererFailedState { RendererExit failure = 1; }
+
+message RendererState {
+  oneof kind {
+    RendererStartingState starting = 1;
+    RendererRunningState running = 2;
+    RendererStoppingState stopping = 3;
+    RendererStoppedState stopped = 4;
+    RendererKilledState killed = 5;
+    RendererFailedState failed = 6;
+  }
+}
+
 message RendererInstance {
+  reserved 3, 12, 13, 14, 15, 16;
+  reserved "status", "process_state", "activity_state", "keep", "process_generation", "last_exit";
+
   string renderer_id = 1;
   uint32 fps         = 2;
-  string status      = 3; // "playing" | "paused"
   string name        = 4; // renderer plugin name from RendererDef.name
   uint32 pid         = 5; // OS pid of the renderer child; 0 if unknown
   // DRM render-node id of the GPU this renderer's Vulkan instance picked,
@@ -337,11 +360,7 @@ message RendererInstance {
   uint32 texture_height = 9;
   repeated RuntimeCondition conditions = 10;
   repeated RendererRuntimeTag runtime_tags = 11;
-  RendererProcessState process_state = 12;
-  RendererActivityState activity_state = 13;
-  bool keep = 14;
-  uint64 process_generation = 15;
-  RendererExit last_exit = 16;
+  RendererState state = 17;
 }
 
 message RendererPlayRequest  { string renderer_id = 1; }
@@ -352,6 +371,8 @@ message GlobalPauseSetRequest { bool paused = 1; }
 message GlobalPauseSetResponse { bool paused = 1; }
 message GlobalMuteSetRequest { bool muted = 1; }
 message GlobalMuteSetResponse { bool muted = 1; }
+message GlobalStopSetRequest { bool stopped = 1; }
+message GlobalStopSetResponse { bool stopped = 1; }
 
 message RendererMouseRequest {
   string renderer_id = 1;
@@ -1148,6 +1169,7 @@ message StatusSync {
   DisplayBackendStatus display_backend = 4;
   bool global_paused = 5;
   bool global_muted = 6;
+  bool global_stopped = 7;
 }
 
 message TaskProgress {

@@ -80,6 +80,10 @@ MD.Page {
         id: globalMuteSetQuery
     }
 
+    W.GlobalStopSetQuery {
+        id: globalStopSetQuery
+    }
+
     W.RendererListQuery {
         id: rendererQuery
     }
@@ -297,6 +301,17 @@ MD.Page {
                                 globalPauseSetQuery.reload();
                             }
                         }
+
+                        MD.FilterChip {
+                            text: qsTr("Stop all")
+                            checkable: false
+                            checked: W.Notify.globalStopped
+                            enabled: W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready && !globalStopSetQuery.querying
+                            onClicked: {
+                                globalStopSetQuery.stopped = !W.Notify.globalStopped;
+                                globalStopSetQuery.reload();
+                            }
+                        }
                     }
 
                     SectionHint {
@@ -325,11 +340,11 @@ MD.Page {
                             text: root.rendererLabel(modelData)
                             font.family: "monospace"
                             leader: MD.Icon {
-                                name: modelData.processState === 2
+                                name: modelData.running
                                     ? (modelData.status === "paused" ? MD.Token.icon.pause : MD.Token.icon.play_arrow)
                                     : MD.Token.icon.stop
                                 size: 24
-                                color: modelData.processState === 2 && modelData.status !== "paused"
+                                color: modelData.running && modelData.status !== "paused"
                                     ? MD.Token.color.primary : MD.Token.color.on_surface_variant
                             }
                             trailing: RowLayout {
@@ -371,7 +386,7 @@ MD.Page {
                                     })
                                 }
                                 W.Tag {
-                                    visible: rendererItem.modelData.processState === 2
+                                    visible: rendererItem.modelData.running
                                     text: (rendererItem.modelData.fps || 0) + " fps"
                                 }
                                 W.Tag {

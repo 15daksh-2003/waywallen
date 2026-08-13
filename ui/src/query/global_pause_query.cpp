@@ -105,6 +105,38 @@ void GlobalMuteSetQuery::reload() {
     });
 }
 
+GlobalStopSetQuery::GlobalStopSetQuery(QObject* parent): Query(parent) {}
+
+bool GlobalStopSetQuery::stopped() const { return m_stopped; }
+
+void GlobalStopSetQuery::setStopped(bool stopped) {
+    if (m_stopped == stopped) return;
+    m_stopped = stopped;
+    Q_EMIT stoppedChanged();
+}
+
+void GlobalStopSetQuery::reload() {
+    setStatus(Status::Querying);
+    auto backend = App::instance()->backend();
+
+    auto inner = proto::GlobalStopSetRequest {};
+    inner.setStopped(m_stopped);
+    auto req = proto::Request {};
+    req.setGlobalStopSet(std::move(inner));
+
+    auto self = QWatcher { this };
+    spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
+        auto result = co_await backend->send(std::move(req));
+        if (! co_await QAsyncResult::qexecutor()) co_return;
+        if (! self) co_return;
+
+        self->inspect_set(result, [self](const proto::Response& rsp) {
+            self->setStopped(rsp.globalStopSet().stopped());
+        });
+        co_return;
+    });
+}
+
 } // namespace waywallen
 
 #include "waywallen/query/global_pause_query.moc.cpp"

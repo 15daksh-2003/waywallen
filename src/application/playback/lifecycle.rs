@@ -53,6 +53,12 @@ pub async fn toggle_mute_all(app: &Arc<DaemonContext>) -> Result<bool> {
     Ok(muted)
 }
 
+pub async fn set_stop_all(app: &Arc<DaemonContext>, stopped: bool) -> Result<bool> {
+    app.router.set_manual_stop(stopped).await;
+    notify_lifecycle_changed(app).await;
+    Ok(stopped)
+}
+
 async fn notify_lifecycle_changed(app: &Arc<DaemonContext>) {
     crate::system::tray::dbusmenu::notify_menu_changed(app).await;
     app.events

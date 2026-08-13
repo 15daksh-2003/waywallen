@@ -1330,6 +1330,10 @@ Unsaved frame state may be lost.</source>
         <translation>全部暂停</translation>
     </message>
     <message>
+        <source>Stop all</source>
+        <translation>全部停止</translation>
+    </message>
+    <message>
         <source>No renderers</source>
         <translation>没有渲染器</translation>
     </message>

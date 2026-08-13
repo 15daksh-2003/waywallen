@@ -75,19 +75,22 @@ Notify::Notify(QObject* parent): QObject(parent) {
                 const DaemonPhase new_phase = pb_phase_to_enum(s.phase());
                 const auto        new_backend =
                     s.hasDisplayBackend() ? s.displayBackend() : proto::DisplayBackendStatus {};
-                const bool new_paused = s.globalPaused();
-                const bool new_muted  = s.globalMuted();
+                const bool new_paused  = s.globalPaused();
+                const bool new_muted   = s.globalMuted();
+                const bool new_stopped = s.globalStopped();
                 const bool ready_edge =
                     new_phase == DaemonPhase::Ready && m_daemon_phase != DaemonPhase::Ready;
                 if (new_scan != m_scan_in_progress || new_tasks != m_active_task_count ||
                     new_phase != m_daemon_phase || new_backend != m_display_backend ||
-                    new_paused != m_global_paused || new_muted != m_global_muted) {
+                    new_paused != m_global_paused || new_muted != m_global_muted ||
+                    new_stopped != m_global_stopped) {
                     m_scan_in_progress  = new_scan;
                     m_active_task_count = new_tasks;
                     m_daemon_phase      = new_phase;
                     m_display_backend   = new_backend;
                     m_global_paused     = new_paused;
                     m_global_muted      = new_muted;
+                    m_global_stopped    = new_stopped;
                     Q_EMIT statusChanged();
                 }
                 if (ready_edge) {
@@ -157,7 +160,7 @@ Notify::Notify(QObject* parent): QObject(parent) {
         const bool changed = m_scan_in_progress || m_active_task_count != 0 ||
                              m_daemon_phase != DaemonPhase::Starting ||
                              m_display_backend != proto::DisplayBackendStatus {} ||
-                             m_global_paused || m_global_muted;
+                             m_global_paused || m_global_muted || m_global_stopped;
         if (! changed) {
             return;
         }
@@ -167,6 +170,7 @@ Notify::Notify(QObject* parent): QObject(parent) {
         m_display_backend   = proto::DisplayBackendStatus {};
         m_global_paused     = false;
         m_global_muted      = false;
+        m_global_stopped    = false;
         m_task_progress.clear();
         m_task_progress_sequence = 0;
         Q_EMIT statusChanged();

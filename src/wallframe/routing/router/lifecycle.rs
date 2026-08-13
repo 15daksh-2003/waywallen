@@ -34,18 +34,17 @@ impl Router {
     ) -> crate::error::Result<()> {
         let process_generation = {
             let mut inner = self.inner.lock().await;
-            let has_live_process = inner.table.get_renderer(renderer_id).is_some();
             let Some(slot) = inner.renderer_slots.get_mut(renderer_id) else {
                 return Err(crate::error::Error::RendererNotFound(
                     renderer_id.to_string(),
                 ));
             };
-            slot.retention = RendererRetention::Drop;
-            let has_process = slot.process_state.has_process() && has_live_process;
-            if has_process {
-                slot.process_state = RendererProcessState::Stopping;
-            }
-            let process_generation = has_process.then_some(slot.process_generation);
+            let transition = slot.transition(RendererLifecycleEvent::StopRequested { keep: false });
+            let process_generation = match (&slot.state, transition) {
+                (RendererLifecycleState::Stopping { generation, .. }, _) => Some(*generation),
+                (_, RendererTransition::Remove) => None,
+                _ => None,
+            };
             for link in inner.table.links_for_renderer(renderer_id) {
                 inner.table.set_link_enabled(link.id, false);
                 if let Some(display) = inner.displays.get(&link.display_id) {
@@ -181,9 +180,6 @@ impl Router {
     }
 
     pub(super) async fn apply_auto_stop_links(self: &Arc<Self>) {
-        let mut changed_displays = Vec::new();
-        let mut reenabled_renderers = Vec::new();
-        let mut stopped_renderers: Vec<RendererId>;
         {
             let mut inner = self.inner.lock().await;
             let plans: Vec<(DisplayId, bool)> = inner
@@ -199,32 +195,53 @@ impl Router {
                 if let Some(state) = inner.displays.get_mut(&display_id) {
                     state.auto_replay.stop_applied = should_stop;
                 }
-                let mut link_changed = false;
+            }
+        }
+        self.reconcile_assignment_activation().await;
+    }
+
+    async fn reconcile_assignment_activation(self: &Arc<Self>) {
+        let (mut changed_displays, mut reenabled_renderers, mut stopped_renderers) = {
+            let mut inner = self.inner.lock().await;
+            let display_ids = inner.displays.keys().copied().collect::<Vec<_>>();
+            let mut changed_displays = Vec::new();
+            let mut reenabled_renderers = Vec::new();
+            for display_id in display_ids {
+                let enabled = !inner.manual_stopped
+                    && !inner
+                        .displays
+                        .get(&display_id)
+                        .is_some_and(|display| display.auto_replay.stop_applied);
+                let mut changed = false;
                 for link in inner.table.links_for_display(display_id) {
-                    if inner.table.set_link_enabled(link.id, !should_stop) {
-                        link_changed = true;
-                        if !should_stop {
+                    if inner.table.set_link_enabled(link.id, enabled) {
+                        changed = true;
+                        if enabled {
                             reenabled_renderers.push(link.renderer_id);
                         }
                     }
                 }
-                if link_changed {
-                    if let Some(state) = inner.displays.get(&display_id) {
-                        state.invalidate_consumption();
+                if changed {
+                    if let Some(display) = inner.displays.get(&display_id) {
+                        display.invalidate_consumption();
                     }
+                    changed_displays.push(display_id);
                 }
-                changed_displays.push(display_id);
             }
-            stopped_renderers = inner
+            let stopped_renderers = inner
                 .renderer_slots
                 .keys()
                 .filter(|renderer_id| {
                     let links = inner.table.links_for_renderer(renderer_id);
-                    !links.is_empty() && links.iter().all(|link| !link.enabled)
+                    inner.manual_stopped
+                        || (!links.is_empty() && links.iter().all(|link| !link.enabled))
                 })
                 .cloned()
-                .collect();
-        }
+                .collect::<Vec<_>>();
+            (changed_displays, reenabled_renderers, stopped_renderers)
+        };
+        changed_displays.sort_unstable();
+        changed_displays.dedup();
         reenabled_renderers.sort();
         reenabled_renderers.dedup();
         stopped_renderers.sort();
@@ -235,13 +252,17 @@ impl Router {
         for display_id in &changed_displays {
             self.sync_display(*display_id).await;
         }
-        for renderer_id in stopped_renderers {
-            self.finish_retained_stop(&renderer_id).await;
-        }
-        for renderer_id in reenabled_renderers {
-            self.start_retained_renderer(&renderer_id).await;
-            self.schedule_process_restart(&renderer_id).await;
-        }
+        futures_util::future::join_all(
+            stopped_renderers
+                .iter()
+                .map(|renderer_id| self.finish_retained_stop(renderer_id)),
+        )
+        .await;
+        futures_util::future::join_all(reenabled_renderers.iter().map(|renderer_id| async move {
+            self.start_retained_renderer(renderer_id, false).await;
+            self.schedule_process_restart(renderer_id).await;
+        }))
+        .await;
         if !changed_displays.is_empty() {
             self.reconcile_buffer_flags().await;
             let all = self.snapshot_displays().await;
@@ -249,13 +270,31 @@ impl Router {
         }
     }
 
+    pub async fn set_manual_stop(self: &Arc<Self>, stopped: bool) {
+        let changed = {
+            let mut inner = self.inner.lock().await;
+            if inner.manual_stopped == stopped {
+                false
+            } else {
+                inner.manual_stopped = stopped;
+                true
+            }
+        };
+        if changed {
+            self.reconcile_assignment_activation().await;
+            self.reconcile_lifecycle().await;
+        }
+    }
+
     pub(super) async fn begin_retained_stop(self: &Arc<Self>, renderer_id: &str) {
         let generation = {
             let mut inner = self.inner.lock().await;
-            inner
-                .renderer_slots
-                .get_mut(renderer_id)
-                .and_then(|slot| slot.begin_stop(RendererRetention::Keep))
+            inner.renderer_slots.get_mut(renderer_id).and_then(|slot| {
+                (slot.transition(RendererLifecycleEvent::StopRequested { keep: true })
+                    == RendererTransition::Changed)
+                    .then(|| slot.state.generation())
+                    .flatten()
+            })
         };
         if generation.is_none() {
             return;
@@ -269,10 +308,13 @@ impl Router {
     pub(super) async fn finish_retained_stop(self: &Arc<Self>, renderer_id: &str) {
         let generation = {
             let inner = self.inner.lock().await;
-            inner.renderer_slots.get(renderer_id).and_then(|slot| {
-                (slot.process_state == RendererProcessState::Stopping)
-                    .then_some(slot.process_generation)
-            })
+            inner
+                .renderer_slots
+                .get(renderer_id)
+                .and_then(|slot| match slot.state {
+                    RendererLifecycleState::Stopping { generation, .. } => Some(generation),
+                    _ => None,
+                })
         };
         let Some(generation) = generation else { return };
         if self
@@ -296,22 +338,15 @@ impl Router {
             }
             Err(error) => {
                 log::warn!("renderer {renderer_id}: retained stop failed: {error}");
-                let mut inner = self.inner.lock().await;
-                if let Some(slot) = inner.renderer_slots.get_mut(renderer_id) {
-                    if slot.process_generation == generation {
-                        slot.process_state = RendererProcessState::Failed;
-                        slot.last_exit = Some(RendererExitSnapshot {
-                            code: None,
-                            signal: None,
-                            reason: error.to_string(),
-                        });
-                    }
-                }
             }
         }
     }
 
-    pub async fn start_retained_renderer(self: &Arc<Self>, renderer_id: &str) {
+    pub async fn start_retained_renderer(
+        self: &Arc<Self>,
+        renderer_id: &str,
+        reactivate_failed: bool,
+    ) {
         loop {
             let process_generation = self.mgr.reserve_process_generation();
             let (spec_revision, spawn_request) = {
@@ -327,16 +362,14 @@ impl Router {
                 let Some(slot) = inner.renderer_slots.get_mut(renderer_id) else {
                     return;
                 };
-                if !matches!(
-                    slot.process_state,
-                    RendererProcessState::Stopped
-                        | RendererProcessState::Killed
-                        | RendererProcessState::Failed
-                ) {
+                if slot.transition(RendererLifecycleEvent::StartRequested {
+                    generation: process_generation,
+                    reactivate_failed,
+                }) != RendererTransition::Changed
+                {
                     return;
                 }
-                let (spec_revision, _) = slot.begin_start(process_generation);
-                (spec_revision, slot.spawn_request.clone())
+                (slot.spec_revision, slot.spawn_request.clone())
             };
             if let Some(snapshot) = self.snapshot_renderer(renderer_id).await {
                 self.emit(RouterEvent::RendererUpsert(snapshot));
@@ -364,13 +397,23 @@ impl Router {
                             inner
                                 .renderer_slots
                                 .get_mut(renderer_id)
-                                .filter(|slot| {
-                                    no_live_handle && slot.process_generation == process_generation
+                                .filter(|_| no_live_handle)
+                                .is_some_and(|slot| {
+                                    if matches!(
+                                        slot.state,
+                                        RendererLifecycleState::Starting { generation }
+                                            if generation == process_generation
+                                    ) {
+                                        let _ = slot.transition(
+                                            RendererLifecycleEvent::StopRequested { keep: true },
+                                        );
+                                    }
+                                    matches!(
+                                        slot.state,
+                                        RendererLifecycleState::Stopping { generation, .. }
+                                            if generation == process_generation
+                                    )
                                 })
-                                .map(|slot| {
-                                    slot.process_state = RendererProcessState::Stopping;
-                                })
-                                .is_some()
                         };
                         if tracked {
                             if let Some(snapshot) = self.snapshot_renderer(renderer_id).await {
@@ -418,23 +461,30 @@ impl Router {
                 }
                 Err(error) => {
                     log::warn!("renderer {renderer_id}: retained start failed: {error}");
-                    {
+                    let remove = {
                         let mut inner = self.inner.lock().await;
                         if let Some(slot) = inner.renderer_slots.get_mut(renderer_id) {
-                            if slot.process_generation == process_generation
-                                && matches!(
-                                    slot.process_state,
-                                    RendererProcessState::Starting | RendererProcessState::Stopping
-                                )
-                            {
-                                slot.process_state = RendererProcessState::Failed;
-                                slot.last_exit = Some(RendererExitSnapshot {
+                            let transition = slot.transition(RendererLifecycleEvent::SpawnFailed {
+                                generation: process_generation,
+                                failure: RendererExitSnapshot {
                                     code: None,
                                     signal: None,
                                     reason: error.to_string(),
-                                });
+                                },
+                            });
+                            if transition == RendererTransition::Remove {
+                                log::debug!(
+                                    "renderer {renderer_id}: remove failed dropped generation={process_generation}"
+                                );
                             }
+                            transition == RendererTransition::Remove
+                        } else {
+                            false
                         }
+                    };
+                    if remove {
+                        self.unregister_renderer(renderer_id).await;
+                        return;
                     }
                     if let Some(snapshot) = self.snapshot_renderer(renderer_id).await {
                         self.emit(RouterEvent::RendererUpsert(snapshot));
@@ -460,10 +510,9 @@ impl Router {
                 return;
             };
             if !has_demand
-                || slot.retention != RendererRetention::Keep
                 || !matches!(
-                    slot.process_state,
-                    RendererProcessState::Killed | RendererProcessState::Failed
+                    slot.state,
+                    RendererLifecycleState::Killed { keep: true, .. }
                 )
                 || slot.restart_failures >= PROCESS_RESTART_MAX_FAILURES
             {
@@ -481,67 +530,33 @@ impl Router {
         let id = renderer_id.to_string();
         let task_id = id.clone();
         let task = tokio::spawn(async move {
-            let mut delay = initial_delay;
-            loop {
-                tokio::time::sleep(delay).await;
-                let Some(router) = weak.upgrade() else { return };
-                let should_start = {
-                    let inner = router.inner.lock().await;
-                    let has_demand =
-                        inner.table.links_for_renderer(&task_id).iter().any(|link| {
-                            link.enabled && inner.displays.contains_key(&link.display_id)
-                        });
-                    inner.renderer_slots.get(&task_id).is_some_and(|slot| {
-                        has_demand
-                            && slot.spec_revision == spec_revision
-                            && slot.retention == RendererRetention::Keep
-                            && matches!(
-                                slot.process_state,
-                                RendererProcessState::Killed | RendererProcessState::Failed
-                            )
-                    })
-                };
-                if !should_start {
-                    router
-                        .inner
-                        .lock()
-                        .await
-                        .process_restart_tasks
-                        .remove(&task_id);
-                    return;
-                }
-                router.start_retained_renderer(&task_id).await;
-                let retry = {
-                    let mut inner = router.inner.lock().await;
-                    let has_demand =
-                        inner.table.links_for_renderer(&task_id).iter().any(|link| {
-                            link.enabled && inner.displays.contains_key(&link.display_id)
-                        });
-                    let retry = inner.renderer_slots.get_mut(&task_id).and_then(|slot| {
-                        (has_demand
-                            && slot.spec_revision == spec_revision
-                            && slot.retention == RendererRetention::Keep
-                            && slot.process_state == RendererProcessState::Failed
-                            && slot.restart_failures < PROCESS_RESTART_MAX_FAILURES)
-                            .then(|| {
-                                slot.restart_failures += 1;
-                                (
-                                    slot.restart_failures,
-                                    resume_retry_delay(slot.restart_failures),
-                                )
-                            })
-                    });
-                    if retry.is_none() {
-                        inner.process_restart_tasks.remove(&task_id);
-                    }
-                    retry
-                };
-                let Some((failures, next_delay)) = retry else {
-                    return;
-                };
-                delay = next_delay;
-                log::warn!("renderer {task_id}: restart attempt {failures}/{PROCESS_RESTART_MAX_FAILURES} in {delay:?}");
+            tokio::time::sleep(initial_delay).await;
+            let Some(router) = weak.upgrade() else { return };
+            let should_start = {
+                let inner = router.inner.lock().await;
+                let has_demand = inner
+                    .table
+                    .links_for_renderer(&task_id)
+                    .iter()
+                    .any(|link| link.enabled && inner.displays.contains_key(&link.display_id));
+                inner.renderer_slots.get(&task_id).is_some_and(|slot| {
+                    has_demand
+                        && slot.spec_revision == spec_revision
+                        && matches!(
+                            slot.state,
+                            RendererLifecycleState::Killed { keep: true, .. }
+                        )
+                })
+            };
+            if should_start {
+                router.start_retained_renderer(&task_id, false).await;
             }
+            router
+                .inner
+                .lock()
+                .await
+                .process_restart_tasks
+                .remove(&task_id);
         });
         let mut inner = self.inner.lock().await;
         if let Some(previous) = inner.process_restart_tasks.insert(id, task) {
@@ -619,6 +634,7 @@ impl Router {
         ManualLifecycleState {
             paused: inner.manual_paused,
             muted: inner.manual_muted,
+            stopped: inner.manual_stopped,
         }
     }
 
@@ -630,9 +646,7 @@ impl Router {
             .await
             .renderer_slots
             .get(renderer_id)
-            .is_some_and(|slot| {
-                slot.activity_state == RendererStatus::Paused(PausedRendererStatus::Paused)
-            })
+            .is_some_and(|slot| slot.state.activity() == Some(RendererActivity::Paused))
     }
 
     pub async fn is_muted(self: &Arc<Self>, renderer_id: &str) -> bool {
@@ -641,8 +655,6 @@ impl Router {
             .await
             .renderer_slots
             .get(renderer_id)
-            .is_some_and(|slot| {
-                slot.activity_state == RendererStatus::Paused(PausedRendererStatus::Muted)
-            })
+            .is_some_and(|slot| slot.state.activity() == Some(RendererActivity::Muted))
     }
 }
