@@ -45,7 +45,18 @@ find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 pkg_check_modules(WW_BRIDGE_EGL REQUIRED egl)
 pkg_check_modules(WW_BRIDGE_GBM REQUIRED gbm)
-find_package(Vulkan REQUIRED)
+# find_package(Vulkan) needs BOTH the loader and the dev headers
+# (vulkan/vulkan.h); on most distros the headers are a separate package.
+find_package(Vulkan QUIET)
+if(NOT Vulkan_INCLUDE_DIR)
+    message(FATAL_ERROR
+        "Vulkan headers not found (need vulkan/vulkan.h). Install the headers "
+        "package: vulkan-headers (Arch/Fedora) or libvulkan-dev (Debian/Ubuntu).")
+elseif(NOT Vulkan_LIBRARY)
+    message(FATAL_ERROR
+        "Vulkan loader not found (libvulkan). Install the loader: "
+        "vulkan-icd-loader (Arch), libvulkan1 (Debian/Ubuntu), or vulkan-loader (Fedora).")
+endif()
 target_include_directories(waywallen-bridge SYSTEM PRIVATE
     ${WW_BRIDGE_EGL_INCLUDE_DIRS}
     ${WW_BRIDGE_GBM_INCLUDE_DIRS}
