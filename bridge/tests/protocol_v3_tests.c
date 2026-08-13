@@ -98,10 +98,28 @@ static void test_audio_helper_validates_complete_windows_and_end(void) {
     ww_bridge_control_free(&control);
 }
 
+/* An untrusted count larger than the remaining input must not force a huge allocation. */
+static void test_decoder_rejects_oversized_array_count(void) {
+    /* setting_changed body is a bare kv_list: [u32 count]. */
+    const uint8_t              kv_huge[4] = { 0xff, 0xff, 0xff, 0xff };
+    ww_evt_in_setting_changed_t settings;
+    assert(ww_evt_in_setting_changed_decode(kv_huge, sizeof(kv_huge), &settings) == WW_ERR_BAD_ARRAY);
+
+    /* set_event_subscriptions body: [u64 revision][u32 kinds count]. */
+    const uint8_t subs_huge[12] = {
+        0, 0, 0, 0, 0, 0, 0, 0,        /* revision = 0 */
+        0xff, 0xff, 0xff, 0xff,        /* kinds.count = UINT32_MAX */
+    };
+    ww_evt_set_event_subscriptions_t subs;
+    assert(ww_evt_set_event_subscriptions_decode(subs_huge, sizeof(subs_huge), &subs)
+           == WW_ERR_BAD_ARRAY);
+}
+
 int main(void) {
     test_subscription_codec();
     test_request_frame_codec();
     test_subscription_ack_view();
     test_audio_helper_validates_complete_windows_and_end();
+    test_decoder_rejects_oversized_array_count();
     return 0;
 }
