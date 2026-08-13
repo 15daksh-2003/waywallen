@@ -389,7 +389,7 @@ MD.Page {
                         }
                     }
 
-                    RowLayout {
+                    Flow {
                         Layout.fillWidth: true
                         spacing: 24
 
@@ -436,9 +436,6 @@ MD.Page {
                             }
                         }
 
-                        Item {
-                            Layout.fillWidth: true
-                        }
                     }
 
                     MD.Divider {
