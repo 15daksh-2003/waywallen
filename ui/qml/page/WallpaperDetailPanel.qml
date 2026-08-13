@@ -921,7 +921,7 @@ Item {
                     visible: m_prop_delegate.type === "textinput"
                     Layout.fillWidth: true
                     text: m_prop_delegate.currentValue
-                    mdState.dense: true
+                    mdState.size: MD.Enum.S
                     onAccepted: submit()
 
                     function submit() {

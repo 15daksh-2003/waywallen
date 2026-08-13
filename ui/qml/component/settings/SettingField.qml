@@ -252,7 +252,7 @@ ColumnLayout {
             id: tf
             text: root.value
             placeholderText: root.label
-            mdState.dense: true
+            mdState.size: MD.Enum.S
             inputMethodHints: root.schema.type === root.kU32 ? Qt.ImhDigitsOnly : Qt.ImhFormattedNumbersOnly
             validator: root._isIntegerType(root.schema.type) ? intValidator : doubleValidator
             onEditingFinished: root._emit(text)

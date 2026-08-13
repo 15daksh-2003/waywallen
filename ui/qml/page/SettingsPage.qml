@@ -999,7 +999,7 @@ MD.Page {
                     MD.TextField {
                         id: m_rot_field
                         Layout.preferredWidth: 120
-                        mdState.dense: true
+                        mdState.size: MD.Enum.S
                         placeholderText: qsTr("Interval")
                         inputMethodHints: Qt.ImhDigitsOnly
                         validator: IntValidator { bottom: 0 }

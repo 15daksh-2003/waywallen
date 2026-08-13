@@ -7,7 +7,7 @@ import Qcm.Material as MD
 
 // Search affordance shaped like an `MD.InputChip` (32px tall, 8px
 // radius, 1px outline) with a `TextInput` embedded inline. Plain
-// `MD.TextField` even in `dense` mode is 54px tall — too bulky next
+// Even an XS `MD.TextField` is 40px tall — too bulky next
 // to chip / button rows. This keeps the toolbar visually homogeneous.
 //
 // `textEdited` is emitted after a 200ms idle on the raw input, so
