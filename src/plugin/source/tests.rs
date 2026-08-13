@@ -649,6 +649,13 @@ fn wallhaven_plugin_supports_optional_api_key_login() {
         filter.ty == DiscoverFilterType::MultiSelect
             && filter.values.iter().any(|value| value == "Anime")
     }));
+    let purity = sources[0]
+        .filters
+        .iter()
+        .find(|filter| filter.id == "purity")
+        .unwrap();
+    assert_eq!(purity.ty, DiscoverFilterType::MultiSelect);
+    assert_eq!(purity.values, ["SFW", "Sketchy", "NSFW"]);
     assert_eq!(sources[0].actions[0].kind, SourceActionKind::Form);
     assert_eq!(sources[0].actions[0].fields.len(), 1);
     assert_eq!(sources[0].actions[0].fields[0].key, "api_key");
@@ -668,6 +675,54 @@ fn wallhaven_plugin_supports_optional_api_key_login() {
         .plugin_lua_env(plugin_path.parent().unwrap())
         .unwrap();
     let import: LuaFunction = env.get("import").unwrap();
+    let api: LuaTable = import.call("wallhaven.api").unwrap();
+    let session: LuaTable = import.call("wallhaven.session").unwrap();
+    let purity_masks: LuaTable = runtime
+        .lua
+        .load(
+            r#"
+return function(api, session)
+    local function search(tags)
+        local captured = nil
+        local response = {}
+        function response:status() return 200 end
+        function response:ok() return true end
+        function response:json() return { data = {}, meta = {} } end
+        local request = {}
+        function request:headers(_) return self end
+        function request:query(value) captured = value return self end
+        function request:timeout(_) return self end
+        function request:send() return response end
+        local ctx = { http = {} }
+        function ctx.http:get(_) return request end
+        api.search(ctx, { tags = tags, page = 1 })
+        return captured.purity
+    end
+
+    local default_mask = search({})
+    local sketchy_mask = search({ "Sketchy" })
+    local nsfw_without_login = pcall(function() search({ "NSFW" }) end)
+    session.load("wallhaven-session-v1\n3\nkey")
+    local mixed_mask = search({ "SFW", "NSFW" })
+    session.sign_out()
+    return {
+        default_mask = default_mask,
+        sketchy_mask = sketchy_mask,
+        nsfw_without_login = nsfw_without_login,
+        mixed_mask = mixed_mask,
+    }
+end
+"#,
+        )
+        .eval::<LuaFunction>()
+        .unwrap()
+        .call((api, session))
+        .unwrap();
+    assert_eq!(purity_masks.get::<String>("default_mask").unwrap(), "100");
+    assert_eq!(purity_masks.get::<String>("sketchy_mask").unwrap(), "010");
+    assert!(!purity_masks.get::<bool>("nsfw_without_login").unwrap());
+    assert_eq!(purity_masks.get::<String>("mixed_mask").unwrap(), "101");
+
     let map: LuaTable = import.call("wallhaven.map").unwrap();
     let search_item: LuaFunction = map.get("search_item").unwrap();
     let item = runtime.lua.create_table().unwrap();

@@ -52,6 +52,17 @@ local QUERY_TAGS = {
 
 M.filters = {
     {
+        id = "purity",
+        title = "Purity",
+        type = "multi_select",
+        description = "NSFW wallpapers require a Wallhaven API key.",
+        values = {
+            "SFW",
+            "Sketchy",
+            "NSFW",
+        },
+    },
+    {
         id = "topics",
         title = "Topics",
         type = "multi_select",
@@ -134,9 +145,20 @@ function M.search(ctx, params)
     local resolutions = {}
     local general, anime, people = true, true, true
     local category_selected = false
+    local sfw, sketchy, nsfw = false, false, false
+    local purity_selected = false
 
     for _, tag in ipairs(params.tags or {}) do
-        if tag == "Anime" then
+        if tag == "SFW" then
+            sfw = true
+            purity_selected = true
+        elseif tag == "Sketchy" then
+            sketchy = true
+            purity_selected = true
+        elseif tag == "NSFW" then
+            nsfw = true
+            purity_selected = true
+        elseif tag == "Anime" then
             if not category_selected then
                 general, anime, people = false, false, false
                 category_selected = true
@@ -156,10 +178,17 @@ function M.search(ctx, params)
         query = append_query(query, QUERY_TAGS[tag])
     end
 
+    if not purity_selected then
+        sfw = true
+    end
+    if nsfw and not session.authenticated() then
+        error("Log in to Wallhaven with an API key to browse NSFW wallpapers")
+    end
+
     local q = {
         q = query,
         categories = (general and "1" or "0") .. (anime and "1" or "0") .. (people and "1" or "0"),
-        purity = "100",
+        purity = (sfw and "1" or "0") .. (sketchy and "1" or "0") .. (nsfw and "1" or "0"),
         sorting = sort.sorting,
         order = "desc",
         page = tostring(params.page or 1),

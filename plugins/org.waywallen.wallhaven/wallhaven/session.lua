@@ -46,6 +46,10 @@ function M.headers()
     return { ["X-API-Key"] = api_key }
 end
 
+function M.authenticated()
+    return api_key ~= ""
+end
+
 function M.sign_in(ctx, value)
     local candidate = type(value) == "string" and value:match("^%s*(.-)%s*$") or ""
     if candidate == "" then error("Enter a Wallhaven API key") end
