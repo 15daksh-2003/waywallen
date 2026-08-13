@@ -17,6 +17,16 @@ MD.BottomSheet {
     dismissOnDragDown: true
     maxSheetWidth: 560
 
+    MD.Action {
+        id: createPlaylistAction
+        text: qsTr("Create playlist")
+        icon.name: MD.Token.icon.playlist_add
+        displayHint: MD.ToolBarLayout.KeepVisible
+        enabled: !control.sheetState.mutationQuerying
+        busy: control.sheetState.createQuerying ? MD.Enum.Busy : MD.Enum.Idle
+        onTriggered: control.sheetState.createPlaylist()
+    }
+
     ColumnLayout {
         width: control.sheetWidth
         spacing: 0
@@ -83,6 +93,14 @@ MD.BottomSheet {
                             playlistDisplayMenu.close();
                         }
                     }
+                }
+            }
+
+            MD.ActionToolBar {
+                Layout.fillWidth: true
+                actions: [createPlaylistAction]
+                iconDelegate: MD.BusyIconButton {
+                    action: MD.ToolBarLayout.action
                 }
             }
         }
@@ -173,7 +191,7 @@ MD.BottomSheet {
                     }
 
                     MD.IconButton {
-                        enabled: !control.sheetState.playlistMutation.querying
+                        enabled: !control.sheetState.mutationQuerying
                         icon.name: MD.Token.icon.edit
                         onClicked: control.sheetState.editSelection(playlistSheetItem.modelData)
                         MD.ToolTip.visible: hovered
@@ -181,7 +199,7 @@ MD.BottomSheet {
                     }
 
                     MD.IconButton {
-                        enabled: !control.sheetState.playlistMutation.querying
+                        enabled: !control.sheetState.mutationQuerying
                         icon.name: MD.Token.icon.delete
                         onClicked: control.sheetState.deletePlaylist(playlistSheetItem.modelData)
                         MD.ToolTip.visible: hovered

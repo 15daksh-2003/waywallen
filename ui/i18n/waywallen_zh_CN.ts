@@ -484,6 +484,10 @@
 <context>
     <name>PlaylistListSheet</name>
     <message>
+        <source>Create playlist</source>
+        <translation>创建播放列表</translation>
+    </message>
+    <message>
         <source>Playlists</source>
         <translation>播放列表</translation>
     </message>
@@ -1766,6 +1770,14 @@ Unsaved frame state may be lost.</source>
     <message>
         <source>Playlist update failed</source>
         <translation>播放列表更新失败</translation>
+    </message>
+    <message>
+        <source>Playlist creation failed</source>
+        <translation>创建播放列表失败</translation>
+    </message>
+    <message>
+        <source>Playlist created</source>
+        <translation>已创建播放列表</translation>
     </message>
     <message>
         <source>Playlist updated</source>

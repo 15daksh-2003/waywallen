@@ -8,6 +8,7 @@ QtObject {
     required property var page
     required property var playlistListQuery
     required property var playlistMutation
+    required property var playlistCreateMutation
     required property var playlistPlaybackMutation
 
     property bool shareAllDisplays: false
@@ -18,6 +19,8 @@ QtObject {
     }
 
     readonly property bool listLoading: page.playlistListLoading
+    readonly property bool mutationQuerying: playlistMutation.querying || playlistCreateMutation.querying
+    readonly property bool createQuerying: playlistCreateMutation.querying
     readonly property var playlists: playlistListQuery.playlists || []
     readonly property var playDisplays: page.playlistPlayDisplays || []
     readonly property var selectedDisplay: {
@@ -69,5 +72,9 @@ QtObject {
 
     function deletePlaylist(playlist) {
         page.deletePlaylist(playlist);
+    }
+
+    function createPlaylist() {
+        page.createEmptyPlaylist();
     }
 }

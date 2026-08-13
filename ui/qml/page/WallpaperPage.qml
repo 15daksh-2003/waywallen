@@ -54,6 +54,7 @@ MD.Page {
     property bool playlistListReady: false
     property string playlistMutationSuccessMessage: ""
     property string playlistMutationPendingMessage: ""
+    readonly property int defaultPlaylistIntervalSecs: 300
     readonly property bool playlistListLoading: playlistListQuery.querying && !root.playlistListReady
 
     Connections {
@@ -92,6 +93,17 @@ MD.Page {
     }
 
     W.PlaylistMutationQuery {
+        id: playlistSheetCreateMutation
+        forwardError: false
+        onDone: {
+            if (playlistSheetCreateMutation.status === 3)
+                W.Action.toast(qsTr("Playlist creation failed"));
+            else
+                W.Action.toast(qsTr("Playlist created"));
+        }
+    }
+
+    W.PlaylistMutationQuery {
         id: playlistPlaybackMutation
         forwardError: false
         onDone: {
@@ -110,6 +122,7 @@ MD.Page {
         page: root
         playlistListQuery: playlistListQuery
         playlistMutation: playlistMutation
+        playlistCreateMutation: playlistSheetCreateMutation
         playlistPlaybackMutation: playlistPlaybackMutation
     }
 
@@ -129,8 +142,6 @@ MD.Page {
             root.playlistMutationPendingMessage = "";
             playlistListQuery.reload();
             root.clearWallpaperSelection();
-            if (root.isSheetActive(root.playlistListSheet))
-                root.playlistListSheet.close();
             if (message.length > 0)
                 W.Action.toast(message);
         }
@@ -888,7 +899,14 @@ MD.Page {
             return;
 
         const title = String(name || "").trim();
-        playlistMutation.create(title.length > 0 ? title : qsTr("New playlist"), 1, 300, ids);
+        playlistMutation.create(title.length > 0 ? title : qsTr("New playlist"), WC.PlaylistMode.SEQUENTIAL, root.defaultPlaylistIntervalSecs, ids);
+    }
+
+    function createEmptyPlaylist() {
+        if (playlistSheetCreateMutation.querying)
+            return;
+
+        playlistSheetCreateMutation.create(qsTr("New playlist"), WC.PlaylistMode.SEQUENTIAL, root.defaultPlaylistIntervalSecs, []);
     }
 
     function addSelectionToPlaylist(playlist) {

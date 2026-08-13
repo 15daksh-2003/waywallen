@@ -488,6 +488,10 @@
 <context>
     <name>PlaylistListSheet</name>
     <message>
+        <source>Create playlist</source>
+        <translation>Создать плейлист</translation>
+    </message>
+    <message>
         <source>Playlists</source>
         <translation>Плейлисты</translation>
     </message>
@@ -1772,6 +1776,14 @@ Unsaved frame state may be lost.</source>
     <message>
         <source>Playlist update failed</source>
         <translation>Не удалось обновить плейлист</translation>
+    </message>
+    <message>
+        <source>Playlist creation failed</source>
+        <translation>Не удалось создать плейлист</translation>
+    </message>
+    <message>
+        <source>Playlist created</source>
+        <translation>Плейлист создан</translation>
     </message>
     <message>
         <source>Playlist updated</source>
