@@ -28,6 +28,7 @@ Gpu::Gpu(const proto::GpuInfo& info, QObject* parent)
       m_vendor_id(info.vendorId()),
       m_device_id(info.deviceId()),
       m_driver(info.driver()),
+      m_name(info.name()),
       m_description(info.description()) {}
 
 static auto gm_instance(GpuManager* in = nullptr) -> GpuManager* {

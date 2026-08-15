@@ -294,6 +294,7 @@ pub(super) fn gpu_info_to_pb(g: &crate::system::GpuInfo) -> pb::GpuInfo {
         device_id: g.device_id as u32,
         driver: g.driver.clone(),
         description: g.description.clone(),
+        name: g.name.clone(),
     }
 }
 
@@ -1044,3 +1045,30 @@ pub(super) fn global_event_to_pb(e: &GlobalEvent, state: &Arc<DaemonContext>) ->
 
 // ---------------------------------------------------------------------------
 // Dispatch
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn gpu_info_mapping_keeps_name_and_description() {
+        let gpu = crate::system::GpuInfo {
+            render_node: Some(PathBuf::from("/dev/dri/renderD128")),
+            render_major: 226,
+            render_minor: 128,
+            vendor_id: 0x1002,
+            device_id: 0x7550,
+            driver: "amdgpu".to_string(),
+            name: "Navi 48".to_string(),
+            description: "Navi 48 — amdgpu 0x1002:0x7550".to_string(),
+            ..Default::default()
+        };
+
+        let mapped = gpu_info_to_pb(&gpu);
+
+        assert_eq!(mapped.name, gpu.name);
+        assert_eq!(mapped.description, gpu.description);
+        assert_eq!(mapped.render_node, "/dev/dri/renderD128");
+    }
+}

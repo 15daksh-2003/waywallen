@@ -87,12 +87,13 @@ pub async fn run(cli: DaemonConfig) -> anyhow::Result<()> {
     log::info!("system: discovered {} GPU(s)", system_info.gpus().len());
     for g in system_info.gpus() {
         log::debug!(
-            "  gpu: render={:?} primary={:?} drm={}:{} pci={:?} {} ({:#06x}:{:#06x})",
+            "  gpu: render={:?} primary={:?} drm={}:{} pci={:?} name={:?} {} ({:#06x}:{:#06x})",
             g.render_node,
             g.primary_node,
             g.render_major,
             g.render_minor,
             g.pci_bdf,
+            g.name,
             g.driver,
             g.vendor_id,
             g.device_id,

@@ -383,6 +383,9 @@ ColumnLayout {
                     checked: root.value === modelData.renderNode
                     enabled: modelData.renderNode.length > 0
                     onClicked: root._emit(modelData.renderNode)
+                    MD.ToolTip.visible: gpuChip.hovered
+                    MD.ToolTip.delay: 300
+                    MD.ToolTip.text: W.GpuDetails.toolTipText(gpuChip.modelData)
                     Connections {
                         target: root
                         function onValueChanged() {

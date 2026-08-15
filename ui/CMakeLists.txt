@@ -162,6 +162,7 @@ set(QML_FILES
   qml/component/StatusDot.qml
   qml/component/PagePopup.qml
   qml/component/Tag.qml
+  qml/component/GpuDetails.qml
   qml/component/GpuTag.qml
   qml/component/RendererRuntimeTag.qml
   qml/component/RuntimeConditionTag.qml
@@ -220,7 +221,10 @@ set(RESOURCES
   assets/waywallen-ui.releases.xml
 )
 
-set_source_files_properties(qml/Global.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+set_source_files_properties(
+  qml/Global.qml
+  qml/component/GpuDetails.qml
+  PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
 set(QML_REG_INCLUDE_DIRS
     "${CMAKE_CURRENT_SOURCE_DIR}/include/waywallen/register"

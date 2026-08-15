@@ -1580,6 +1580,7 @@ message GpuInfo {
   uint32 device_id      = 9;   // PCI device
   string driver         = 10;  // kernel driver basename: "amdgpu" / "i915" / "nvidia"
   string description    = 11;  // best-effort human label
+  string name           = 12;  // best-effort product or chipset name
 }
 
 message GpuListRequest {}

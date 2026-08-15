@@ -367,6 +367,21 @@
     </message>
 </context>
 <context>
+    <name>GpuDetails</name>
+    <message>
+        <source>Driver: %1</source>
+        <translation>Драйвер: %1</translation>
+    </message>
+    <message>
+        <source>PCI: %1</source>
+        <translation>PCI: %1</translation>
+    </message>
+    <message>
+        <source>Render node: %1</source>
+        <translation>Узел рендеринга: %1</translation>
+    </message>
+</context>
+<context>
     <name>IntFilter</name>
     <message>
         <source>equal</source>

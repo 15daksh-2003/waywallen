@@ -35,6 +35,7 @@ class Gpu : public QObject {
     Q_PROPERTY(quint32 vendorId READ vendorId CONSTANT FINAL)
     Q_PROPERTY(quint32 deviceId READ deviceId CONSTANT FINAL)
     Q_PROPERTY(QString driver READ driver CONSTANT FINAL)
+    Q_PROPERTY(QString name READ name CONSTANT FINAL)
     Q_PROPERTY(QString description READ description CONSTANT FINAL)
 
 public:
@@ -50,6 +51,7 @@ public:
     auto vendorId() const -> quint32 { return m_vendor_id; }
     auto deviceId() const -> quint32 { return m_device_id; }
     auto driver() const -> const QString& { return m_driver; }
+    auto name() const -> const QString& { return m_name; }
     auto description() const -> const QString& { return m_description; }
 
 private:
@@ -63,6 +65,7 @@ private:
     quint32 m_vendor_id;
     quint32 m_device_id;
     QString m_driver;
+    QString m_name;
     QString m_description;
 };
 

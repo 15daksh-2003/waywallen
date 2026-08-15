@@ -1,6 +1,13 @@
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
+
+const PCI_IDS_PATHS: [&str; 3] = [
+    "/usr/share/hwdata/pci.ids",
+    "/usr/share/misc/pci.ids",
+    "/usr/share/pci.ids",
+];
 
 /// Plugin-settings key that persists "preferred GPU" as `"<major>:<minor>"`.
 /// The daemon translates it to a `/dev/dri/renderD*` path at spawn time.
@@ -29,7 +36,10 @@ pub struct GpuInfo {
     pub pci_bdf: Option<String>,
     pub vendor_id: u16,
     pub device_id: u16,
+    pub subsystem_vendor_id: u16,
+    pub subsystem_device_id: u16,
     pub driver: String,
+    pub name: String,
     pub description: String,
 }
 
@@ -40,7 +50,12 @@ impl GpuInfo {
 }
 
 pub fn enumerate() -> Vec<GpuInfo> {
-    enumerate_with_roots(Path::new("/dev/dri"), Path::new("/sys/dev/char"))
+    let mut gpus = enumerate_with_roots(Path::new("/dev/dri"), Path::new("/sys/dev/char"));
+    if let Some(path) = resolve_pci_names_from_paths(&mut gpus, &PCI_IDS_PATHS) {
+        log::debug!("system::gpu: resolved PCI names from {}", path.display());
+    }
+    finish_descriptions(&mut gpus);
+    gpus
 }
 
 pub(crate) fn enumerate_with_roots(dev_dri: &Path, sysfs_char: &Path) -> Vec<GpuInfo> {
@@ -103,17 +118,16 @@ pub(crate) fn enumerate_with_roots(dev_dri: &Path, sysfs_char: &Path) -> Vec<Gpu
             g.pci_bdf = Some(p.bdf);
             g.vendor_id = p.vendor;
             g.device_id = p.device;
+            g.subsystem_vendor_id = p.subsystem_vendor;
+            g.subsystem_device_id = p.subsystem_device;
             g.driver = p.driver;
+            if g.name.is_empty() {
+                g.name = p.product_name.unwrap_or_default();
+            }
         }
     }
 
-    let mut out: Vec<GpuInfo> = groups
-        .into_values()
-        .map(|mut g| {
-            g.description = format_description(&g);
-            g
-        })
-        .collect();
+    let mut out: Vec<GpuInfo> = groups.into_values().collect();
     // Stable order for UI: entries with a render node first, then by
     // render minor / primary minor.
     out.sort_by_key(|g| (g.render_node.is_none(), g.render_minor, g.primary_minor));
@@ -130,7 +144,10 @@ struct Pci {
     bdf: String,
     vendor: u16,
     device: u16,
+    subsystem_vendor: u16,
+    subsystem_device: u16,
     driver: String,
+    product_name: Option<String>,
 }
 
 fn stat_rdev(p: &Path) -> Option<(u32, u32)> {
@@ -158,15 +175,27 @@ fn parse_pci_dir(device_link: &Path) -> Option<Pci> {
 
     let vendor = read_hex_u16(&dir.join("vendor"))?;
     let device = read_hex_u16(&dir.join("device"))?;
+    let subsystem_vendor = read_hex_u16(&dir.join("subsystem_vendor")).unwrap_or_default();
+    let subsystem_device = read_hex_u16(&dir.join("subsystem_device")).unwrap_or_default();
     let driver = read_driver(&dir).unwrap_or_default();
+    let product_name = read_trimmed(&dir.join("product_name"));
 
     Some(Pci {
         dir,
         bdf,
         vendor,
         device,
+        subsystem_vendor,
+        subsystem_device,
         driver,
+        product_name,
     })
+}
+
+fn read_trimmed(path: &Path) -> Option<String> {
+    let value = fs::read_to_string(path).ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 fn read_hex_u16(p: &Path) -> Option<u16> {
@@ -182,22 +211,179 @@ fn read_driver(pci_dir: &Path) -> Option<String> {
     Some(target.file_name()?.to_str()?.to_string())
 }
 
+#[derive(Debug)]
+struct PciNameTarget {
+    gpu_index: usize,
+    vendor: u16,
+    device: u16,
+    subsystem_vendor: u16,
+    subsystem_device: u16,
+    device_name: Option<String>,
+    subsystem_name: Option<String>,
+}
+
+fn resolve_pci_names_from_paths<P: AsRef<Path>>(
+    gpus: &mut [GpuInfo],
+    paths: &[P],
+) -> Option<PathBuf> {
+    if !gpus
+        .iter()
+        .any(|gpu| gpu.name.is_empty() && gpu.vendor_id != 0 && gpu.device_id != 0)
+    {
+        return None;
+    }
+
+    for candidate in paths {
+        let path = candidate.as_ref();
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) => {
+                log::debug!("system::gpu: open {}: {error}", path.display());
+                continue;
+            }
+        };
+        if let Err(error) = resolve_pci_names(gpus, BufReader::new(file)) {
+            log::warn!("system::gpu: read {}: {error}", path.display());
+        }
+        return Some(path.to_path_buf());
+    }
+    None
+}
+
+fn resolve_pci_names<R: BufRead>(gpus: &mut [GpuInfo], mut reader: R) -> io::Result<()> {
+    let mut targets: Vec<PciNameTarget> = gpus
+        .iter()
+        .enumerate()
+        .filter(|(_, gpu)| gpu.name.is_empty() && gpu.vendor_id != 0 && gpu.device_id != 0)
+        .map(|(gpu_index, gpu)| PciNameTarget {
+            gpu_index,
+            vendor: gpu.vendor_id,
+            device: gpu.device_id,
+            subsystem_vendor: gpu.subsystem_vendor_id,
+            subsystem_device: gpu.subsystem_device_id,
+            device_name: None,
+            subsystem_name: None,
+        })
+        .collect();
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let mut current_vendor = None;
+    let mut current_device = None;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("C ") {
+            current_vendor = None;
+            current_device = None;
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("\t\t") {
+            let Some(vendor) = take_hex_field(rest) else {
+                continue;
+            };
+            let Some(device) = take_hex_field(vendor.1) else {
+                continue;
+            };
+            let name = device.1.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let (Some(parent_vendor), Some(parent_device)) = (current_vendor, current_device)
+            else {
+                continue;
+            };
+            for target in &mut targets {
+                if target.vendor == parent_vendor
+                    && target.device == parent_device
+                    && target.subsystem_vendor != 0
+                    && target.subsystem_device != 0
+                    && target.subsystem_vendor == vendor.0
+                    && target.subsystem_device == device.0
+                {
+                    target.subsystem_name = Some(name.to_owned());
+                }
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('\t') {
+            let Some((device, name)) = take_hex_field(rest) else {
+                continue;
+            };
+            current_device = Some(device);
+            let Some(vendor) = current_vendor else {
+                continue;
+            };
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            for target in &mut targets {
+                if target.vendor == vendor && target.device == device {
+                    target.device_name = Some(name.to_owned());
+                }
+            }
+            continue;
+        }
+
+        current_device = None;
+        current_vendor = take_hex_field(line).map(|(vendor, _)| vendor);
+    }
+
+    for target in targets {
+        if let Some(name) = target.subsystem_name.or(target.device_name) {
+            gpus[target.gpu_index].name = name;
+        }
+    }
+    Ok(())
+}
+
+fn take_hex_field(value: &str) -> Option<(u16, &str)> {
+    let value = value.trim_start();
+    let end = value.find(char::is_whitespace)?;
+    if end != 4 {
+        return None;
+    }
+    let id = u16::from_str_radix(&value[..end], 16).ok()?;
+    Some((id, value[end..].trim_start()))
+}
+
+fn finish_descriptions(gpus: &mut [GpuInfo]) {
+    for gpu in gpus {
+        gpu.description = format_description(gpu);
+    }
+}
+
 fn format_description(g: &GpuInfo) -> String {
     let driver = if g.driver.is_empty() {
         "unknown".to_string()
     } else {
         g.driver.clone()
     };
-    if g.vendor_id == 0 && g.device_id == 0 {
+    let identity = if g.vendor_id == 0 && g.device_id == 0 {
         driver
     } else {
         format!("{driver} {:#06x}:{:#06x}", g.vendor_id, g.device_id)
+    };
+    if g.name.is_empty() {
+        identity
+    } else {
+        format!("{} — {identity}", g.name)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
     use std::os::unix::fs::symlink;
 
     /// Fake sysfs: an empty renderD128 in dev_dri, sysfs_char/<m>:<n>/device
@@ -209,6 +395,9 @@ mod tests {
         fs::create_dir_all(&pci).unwrap();
         fs::write(pci.join("vendor"), "0x1002\n").unwrap();
         fs::write(pci.join("device"), "0x73bf\n").unwrap();
+        fs::write(pci.join("subsystem_vendor"), "0x1da2\n").unwrap();
+        fs::write(pci.join("subsystem_device"), "0xe471\n").unwrap();
+        fs::write(pci.join("product_name"), "Radeon Test GPU\n").unwrap();
         let drivers = tmp.path().join("drivers/amdgpu");
         fs::create_dir_all(&drivers).unwrap();
         symlink(&drivers, pci.join("driver")).unwrap();
@@ -222,7 +411,94 @@ mod tests {
         assert_eq!(p.bdf, "0000:03:00.0");
         assert_eq!(p.vendor, 0x1002);
         assert_eq!(p.device, 0x73bf);
+        assert_eq!(p.subsystem_vendor, 0x1da2);
+        assert_eq!(p.subsystem_device, 0xe471);
         assert_eq!(p.driver, "amdgpu");
+        assert_eq!(p.product_name.as_deref(), Some("Radeon Test GPU"));
+    }
+
+    #[test]
+    fn resolve_pci_names_matches_multiple_devices_in_one_scan() {
+        let database = "\
+# comment
+1002  Advanced Micro Devices, Inc. [AMD/ATI]
+\t13c0  Granite Ridge [Radeon Graphics]
+\t7550  Navi 48 [Radeon RX 9070/9070 XT/9070 GRE]
+\t\t1da2 e471  Radeon RX 9070 XT Board
+C 03  Display controller
+\t00  VGA compatible controller
+10DE  NVIDIA Corporation
+\t2188  TU116 [GeForce GTX 1650]
+";
+        let mut gpus = vec![
+            GpuInfo {
+                vendor_id: 0x1002,
+                device_id: 0x7550,
+                subsystem_vendor_id: 0x1da2,
+                subsystem_device_id: 0xe471,
+                ..Default::default()
+            },
+            GpuInfo {
+                vendor_id: 0x10de,
+                device_id: 0x2188,
+                ..Default::default()
+            },
+            GpuInfo {
+                vendor_id: 0x1002,
+                device_id: 0xffff,
+                ..Default::default()
+            },
+        ];
+
+        resolve_pci_names(&mut gpus, Cursor::new(database)).unwrap();
+
+        assert_eq!(gpus[0].name, "Radeon RX 9070 XT Board");
+        assert_eq!(gpus[1].name, "TU116 [GeForce GTX 1650]");
+        assert!(gpus[2].name.is_empty());
+    }
+
+    #[test]
+    fn resolve_pci_names_uses_only_first_available_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing.ids");
+        let selected = tmp.path().join("selected.ids");
+        let ignored = tmp.path().join("ignored.ids");
+        fs::write(&selected, "1002  AMD\n\t7550  Selected name\n").unwrap();
+        fs::write(&ignored, "1002  AMD\n\t7550  Ignored name\n").unwrap();
+        let mut gpus = vec![GpuInfo {
+            vendor_id: 0x1002,
+            device_id: 0x7550,
+            ..Default::default()
+        }];
+
+        let path = resolve_pci_names_from_paths(&mut gpus, &[missing, selected.clone(), ignored]);
+
+        assert_eq!(path.as_deref(), Some(selected.as_path()));
+        assert_eq!(gpus[0].name, "Selected name");
+    }
+
+    #[test]
+    fn resolve_pci_names_preserves_existing_name_without_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut gpus = vec![
+            GpuInfo {
+                vendor_id: 0x1002,
+                device_id: 0x7550,
+                name: "Hardware product name".to_string(),
+                ..Default::default()
+            },
+            GpuInfo {
+                vendor_id: 0x10de,
+                device_id: 0x2188,
+                ..Default::default()
+            },
+        ];
+
+        let path = resolve_pci_names_from_paths(&mut gpus, &[tmp.path().join("missing.ids")]);
+
+        assert!(path.is_none());
+        assert_eq!(gpus[0].name, "Hardware product name");
+        assert!(gpus[1].name.is_empty());
     }
 
     #[test]
@@ -240,6 +516,18 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(format_description(&g), "vgem");
+    }
+
+    #[test]
+    fn format_description_includes_resolved_name() {
+        let g = GpuInfo {
+            vendor_id: 0x1002,
+            device_id: 0x7550,
+            driver: "amdgpu".to_string(),
+            name: "Navi 48".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(format_description(&g), "Navi 48 — amdgpu 0x1002:0x7550");
     }
 
     #[test]

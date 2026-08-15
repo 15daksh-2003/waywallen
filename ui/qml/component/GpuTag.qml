@@ -35,9 +35,5 @@ Tag {
 
     MD.ToolTip.visible: hover.hovered && root.gpu !== null
     MD.ToolTip.delay: 300
-    MD.ToolTip.text: root.gpu
-        ? (root.gpu.description
-            + (root.gpu.pciBdf ? "\nPCI " + root.gpu.pciBdf : "")
-            + (root.gpu.renderNode ? "\n" + root.gpu.renderNode : ""))
-        : ""
+    MD.ToolTip.text: W.GpuDetails.toolTipText(root.gpu)
 }
