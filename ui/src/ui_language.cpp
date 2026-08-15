@@ -154,12 +154,21 @@ auto UiLanguageController::applyLanguage(const QString& preference, bool persist
     const auto locale = preference == QString::fromLatin1(kSystemLanguage) ? QLocale::system()
                                                                            : QLocale(preference);
 
-    auto       next_qt_translator = Box<QTranslator>::make();
-    const bool next_qt_loaded =
-        next_qt_translator->load(locale,
-                                 QStringLiteral("qt"),
-                                 QStringLiteral("_"),
-                                 QLibraryInfo::path(QLibraryInfo::TranslationsPath));
+    // "qt" is the umbrella catalog and ships only with a full Qt installation.
+    // Deployments that carry qtbase alone - the AppImage, the Flatpak runtime,
+    // distros that split Qt translations per module - have "qtbase" only, so
+    // fall back to it before giving up on Qt's own strings.
+    const auto qt_translations = QLibraryInfo::path(QLibraryInfo::TranslationsPath);
+
+    auto next_qt_translator = Box<QTranslator>::make();
+    auto next_qt_catalog    = QStringLiteral("qt");
+    bool next_qt_loaded =
+        next_qt_translator->load(locale, next_qt_catalog, QStringLiteral("_"), qt_translations);
+    if (! next_qt_loaded) {
+        next_qt_catalog = QStringLiteral("qtbase");
+        next_qt_loaded =
+            next_qt_translator->load(locale, next_qt_catalog, QStringLiteral("_"), qt_translations);
+    }
 
     auto       next_app_translator = Box<QTranslator>::make();
     const bool next_app_loaded     = next_app_translator->load(
@@ -210,7 +219,7 @@ auto UiLanguageController::applyLanguage(const QString& preference, bool persist
           qPrintable(m_preference),
           qPrintable(m_resolved_language),
           next_app_loaded ? "loaded" : "source",
-          next_qt_loaded ? "loaded" : "source");
+          next_qt_loaded ? qPrintable(next_qt_catalog) : "source");
     return true;
 }
 
