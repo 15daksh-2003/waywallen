@@ -506,14 +506,14 @@ MD.Page {
                     id: canvasActions
                     anchors.right: parent.right
                     anchors.top: parent.top
-                    width: createCanvasChip.implicitWidth + (canvasAlignmentActionToolBar.visible ? canvasAlignmentActionToolBar.implicitWidth + 6 : 0)
+                    width: createCanvasChip.implicitWidth + refreshDisplaysButton.implicitWidth + 6 + (canvasAlignmentActionToolBar.visible ? canvasAlignmentActionToolBar.implicitWidth + 6 : 0)
                     height: createCanvasChip.implicitHeight
                     z: 100
 
                     MD.ActionToolBar {
                         id: canvasAlignmentActionToolBar
 
-                        anchors.right: createCanvasChip.left
+                        anchors.right: refreshDisplaysButton.left
                         anchors.rightMargin: 6
                         anchors.verticalCenter: parent.verticalCenter
                         visible: canvasEditor.dirty
@@ -530,6 +530,23 @@ MD.Page {
                         }
                         moreDelegate: MD.SmallIconButton {
                             action: canvasAlignmentActionToolBar.moreAction
+                        }
+                    }
+
+                    MD.SmallIconButton {
+                        id: refreshDisplaysButton
+
+                        anchors.right: createCanvasChip.left
+                        anchors.rightMargin: 6
+                        anchors.verticalCenter: parent.verticalCenter
+                        icon.name: MD.Token.icon.refresh
+                        enabled: W.DaemonDBusClient.daemonAvailable
+                        hoverEnabled: true
+                        MD.ToolTip.text: qsTr("Refresh displays")
+                        MD.ToolTip.visible: hovered && !pressed
+                        onClicked: {
+                            if (!W.DaemonDBusClient.refreshDisplays())
+                                W.Global.toastError(qsTr("Failed to refresh displays"));
                         }
                     }
 

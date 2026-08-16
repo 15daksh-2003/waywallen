@@ -51,6 +51,8 @@ public:
     /// Connected}. Returns the freshly-read port (0 on failure).
     Q_INVOKABLE quint16 refreshWsPort();
 
+    Q_INVOKABLE bool refreshDisplays();
+
     /// Spawn the daemon as a detached child. Returns true on success.
     Q_INVOKABLE bool launchDaemon();
 

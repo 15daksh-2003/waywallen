@@ -187,6 +187,20 @@ quint16 DaemonDBusClient::refreshWsPort() {
     return m_ws_port;
 }
 
+bool DaemonDBusClient::refreshDisplays() {
+    if (! m_bus.isConnected() || m_status != Connected) return false;
+
+    QDBusMessage msg   = QDBusMessage::createMethodCall(QString::fromLatin1(kBusName),
+                                                        QString::fromLatin1(kObjectPath),
+                                                        QString::fromLatin1(kInterface),
+                                                        QStringLiteral("RefreshDisplays"));
+    QDBusMessage reply = m_bus.call(msg, QDBus::Block, 2000);
+    if (reply.type() == QDBusMessage::ReplyMessage) return true;
+
+    qWarning("DaemonDBusClient: RefreshDisplays failed: %s", qPrintable(reply.errorMessage()));
+    return false;
+}
+
 bool DaemonDBusClient::launchDaemon() {
     qDebug("DaemonDBusClient: launching daemon (QProcess::startDetached)");
     bool ok = QProcess::startDetached(QStringLiteral("waywallen"), {});

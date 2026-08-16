@@ -125,6 +125,15 @@ impl Daemon1 {
             .map_err(zbus::fdo::Error::from)
     }
 
+    async fn refresh_displays(
+        &self,
+        #[zbus(signal_context)] ctxt: SignalContext<'_>,
+    ) -> zbus::fdo::Result<()> {
+        log::info!("display refresh requested; emitting DBus Ready");
+        Self::ready(&ctxt).await?;
+        Ok(())
+    }
+
     async fn apply_by_id(&self, id: String) -> zbus::fdo::Result<String> {
         application::apply_wallpaper_by_id(&self.app, &id, application::ApplySource::UserWallpaper)
             .await
