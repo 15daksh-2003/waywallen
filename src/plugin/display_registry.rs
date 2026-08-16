@@ -52,6 +52,55 @@ fn default_priority() -> i32 {
     100
 }
 
+/// Display backends available without an installed manifest.
+pub fn builtin_display_defs() -> Vec<DisplayDef> {
+    let mut layer_shell_bin = PathBuf::from("waywallen-layer-shell");
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let candidate = parent.join("waywallen-layer-shell");
+            if candidate.exists() {
+                layer_shell_bin = candidate;
+            }
+        }
+    }
+
+    vec![
+        DisplayDef {
+            name: "kde-plasma".to_string(),
+            bin: PathBuf::new(),
+            de: vec!["kde".to_string()],
+            priority: 100,
+            requires: Vec::new(),
+            extra_args: Vec::new(),
+            spawn: SpawnMode::External,
+        },
+        DisplayDef {
+            name: "gnome-shell".to_string(),
+            bin: PathBuf::new(),
+            de: vec!["gnome".to_string()],
+            priority: 100,
+            requires: Vec::new(),
+            extra_args: Vec::new(),
+            spawn: SpawnMode::External,
+        },
+        DisplayDef {
+            name: "layer-shell".to_string(),
+            bin: layer_shell_bin,
+            de: vec![
+                "hyprland".to_string(),
+                "sway".to_string(),
+                "niri".to_string(),
+                "river".to_string(),
+                "cosmic".to_string(),
+            ],
+            priority: 50,
+            requires: vec!["wlr-layer-shell".to_string(), "linux-dmabuf-v4".to_string()],
+            extra_args: Vec::new(),
+            spawn: SpawnMode::Daemon,
+        },
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // Registry
 
@@ -64,6 +113,14 @@ pub struct DisplayRegistry {
 impl DisplayRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_builtins() -> Self {
+        let mut registry = Self::new();
+        for def in builtin_display_defs() {
+            registry.register(def);
+        }
+        registry
     }
 
     /// Scan a directory for `*.toml` display manifests and collect them.
@@ -125,10 +182,9 @@ impl DisplayRegistry {
     }
 }
 
-/// Build a registry by scanning the two canonical plugin paths:
-/// 1. `<exec>/../share/waywallen/displays/`   (bundled)
-pub fn build_default_registry() -> Result<DisplayRegistry> {
-    let mut registry = DisplayRegistry::new();
+/// Build the registry from built-ins, bundled manifests, then user manifests.
+pub fn build_default_registry() -> DisplayRegistry {
+    let mut registry = DisplayRegistry::with_builtins();
     for dir in crate::plugin::renderer_registry::standard_plugin_dirs("displays") {
         if dir.is_dir() {
             match DisplayRegistry::scan(&dir) {
@@ -141,5 +197,49 @@ pub fn build_default_registry() -> Result<DisplayRegistry> {
             }
         }
     }
-    Ok(registry)
+    registry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtins_are_registered_by_name() {
+        let registry = DisplayRegistry::with_builtins();
+
+        assert_eq!(
+            registry.find("kde-plasma").map(|def| def.spawn),
+            Some(SpawnMode::External)
+        );
+        assert_eq!(
+            registry.find("layer-shell").map(|def| def.spawn),
+            Some(SpawnMode::Daemon)
+        );
+        assert_eq!(
+            registry.find("gnome-shell").map(|def| def.spawn),
+            Some(SpawnMode::External)
+        );
+    }
+
+    #[test]
+    fn later_registration_overrides_builtin_by_name() {
+        let mut registry = DisplayRegistry::with_builtins();
+        let replacement = DisplayDef {
+            name: "layer-shell".to_string(),
+            bin: PathBuf::from("/custom/layer-shell"),
+            de: vec!["kde".to_string()],
+            priority: 200,
+            requires: Vec::new(),
+            extra_args: vec!["--custom".to_string()],
+            spawn: SpawnMode::Daemon,
+        };
+
+        registry.register(replacement);
+
+        let resolved = registry.find("layer-shell").expect("replacement");
+        assert_eq!(resolved.bin, PathBuf::from("/custom/layer-shell"));
+        assert_eq!(resolved.de, ["kde"]);
+        assert_eq!(resolved.extra_args, ["--custom"]);
+    }
 }

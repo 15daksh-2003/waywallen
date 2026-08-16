@@ -1,63 +1,53 @@
+use clap::{ArgAction, Parser};
 use std::path::PathBuf;
 
+#[derive(Debug, Parser)]
+#[command(name = "waywallen", version)]
 pub struct DaemonConfig {
+    #[arg(long, value_name = "PORT", default_value_t = 0)]
     pub ws_port: u16,
+
+    #[arg(long = "ui", value_name = "PATH")]
     pub ui_path: Option<PathBuf>,
+
+    #[arg(long)]
     pub no_ui: bool,
+
+    #[arg(long)]
     pub no_tray: bool,
+
+    #[arg(long = "plugin", value_name = "PATH")]
     pub plugin_dirs: Vec<PathBuf>,
+
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Display backend name [built-ins: kde-plasma, gnome-shell, layer-shell]"
+    )]
     pub display_backend: Option<String>,
+
+    #[arg(long)]
     pub no_display: bool,
+
+    #[arg(long = "no-restore", action = ArgAction::SetFalse)]
     pub restore_last: bool,
 }
 
 impl DaemonConfig {
     pub fn from_env() -> Self {
-        let mut config = Self {
-            ws_port: 0,
-            ui_path: None,
-            no_ui: false,
-            no_tray: false,
-            plugin_dirs: Vec::new(),
-            display_backend: None,
-            no_display: false,
-            restore_last: true,
-        };
+        Self::parse()
+    }
+}
 
-        let mut args = std::env::args().skip(1);
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--ws-port" => {
-                    let value = args.next().expect("--ws-port requires a value");
-                    config.ws_port = value
-                        .parse()
-                        .expect("--ws-port must be a valid port number");
-                }
-                "--display-backend" => {
-                    config.display_backend =
-                        Some(args.next().expect("--display-backend requires a name"));
-                }
-                "--no-display" => config.no_display = true,
-                "--ui" => {
-                    config.ui_path =
-                        Some(PathBuf::from(args.next().expect("--ui requires a path")));
-                }
-                "--no-ui" => config.no_ui = true,
-                "--no-tray" => config.no_tray = true,
-                "--plugin" => {
-                    config.plugin_dirs.push(PathBuf::from(
-                        args.next().expect("--plugin requires a path"),
-                    ));
-                }
-                "--no-restore" => config.restore_last = false,
-                other => {
-                    eprintln!("unknown argument: {other}");
-                    eprintln!("usage: waywallen [--ws-port PORT] [--ui PATH] [--no-ui] [--no-tray] [--plugin PATH]... [--display-backend NAME] [--no-display] [--no-restore]");
-                    std::process::exit(1);
-                }
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        config
+    #[test]
+    fn help_lists_builtin_display_backends() {
+        let error = DaemonConfig::try_parse_from(["waywallen", "--help"]).unwrap_err();
+        let help = error.to_string();
+
+        assert!(help.contains("kde-plasma, gnome-shell, layer-shell"));
     }
 }

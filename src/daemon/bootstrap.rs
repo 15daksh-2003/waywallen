@@ -26,8 +26,60 @@ fn resolve_ui_path(explicit: Option<PathBuf>) -> Option<PathBuf> {
     None
 }
 
+fn build_display_registry(plugin_dirs: &[PathBuf]) -> plugin::display_registry::DisplayRegistry {
+    let mut registry = plugin::display_registry::build_default_registry();
+    for plugin_dir in plugin_dirs {
+        let displays_dir = plugin_dir.join("displays");
+        if !displays_dir.is_dir() {
+            continue;
+        }
+        match plugin::display_registry::DisplayRegistry::scan(&displays_dir) {
+            Ok(scanned) => {
+                for def in scanned.all() {
+                    registry.register(def.clone());
+                }
+            }
+            Err(error) => log::warn!("scan {}: {error}", displays_dir.display()),
+        }
+    }
+    registry
+}
+
+fn select_display_backend(
+    registry: &plugin::display_registry::DisplayRegistry,
+    caps: &display::spawner::DeCaps,
+    requested: Option<&str>,
+) -> anyhow::Result<display::spawner::PickOutcome> {
+    let Some(name) = requested else {
+        return Ok(display::spawner::pick_backend(registry, caps));
+    };
+    let Some(def) = registry.find(name) else {
+        let available = registry
+            .all()
+            .iter()
+            .map(|def| def.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!("unknown display backend '{name}'; available backends: {available}");
+    };
+
+    log::info!("display backend pinned by --display-backend: {name}");
+    Ok(display::spawner::PickOutcome::Matched(def.clone()))
+}
+
 pub async fn run(cli: DaemonConfig) -> anyhow::Result<()> {
     let ui_bin: Option<PathBuf> = resolve_ui_path(cli.ui_path.clone());
+    let display_caps = display::spawner::detect_de();
+    let display_pick = if cli.no_display {
+        None
+    } else {
+        let registry = build_display_registry(&cli.plugin_dirs);
+        Some(select_display_backend(
+            &registry,
+            &display_caps,
+            cli.display_backend.as_deref(),
+        )?)
+    };
 
     // Single-instance gate.
     let handoff_ui = if cli.no_ui { None } else { ui_bin.as_deref() };
@@ -224,47 +276,13 @@ pub async fn run(cli: DaemonConfig) -> anyhow::Result<()> {
 
     // Start display infrastructure before work that may need a display.
     // This covers both UDS endpoint and daemon-managed backends.
-    let mut display_registry =
-        plugin::display_registry::build_default_registry().unwrap_or_else(|e| {
-            log::warn!("display registry init failed: {e:#}");
-            plugin::display_registry::DisplayRegistry::new()
-        });
-    for plugin_dir in &cli.plugin_dirs {
-        let displays_dir = plugin_dir.join("displays");
-        if displays_dir.is_dir() {
-            match plugin::display_registry::DisplayRegistry::scan(&displays_dir) {
-                Ok(scanned) => {
-                    for def in scanned.all() {
-                        display_registry.register(def.clone());
-                    }
-                }
-                Err(e) => log::warn!("scan {}: {e}", displays_dir.display()),
-            }
-        }
-    }
-    let display_caps = display::spawner::detect_de();
     let display_backend: Option<plugin::display_registry::DisplayDef> = if cli.no_display {
         log::info!("--no-display: skipping display backend selection");
         *state.display_backend_status.write().unwrap() =
             display::spawner::DisplayBackendStatus::disabled(&display_caps);
         None
     } else {
-        let pick = if let Some(name) = cli.display_backend.as_deref() {
-            match display_registry.find(name) {
-                Some(def) => {
-                    log::info!("display backend pinned by --display-backend: {name}");
-                    display::spawner::PickOutcome::Matched(def.clone())
-                }
-                None => {
-                    log::error!(
-                        "--display-backend {name} not found in registry; falling back to auto-detect"
-                    );
-                    display::spawner::pick_backend(&display_registry, &display_caps)
-                }
-            }
-        } else {
-            display::spawner::pick_backend(&display_registry, &display_caps)
-        };
+        let pick = display_pick.expect("display pick missing without --no-display");
         display::spawner::log_outcome(&pick, &display_caps);
         let should_spawn = display::spawner::should_daemon_spawn(&pick);
         let (status, backend) = match pick {
@@ -552,4 +570,80 @@ pub async fn run(cli: DaemonConfig) -> anyhow::Result<()> {
     }
 
     super::runtime::run_until_shutdown(state, ws_fut, dbus_conn).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_builtin_bypasses_desktop_auto_selection() {
+        let registry = plugin::display_registry::DisplayRegistry::with_builtins();
+        let caps = display::spawner::DeCaps {
+            xdg_desktop: vec!["kde".to_string()],
+            ..Default::default()
+        };
+
+        let selected = select_display_backend(&registry, &caps, Some("layer-shell")).unwrap();
+
+        match selected {
+            display::spawner::PickOutcome::Matched(def) => {
+                assert_eq!(def.name, "layer-shell");
+            }
+            other => panic!("expected explicitly matched layer-shell, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extra_manifest_overrides_builtin_before_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let displays = root.path().join("displays");
+        std::fs::create_dir(&displays).unwrap();
+        std::fs::write(
+            displays.join("layer-shell.toml"),
+            r#"
+[display]
+name = "layer-shell"
+bin = "custom-layer-shell"
+de = ["kde"]
+priority = 200
+spawn = "daemon"
+"#,
+        )
+        .unwrap();
+
+        let registry = build_display_registry(&[root.path().to_path_buf()]);
+        let selected = select_display_backend(
+            &registry,
+            &display::spawner::DeCaps::default(),
+            Some("layer-shell"),
+        )
+        .unwrap();
+
+        match selected {
+            display::spawner::PickOutcome::Matched(def) => {
+                assert_eq!(def.bin, displays.join("custom-layer-shell"));
+                assert_eq!(def.de, ["kde"]);
+                assert_eq!(def.priority, 200);
+            }
+            other => panic!("expected manifest override, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_explicit_backend_is_an_error_with_available_names() {
+        let registry = plugin::display_registry::DisplayRegistry::with_builtins();
+        let error = select_display_backend(
+            &registry,
+            &display::spawner::DeCaps::default(),
+            Some("missing"),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("unknown display backend 'missing'"));
+        assert!(error.contains("kde-plasma"));
+        assert!(error.contains("gnome-shell"));
+        assert!(error.contains("layer-shell"));
+    }
 }
