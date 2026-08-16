@@ -1042,7 +1042,7 @@ MD.Page {
 
                     // Free-text search → wallpaperQuery.searchText.
                     // SearchChip debounces internally so this fires
-                    // ~200ms after the user stops typing. Daemon-side
+                    // 1s after the user stops typing. Daemon-side
                     // the value becomes an extra `name CONTAINS`
                     // filter rule in its own group.
                     W.SearchChip {

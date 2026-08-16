@@ -10,7 +10,7 @@ import Qcm.Material as MD
 // Even an XS `MD.TextField` is 40px tall — too bulky next
 // to chip / button rows. This keeps the toolbar visually homogeneous.
 //
-// `textEdited` is emitted after a 200ms idle on the raw input, so
+// `textEdited` is emitted after a 1s idle on the raw input, so
 // consumers can connect it directly without their own debounce timer.
 Item {
     id: root
@@ -19,7 +19,7 @@ Item {
     property string placeholderText
     // Debounce window for the outward `textEdited` signal. Per-keystroke
     // input still updates `text` immediately for any direct binding.
-    property int debounceMs: 200
+    property int debounceMs: 1000
     signal textEdited()
 
     implicitHeight: 32
