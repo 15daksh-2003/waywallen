@@ -66,7 +66,7 @@ It started life as a Wallpaper Engine plugin for KDE.
 
 - [open-wallpaper-engine](https://github.com/waywallen/open-wallpaper-engine)
   - Scene support
-  - Web wallpaper support
+  - Web support
 
 > [!NOTE]
 > To install a third-party plugin, manually download its ZIP archive and install it from the plugins page in the UI.<br>
@@ -74,23 +74,21 @@ It started life as a Wallpaper Engine plugin for KDE.
 
 ## FAQ
 
-- How does hardware video decoding work?<br>
-  The default `auto` mode uses the following fallback order:
+- How does hardware video decoding work?  
+  The default `auto` mode uses the following fallback order:  
+  `vulkan -> vaapi -> sw`  
+  You can select the `hwdec` mode in the `waywallen-video` settings instead of using `auto`.  
 
-  `vulkan -> vaapi -> sw`
-
-  You can select the `hwdec` mode in the `waywallen-video` settings instead of using `auto`.
-
-  We do not plan to add a dedicated NVDEC backend.
-
+  We do not plan to add a dedicated NVDEC backend.  
   NVIDIA users should use [nvidia-vaapi-driver](https://github.com/elFarto/nvidia-vaapi-driver) to expose NVDEC through VA-API.
-- How to get logs?<br>
+
+- How to get logs?  
   First, stop the running Waywallen daemon.
   ```bash
   export RSTD_LOG=debug RUST_LOG=debug,zbus=warn
   ./waywallen
   ```
-- How to debug in Flatpak?
+- How to debug in Flatpak?  
   ```bash
   flatpak install org.waywallen.waywallen.Debug
   flatpak run --devel --command=bash org.waywallen.waywallen
