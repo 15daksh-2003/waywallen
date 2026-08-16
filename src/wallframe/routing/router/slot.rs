@@ -14,7 +14,6 @@ pub(super) enum RendererStartCause {
     AutoReplayResume,
     ManualStopResume,
     DisplayReconnect,
-    ProcessRestart,
 }
 
 impl RendererStartCause {
@@ -30,7 +29,6 @@ impl RendererStartCause {
             Self::AutoReplayResume => "auto-replay",
             Self::ManualStopResume => "manual-stop-resume",
             Self::DisplayReconnect => "display-reconnect",
-            Self::ProcessRestart => "process-restart",
         }
     }
 
@@ -209,7 +207,6 @@ pub(super) struct RendererSlot {
     pub name: String,
     pub spec_revision: u64,
     pub state: RendererLifecycleState,
-    pub restart_failures: u32,
     pub pending_start: Option<PendingRendererStart>,
     pub active_start_token: Option<u64>,
 }
@@ -224,7 +221,6 @@ impl RendererSlot {
                 generation: handle.process_generation,
                 activity: RendererActivity::Playing,
             },
-            restart_failures: 0,
             pending_start: None,
             active_start_token: None,
         }
@@ -242,7 +238,6 @@ impl RendererSlot {
                 keep: true,
                 last_exit: None,
             },
-            restart_failures: 0,
             pending_start: None,
             active_start_token: None,
         }
@@ -257,7 +252,6 @@ impl RendererSlot {
         self.spawn_request = spawn_request;
         self.name = name;
         self.spec_revision = self.spec_revision.wrapping_add(1).max(1);
-        self.restart_failures = 0;
         let _ = self.transition(RendererLifecycleEvent::SpecReplaced { reactivate_failed });
     }
 
@@ -425,7 +419,6 @@ mod tests {
             name: "image".into(),
             spec_revision: 1,
             state,
-            restart_failures: 0,
             pending_start: None,
             active_start_token: None,
         }

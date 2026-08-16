@@ -108,6 +108,21 @@ fn renderer_exit_status(status: &ExitStatus) -> String {
     description
 }
 
+fn renderer_was_force_killed(status: Option<&ExitStatus>, force_requested: bool) -> bool {
+    force_requested
+        && status.is_none_or(|status| {
+            status
+                .signal()
+                .is_some_and(|signal| signal == libc::SIGKILL)
+        })
+}
+
+fn renderer_exit_failed(status: Option<&ExitStatus>) -> bool {
+    status.is_some_and(|status| {
+        status.signal().is_some() || status.code().is_some_and(|code| code != 0)
+    })
+}
+
 async fn failed_renderer_process_status(child: &mut Child) -> String {
     match tokio::time::timeout(RENDERER_FAILED_EXIT_GRACE, child.wait()).await {
         Ok(Ok(status)) => format!("process_status={}", renderer_exit_status(&status)),
@@ -1437,26 +1452,29 @@ impl RendererManager {
 
         let mut child_guard = handle.child.lock().await;
         let mut exit = None;
-        let mut killed = false;
+        let mut force_kill_requested = false;
+        let mut wait_error = None;
         if let Some(mut child) = child_guard.take() {
             exit = child.try_wait().ok().flatten();
             if exit.is_none() {
-                killed = true;
-                let _ = child.start_kill();
-                exit = tokio::time::timeout(Duration::from_secs(2), child.wait())
-                    .await
-                    .ok()
-                    .and_then(std::result::Result::ok);
+                match tokio::time::timeout(RENDERER_FAILED_EXIT_GRACE, child.wait()).await {
+                    Ok(Ok(status)) => exit = Some(status),
+                    Ok(Err(error)) => wait_error = Some(error.to_string()),
+                    Err(_) => {
+                        force_kill_requested = child.start_kill().is_ok();
+                        exit = tokio::time::timeout(Duration::from_secs(2), child.wait())
+                            .await
+                            .ok()
+                            .and_then(std::result::Result::ok);
+                    }
+                }
             }
         }
+        let force_killed = renderer_was_force_killed(exit.as_ref(), force_kill_requested);
         let event = RendererProcessExit {
             renderer_id: id.to_string(),
             process_generation,
-            kind: if killed
-                || exit
-                    .as_ref()
-                    .is_some_and(|status| status.signal().is_some())
-            {
+            kind: if force_killed {
                 RendererProcessExitKind::Killed
             } else {
                 RendererProcessExitKind::Failed
@@ -1464,8 +1482,10 @@ impl RendererManager {
             code: exit.as_ref().and_then(ExitStatus::code),
             signal: exit.as_ref().and_then(ExitStatusExt::signal),
             reason: exit.as_ref().map(renderer_exit_status).unwrap_or_else(|| {
-                if killed {
+                if force_killed {
                     "renderer IPC closed; process was killed".to_string()
+                } else if let Some(error) = wait_error {
+                    format!("renderer IPC closed; wait failed: {error}")
                 } else {
                     "renderer IPC closed".to_string()
                 }
@@ -1537,8 +1557,7 @@ impl RendererManager {
                 }
                 Ok(Err(error)) => {
                     wait_error = Some(error.to_string());
-                    let _ = child.start_kill();
-                    forced = true;
+                    forced = child.start_kill().is_ok();
                     exit = tokio::time::timeout(Duration::from_secs(1), child.wait())
                         .await
                         .ok()
@@ -1546,8 +1565,7 @@ impl RendererManager {
                 }
                 Err(_) => {
                     log::warn!("renderer {id}: Shutdown timeout (5s), escalating to SIGKILL");
-                    let _ = child.start_kill();
-                    forced = true;
+                    forced = child.start_kill().is_ok();
                     exit = tokio::time::timeout(Duration::from_secs(1), child.wait())
                         .await
                         .ok()
@@ -1555,35 +1573,31 @@ impl RendererManager {
                 }
             }
         }
+        let force_killed = renderer_was_force_killed(exit.as_ref(), forced);
         Ok(RendererProcessExit {
             renderer_id: id.to_string(),
             process_generation: handle.process_generation,
-            kind: if forced
-                || exit
-                    .as_ref()
-                    .is_some_and(|status| status.signal().is_some())
-            {
+            kind: if force_killed {
                 RendererProcessExitKind::Killed
-            } else if exit
-                .as_ref()
-                .is_some_and(|status| status.code().is_some_and(|code| code != 0))
-                || wait_error.is_some()
-            {
+            } else if renderer_exit_failed(exit.as_ref()) || wait_error.is_some() {
                 RendererProcessExitKind::Failed
             } else {
                 RendererProcessExitKind::Stopped
             },
             code: exit.as_ref().and_then(ExitStatus::code),
             signal: exit.as_ref().and_then(ExitStatusExt::signal),
-            reason: if forced {
+            reason: if force_killed {
                 wait_error.map_or_else(
                     || "renderer did not exit after Shutdown and was killed".to_string(),
                     |error| format!("wait after Shutdown failed: {error}; renderer was killed"),
                 )
             } else {
-                exit.as_ref()
-                    .map(renderer_exit_status)
-                    .unwrap_or_else(|| "renderer stopped".to_string())
+                exit.as_ref().map(renderer_exit_status).unwrap_or_else(|| {
+                    wait_error.map_or_else(
+                        || "renderer stopped".to_string(),
+                        |error| format!("wait after Shutdown failed: {error}"),
+                    )
+                })
             },
         })
     }
@@ -1774,6 +1788,23 @@ mod subscription_tests {
         let message = renderer_exit_status(&status);
         assert!(message.contains("signal: 11"), "{message}");
         assert!(!message.contains("possible"), "{message}");
+    }
+
+    #[test]
+    fn renderer_signal_exit_is_not_force_killed() {
+        let segfault = ExitStatus::from_raw(libc::SIGSEGV);
+        let external_sigkill = ExitStatus::from_raw(libc::SIGKILL);
+
+        assert!(!renderer_was_force_killed(Some(&segfault), true));
+        assert!(!renderer_was_force_killed(Some(&external_sigkill), false));
+        assert!(renderer_exit_failed(Some(&segfault)));
+        assert!(renderer_exit_failed(Some(&external_sigkill)));
+    }
+
+    #[test]
+    fn daemon_sigkill_is_force_killed() {
+        let status = ExitStatus::from_raw(libc::SIGKILL);
+        assert!(renderer_was_force_killed(Some(&status), true));
     }
 
     #[tokio::test]

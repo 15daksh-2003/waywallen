@@ -18,7 +18,6 @@ const RESUME_RETRY_MAX: Duration = Duration::from_secs(10);
 const RUNTIME_WAITING_SOFT: Duration = Duration::from_secs(2);
 const RUNTIME_PROGRESS_HARD: Duration = Duration::from_secs(10);
 const RUNTIME_HEALTH_POLL: Duration = Duration::from_millis(500);
-const PROCESS_RESTART_MAX_FAILURES: u32 = 5;
 
 use crate::catalog::properties::WallpaperLayoutOverride;
 use crate::plugin::renderer_registry::RendererActivityMode;
@@ -2973,10 +2972,7 @@ impl Router {
         seq: u64,
         release_point: u64,
     ) {
-        let mut inner = self.inner.lock().await;
-        if let Some(slot) = inner.renderer_slots.get_mut(renderer_id) {
-            slot.restart_failures = 0;
-        }
+        let inner = self.inner.lock().await;
         let Some(renderer) = inner.table.get_renderer(renderer_id) else {
             return;
         };
@@ -3984,8 +3980,8 @@ mod tests {
         ));
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn killed_renderer_restart_uses_the_shared_deadline_scheduler() {
+    #[tokio::test]
+    async fn killed_renderer_is_retained_without_restart() {
         let mgr = Arc::new(RendererManager::new_default());
         let router = Router::new(mgr.clone());
         let renderer = RendererHandle::test_stub("r1", "image");
@@ -3996,31 +3992,13 @@ mod tests {
         let mut exit = mgr.stop("r1").await.unwrap();
         exit.kind = crate::wallframe::renderer_manager::RendererProcessExitKind::Killed;
         router.on_renderer_process_exit(exit).await;
-        let pending = router
-            .inner
-            .lock()
-            .await
-            .renderer_slots
-            .get("r1")
-            .unwrap()
-            .pending_start
-            .unwrap();
-        assert_eq!(pending.cause, RendererStartCause::ProcessRestart);
-
-        tokio::time::advance(Duration::from_millis(99)).await;
-        tokio::task::yield_now().await;
+        let inner = router.inner.lock().await;
+        let slot = inner.renderer_slots.get("r1").unwrap();
         assert!(matches!(
-            router.snapshot_renderer("r1").await.unwrap().state,
+            slot.state,
             RendererLifecycleState::Killed { keep: true, .. }
         ));
-        tokio::time::advance(Duration::from_millis(1)).await;
-        for _ in 0..4 {
-            tokio::task::yield_now().await;
-        }
-        assert!(matches!(
-            router.snapshot_renderer("r1").await.unwrap().state,
-            RendererLifecycleState::Failed { .. }
-        ));
+        assert!(slot.pending_start.is_none());
     }
 
     #[tokio::test]

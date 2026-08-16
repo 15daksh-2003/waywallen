@@ -469,29 +469,10 @@ impl Router {
                     return Ok(());
                 };
                 let existing = slot_snapshot.pending_start;
-                let restart_failures = slot_snapshot.restart_failures;
-                if cause == RendererStartCause::ProcessRestart
-                    && existing
-                        .is_some_and(|pending| pending.cause == RendererStartCause::ProcessRestart)
                 {
-                    existing
-                } else if cause == RendererStartCause::ProcessRestart
-                    && restart_failures >= PROCESS_RESTART_MAX_FAILURES
-                {
-                    if let Some(slot) = inner.renderer_slots.get_mut(renderer_id) {
-                        slot.pending_start = None;
-                    }
-                    log::warn!(
-                        "renderer {renderer_id}: restart limit {PROCESS_RESTART_MAX_FAILURES} reached"
-                    );
-                    None
-                } else {
-                    let mut next_cause = cause;
-                    let mut not_before = match cause {
+                    let next_cause = cause;
+                    let not_before = match cause {
                         RendererStartCause::AutoReplayResume => now + AUTO_REPLAY_START_DELAY,
-                        RendererStartCause::ProcessRestart => {
-                            now + resume_retry_delay(restart_failures.saturating_add(1))
-                        }
                         _ => now,
                     };
                     if let Some(current) = existing {
@@ -500,10 +481,6 @@ impl Router {
                                 (
                                     RendererStartCause::AutoReplayResume,
                                     RendererStartCause::AutoReplayResume,
-                                )
-                                | (
-                                    RendererStartCause::ProcessRestart,
-                                    RendererStartCause::ProcessRestart,
                                 ) => {
                                     log::debug!(
                                         "renderer {renderer_id}: keep pending start cause={} token={}",
@@ -511,11 +488,6 @@ impl Router {
                                         current.token
                                     );
                                     return Ok(());
-                                }
-                                (RendererStartCause::ProcessRestart, _)
-                                | (_, RendererStartCause::ProcessRestart) => {
-                                    next_cause = RendererStartCause::ProcessRestart;
-                                    not_before = not_before.max(current.not_before);
                                 }
                                 _ => {
                                     log::debug!(
@@ -527,11 +499,6 @@ impl Router {
                                     return Ok(());
                                 }
                             }
-                        }
-                    }
-                    if cause == RendererStartCause::ProcessRestart {
-                        if let Some(slot) = inner.renderer_slots.get_mut(renderer_id) {
-                            slot.restart_failures = slot.restart_failures.saturating_add(1);
                         }
                     }
                     inner.next_start_token = inner
@@ -787,28 +754,16 @@ impl Router {
     }
 
     pub(super) async fn resume_renderer_after_exit(self: &Arc<Self>, renderer_id: &str) {
-        let state = {
+        let pending = {
             let inner = self.inner.lock().await;
             let Some(slot) = inner.renderer_slots.get(renderer_id) else {
                 return;
             };
-            (slot.state.clone(), slot.pending_start)
+            slot.pending_start
         };
-        if let Some(pending) = state.1 {
-            if matches!(state.0, RendererLifecycleState::Killed { keep: true, .. })
-                && pending.cause != RendererStartCause::ProcessRestart
-            {
-                let _ = self
-                    .request_renderer_start(renderer_id, RendererStartCause::ProcessRestart)
-                    .await;
-            } else {
-                let _ = self
-                    .advance_renderer_start(renderer_id, pending.token)
-                    .await;
-            }
-        } else if matches!(state.0, RendererLifecycleState::Killed { keep: true, .. }) {
+        if let Some(pending) = pending {
             let _ = self
-                .request_renderer_start(renderer_id, RendererStartCause::ProcessRestart)
+                .advance_renderer_start(renderer_id, pending.token)
                 .await;
         }
     }
