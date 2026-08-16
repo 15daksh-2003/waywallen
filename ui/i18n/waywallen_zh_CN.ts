@@ -134,10 +134,6 @@
         <translation>退出</translation>
     </message>
     <message>
-        <source>Assigned</source>
-        <translation>已分配</translation>
-    </message>
-    <message>
         <source>Restart</source>
         <translation>重启</translation>
     </message>
@@ -267,8 +263,8 @@
         <translation>没有已注册的显示器</translation>
     </message>
     <message>
-        <source>Display %1</source>
-        <translation>显示器 %1</translation>
+        <source>Display #%1</source>
+        <translation>显示器 #%1</translation>
     </message>
     <message>
         <source>Edit display</source>
@@ -289,6 +285,10 @@
     <message>
         <source>Connected</source>
         <translation>已连接</translation>
+    </message>
+    <message>
+        <source>Assigned</source>
+        <translation>已分配</translation>
     </message>
     <message numerus="yes">
         <source>%n min left</source>
@@ -455,6 +455,17 @@
     </message>
 </context>
 <context>
+    <name>PagePopup</name>
+    <message>
+        <source>Failed to open page</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Failed to load page</source>
+        <translation type="unfinished"></translation>
+    </message>
+</context>
+<context>
     <name>PlaylistDetailPanel</name>
     <message>
         <source>Name</source>
@@ -490,6 +501,10 @@
     <message>
         <source>Playlists</source>
         <translation>播放列表</translation>
+    </message>
+    <message>
+        <source>Shared</source>
+        <translation type="unfinished"></translation>
     </message>
     <message>
         <source>No displays</source>
@@ -1152,6 +1167,14 @@ Related display: #%1</source>
         <translation>登录时启动</translation>
     </message>
     <message>
+        <source>Hide tray icon</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Remove the status-bar icon. Reopen this window by launching Waywallen again.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
         <source>Allow duplicate renderers</source>
         <translation>允许重复渲染器</translation>
     </message>
@@ -1340,10 +1363,6 @@ Unsaved frame state may be lost.</source>
     <message>
         <source>No renderers</source>
         <translation>没有渲染器</translation>
-    </message>
-    <message>
-        <source>Exit</source>
-        <translation>退出</translation>
     </message>
     <message>
         <source>Components</source>
@@ -1604,10 +1623,6 @@ Unsaved frame state may be lost.</source>
         <translation>全部</translation>
     </message>
     <message>
-        <source>Display %1</source>
-        <translation>显示器 %1</translation>
-    </message>
-    <message>
         <source>Renderer</source>
         <translation>渲染器</translation>
     </message>
@@ -1850,8 +1865,8 @@ Unsaved frame state may be lost.</source>
         <translation>显示器</translation>
     </message>
     <message>
-        <source>Display %1</source>
-        <translation>显示器 %1</translation>
+        <source>Display #%1</source>
+        <translation>显示器 #%1</translation>
     </message>
     <message>
         <source>Added to playlist</source>

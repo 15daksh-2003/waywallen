@@ -136,10 +136,6 @@
         <translation>Выход</translation>
     </message>
     <message>
-        <source>Assigned</source>
-        <translation>Назначено</translation>
-    </message>
-    <message>
         <source>Restart</source>
         <translation>Перезапустить</translation>
     </message>
@@ -269,8 +265,8 @@
         <translation>Мониторы не зарегистрированы</translation>
     </message>
     <message>
-        <source>Display %1</source>
-        <translation>Монитор %1</translation>
+        <source>Display #%1</source>
+        <translation>Монитор #%1</translation>
     </message>
     <message>
         <source>Edit display</source>
@@ -291,6 +287,10 @@
     <message>
         <source>Connected</source>
         <translation>Подключено</translation>
+    </message>
+    <message>
+        <source>Assigned</source>
+        <translation>Назначено</translation>
     </message>
     <message numerus="yes">
         <source>%n min left</source>
@@ -459,6 +459,17 @@
     </message>
 </context>
 <context>
+    <name>PagePopup</name>
+    <message>
+        <source>Failed to open page</source>
+        <translation>Не удалось открыть страницу</translation>
+    </message>
+    <message>
+        <source>Failed to load page</source>
+        <translation>Не удалось загрузить страницу</translation>
+    </message>
+</context>
+<context>
     <name>PlaylistDetailPanel</name>
     <message>
         <source>Name</source>
@@ -494,6 +505,10 @@
     <message>
         <source>Playlists</source>
         <translation>Плейлисты</translation>
+    </message>
+    <message>
+        <source>Shared</source>
+        <translation>Общий</translation>
     </message>
     <message>
         <source>No displays</source>
@@ -1158,6 +1173,14 @@ Related display: #%1</source>
         <translation>Запускать при входе в систему</translation>
     </message>
     <message>
+        <source>Hide tray icon</source>
+        <translation>Скрыть значок в системном лотке</translation>
+    </message>
+    <message>
+        <source>Remove the status-bar icon. Reopen this window by launching Waywallen again.</source>
+        <translation>Убрать значок из системного лотка. Чтобы снова открыть это окно, запустите Waywallen ещё раз.</translation>
+    </message>
+    <message>
         <source>Allow duplicate renderers</source>
         <translation>Разрешить дублирование рендереров</translation>
     </message>
@@ -1346,10 +1369,6 @@ Unsaved frame state may be lost.</source>
     <message>
         <source>No renderers</source>
         <translation>Рендереров нет</translation>
-    </message>
-    <message>
-        <source>Exit</source>
-        <translation>Выход</translation>
     </message>
     <message>
         <source>Components</source>
@@ -1610,10 +1629,6 @@ Unsaved frame state may be lost.</source>
         <translation>Ко всем</translation>
     </message>
     <message>
-        <source>Display %1</source>
-        <translation>Монитор %1</translation>
-    </message>
-    <message>
         <source>Renderer</source>
         <translation>Рендерер</translation>
     </message>
@@ -1858,8 +1873,8 @@ Unsaved frame state may be lost.</source>
         <translation>Монитор</translation>
     </message>
     <message>
-        <source>Display %1</source>
-        <translation>Монитор %1</translation>
+        <source>Display #%1</source>
+        <translation>Монитор #%1</translation>
     </message>
     <message>
         <source>Added to playlist</source>
