@@ -79,22 +79,6 @@
 <context>
     <name>CanvasDialog</name>
     <message>
-        <source>Stretch</source>
-        <translation>拉伸</translation>
-    </message>
-    <message>
-        <source>Fit</source>
-        <translation>适应</translation>
-    </message>
-    <message>
-        <source>Crop</source>
-        <translation>裁剪</translation>
-    </message>
-    <message>
-        <source>Center</source>
-        <translation>居中</translation>
-    </message>
-    <message>
         <source>Edit canvas</source>
         <translation>编辑画布</translation>
     </message>
@@ -105,78 +89,6 @@
     <message>
         <source>Canvas name</source>
         <translation>画布名称</translation>
-    </message>
-    <message>
-        <source>Delete canvas</source>
-        <translation>删除画布</translation>
-    </message>
-    <message>
-        <source>Canvas coordinates only control wallpaper composition. Displays with the same identity share one rectangle and overlap.</source>
-        <translation>画布坐标仅控制壁纸组合。具有相同标识的显示器共用同一个矩形并重叠显示。</translation>
-    </message>
-    <message>
-        <source>Empty canvas</source>
-        <translation>空画布</translation>
-    </message>
-    <message>
-        <source>%1 overlapping displays</source>
-        <translation>%1 个重叠显示器</translation>
-    </message>
-    <message>
-        <source>Online</source>
-        <translation>在线</translation>
-    </message>
-    <message>
-        <source>Offline</source>
-        <translation>离线</translation>
-    </message>
-    <message>
-        <source>Add %1</source>
-        <translation>添加 %1</translation>
-    </message>
-    <message>
-        <source>X</source>
-        <translation>X</translation>
-    </message>
-    <message>
-        <source>Y</source>
-        <translation>Y</translation>
-    </message>
-    <message>
-        <source>Width</source>
-        <translation>宽度</translation>
-    </message>
-    <message>
-        <source>Height</source>
-        <translation>高度</translation>
-    </message>
-    <message>
-        <source>Remove member</source>
-        <translation>移除成员</translation>
-    </message>
-    <message>
-        <source>Custom wallpaper layout</source>
-        <translation>自定义壁纸布局</translation>
-    </message>
-    <message>
-        <source>Apply fill, position, and rotation to the complete canvas.</source>
-        <translation>对整个画布应用填充、位置和旋转。</translation>
-    </message>
-    <message>
-        <source>Horizontal %</source>
-        <translation>水平位置 %</translation>
-    </message>
-    <message>
-        <source>Vertical %</source>
-        <translation>垂直位置 %</translation>
-    </message>
-    <message>
-        <source>Delete canvas?</source>
-        <translation>删除画布？</translation>
-    </message>
-    <message>
-        <source>The canvas layout will be removed. Its displays become independent again.</source>
-        <translation>画布布局将被删除，其中的显示器会重新变为独立显示器。</translation>
     </message>
 </context>
 <context>
@@ -362,24 +274,60 @@
         <translation>居中</translation>
     </message>
     <message>
+        <source>Reset</source>
+        <translation>重置</translation>
+    </message>
+    <message>
+        <source>Apply</source>
+        <translation>应用</translation>
+    </message>
+    <message>
+        <source>Delete canvas?</source>
+        <translation>删除画布？</translation>
+    </message>
+    <message>
+        <source>The canvas layout will be removed. Its displays become independent again.</source>
+        <translation>画布布局将被删除，其中的显示器会重新变为独立显示器。</translation>
+    </message>
+    <message>
+        <source>Refresh displays</source>
+        <translation>刷新显示器</translation>
+    </message>
+    <message>
+        <source>Failed to refresh displays</source>
+        <translation>刷新显示器失败</translation>
+    </message>
+    <message>
         <source>No displays registered</source>
         <translation>没有已注册的显示器</translation>
-    </message>
-    <message>
-        <source>Surface: %1 × %2</source>
-        <translation>表面尺寸：%1 × %2</translation>
-    </message>
-    <message>
-        <source>Settings key: %1</source>
-        <translation>设置键：%1</translation>
     </message>
     <message>
         <source>Display #%1</source>
         <translation>显示器 #%1</translation>
     </message>
     <message>
+        <source>Empty canvas</source>
+        <translation>空画布</translation>
+    </message>
+    <message>
+        <source>%1 overlapping displays</source>
+        <translation>%1 个重叠显示器</translation>
+    </message>
+    <message>
+        <source>Offline</source>
+        <translation>离线</translation>
+    </message>
+    <message>
         <source>Edit display</source>
         <translation>编辑显示器</translation>
+    </message>
+    <message>
+        <source>Edit canvas</source>
+        <translation>编辑画布</translation>
+    </message>
+    <message>
+        <source>Delete canvas</source>
+        <translation>删除画布</translation>
     </message>
     <message>
         <source>ID:</source>
@@ -390,20 +338,24 @@
         <translation>大小：</translation>
     </message>
     <message>
+        <source>Empty</source>
+        <translation>空</translation>
+    </message>
+    <message>
+        <source>Members:</source>
+        <translation>成员：</translation>
+    </message>
+    <message>
+        <source>%1 total, %2 online</source>
+        <translation>共 %1 个，%2 个在线</translation>
+    </message>
+    <message>
         <source>Refresh:</source>
         <translation>刷新率：</translation>
     </message>
     <message>
         <source>Canvas update failed</source>
         <translation>画布更新失败</translation>
-    </message>
-    <message>
-        <source>empty</source>
-        <translation>空</translation>
-    </message>
-    <message>
-        <source>%1/%2 online</source>
-        <translation>%1/%2 在线</translation>
     </message>
     <message>
         <source>Unnamed canvas</source>
@@ -416,18 +368,6 @@
     <message>
         <source>Canvas %1</source>
         <translation>画布 %1</translation>
-    </message>
-    <message>
-        <source>Canvas: %1</source>
-        <translation>画布：%1</translation>
-    </message>
-    <message>
-        <source>Independent display</source>
-        <translation>独立显示器</translation>
-    </message>
-    <message>
-        <source>Name-based identity may change after rename or reconnect.</source>
-        <translation>基于名称的标识可能会在重命名或重新连接后变化。</translation>
     </message>
     <message>
         <source>Canvas area:</source>
@@ -628,11 +568,11 @@
     <name>PagePopup</name>
     <message>
         <source>Failed to open page</source>
-        <translation type="unfinished"></translation>
+        <translation>打开页面失败</translation>
     </message>
     <message>
         <source>Failed to load page</source>
-        <translation type="unfinished"></translation>
+        <translation>加载页面失败</translation>
     </message>
 </context>
 <context>
@@ -674,7 +614,7 @@
     </message>
     <message>
         <source>Shared</source>
-        <translation type="unfinished"></translation>
+        <translation>共享</translation>
     </message>
     <message>
         <source>No displays</source>
@@ -1338,11 +1278,11 @@ Related display: #%1</source>
     </message>
     <message>
         <source>Hide tray icon</source>
-        <translation type="unfinished"></translation>
+        <translation>隐藏托盘图标</translation>
     </message>
     <message>
         <source>Remove the status-bar icon. Reopen this window by launching Waywallen again.</source>
-        <translation type="unfinished"></translation>
+        <translation>移除状态栏图标。再次启动 Waywallen 即可重新打开此窗口。</translation>
     </message>
     <message>
         <source>Allow duplicate renderers</source>
@@ -1717,6 +1657,10 @@ Unsaved frame state may be lost.</source>
         <translation>信息</translation>
     </message>
     <message>
+        <source>Open web page</source>
+        <translation>打开网页</translation>
+    </message>
+    <message>
         <source>Open containing folder</source>
         <translation>打开所在文件夹</translation>
     </message>
@@ -1793,12 +1737,8 @@ Unsaved frame state may be lost.</source>
         <translation>全部</translation>
     </message>
     <message>
-        <source>%1 canvas</source>
-        <translation>%1 画布</translation>
-    </message>
-    <message>
-        <source>Unnamed</source>
-        <translation>未命名</translation>
+        <source>Unnamed canvas</source>
+        <translation>未命名画布</translation>
     </message>
     <message>
         <source>%1 of %2 members online</source>
@@ -2043,12 +1983,8 @@ Unsaved frame state may be lost.</source>
         <translation>最后修改时间</translation>
     </message>
     <message>
-        <source>%1 canvas</source>
-        <translation>%1 画布</translation>
-    </message>
-    <message>
-        <source>Unnamed</source>
-        <translation>未命名</translation>
+        <source>Unnamed canvas</source>
+        <translation>未命名画布</translation>
     </message>
     <message>
         <source>Display</source>

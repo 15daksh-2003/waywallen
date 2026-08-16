@@ -2,19 +2,20 @@
   <description>
     <p>Added:</p>
     <ul>
-      <li>Display canvases can compose wallpapers across multiple outputs.</li>
+      <li>Canvases with compose wallpapers across multiple outputs.</li>
       <li>Displays can request a fresh frame from active renderers.</li>
-      <li>Wallpaper details can open their remote source page.</li>
+      <li>Open remote link in Wallpaper details page.</li>
     </ul>
     <p>Fixes:</p>
     <ul>
       <li>Automatic display backends are selected correctly.</li>
-      <li>Renderer initialization times out cleanly, and externally killed renderers are classified correctly.</li>
+      <li>Renderer init signal times out.</li>
       <li>Qt strings fall back to the qtbase catalog. #200 by @wehrwolfmann</li>
     </ul>
     <p>Improved:</p>
     <ul>
-      <li>Remote filters show compact choices inline, and search input uses a one-second debounce.</li>
+      <li>Remote filters show compact choices inline.</li>
+      <li>Search input uses 1s debounce.</li>
       <li>GPU names include resolved vendor and device names.</li>
       <li>Russian translations are refreshed. #199 by @wehrwolfmann</li>
     </ul>
