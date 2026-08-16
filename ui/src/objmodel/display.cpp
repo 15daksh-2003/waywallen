@@ -89,11 +89,22 @@ auto Display::playlistStatusFromPb(const proto::PlaylistDisplayStatus* status) -
     return m;
 }
 
+auto Display::canvasRectFromPb(const proto::CanvasRect& rect) -> QVariantMap {
+    QVariantMap out;
+    out[u"x"_s]      = rect.x();
+    out[u"y"_s]      = rect.y();
+    out[u"width"_s]  = rect.width();
+    out[u"height"_s] = rect.height();
+    return out;
+}
+
 Display::Display(const proto::DisplayInfo& info, QObject* parent)
     : QObject(parent),
       m_id(info.displayId()),
       m_name(info.name()),
       m_alias(info.alias()),
+      m_instance_id(info.instanceId()),
+      m_settings_key(info.settingsKey()),
       m_width(info.width()),
       m_height(info.height()),
       m_refresh_mhz(info.refreshMhz()),
@@ -104,7 +115,11 @@ Display::Display(const proto::DisplayInfo& info, QObject* parent)
       m_layout_override(layoutOverrideFromPb(info)),
       m_drm_render_major(info.drmRenderMajor()),
       m_drm_render_minor(info.drmRenderMinor()),
-      m_runtime_conditions(runtimeConditionsFromPb(info.conditions())) {}
+      m_runtime_conditions(runtimeConditionsFromPb(info.conditions())),
+      m_canvas_id(info.canvasId()),
+      m_canvas_rect(info.hasCanvasRect() ? canvasRectFromPb(info.canvasRect()) : QVariantMap {}),
+      m_canvas_overlap_count(info.canvasOverlapCount()),
+      m_selectable_target(info.selectableTarget()) {}
 
 void Display::updateFrom(const proto::DisplayInfo& info) {
     rstd_assert(info.displayId() == m_id, "Display::updateFrom id mismatch");
@@ -121,6 +136,11 @@ void Display::updateFrom(const proto::DisplayInfo& info) {
         label_changed = true;
     }
     if (label_changed) Q_EMIT displayLabelChanged();
+    if (m_instance_id != info.instanceId() || m_settings_key != info.settingsKey()) {
+        m_instance_id  = info.instanceId();
+        m_settings_key = info.settingsKey();
+        Q_EMIT identityChanged();
+    }
     bool size_changed = false;
     if (m_width != info.width()) {
         m_width      = info.width();
@@ -157,6 +177,16 @@ void Display::updateFrom(const proto::DisplayInfo& info) {
         m_runtime_conditions = std::move(conditions);
         Q_EMIT runtimeConditionsChanged();
     }
+    auto canvas_rect = info.hasCanvasRect() ? canvasRectFromPb(info.canvasRect()) : QVariantMap {};
+    if (m_canvas_id != info.canvasId() || m_canvas_rect != canvas_rect ||
+        m_canvas_overlap_count != info.canvasOverlapCount() ||
+        m_selectable_target != info.selectableTarget()) {
+        m_canvas_id            = info.canvasId();
+        m_canvas_rect          = std::move(canvas_rect);
+        m_canvas_overlap_count = info.canvasOverlapCount();
+        m_selectable_target    = info.selectableTarget();
+        Q_EMIT canvasChanged();
+    }
 }
 
 void Display::updatePlaylistStatus(const proto::PlaylistDisplayStatus* status) {
@@ -166,6 +196,138 @@ void Display::updatePlaylistStatus(const proto::PlaylistDisplayStatus* status) {
     m_active_playlist_id = new_active;
     m_playlist_status    = std::move(new_status);
     Q_EMIT playlistStatusChanged();
+}
+
+// ---------------------------------------------------------------------------
+// Canvas
+// ---------------------------------------------------------------------------
+
+auto Canvas::rectFromPb(const proto::CanvasRect& rect) -> QVariantMap {
+    QVariantMap out;
+    out[u"x"_s]      = rect.x();
+    out[u"y"_s]      = rect.y();
+    out[u"width"_s]  = rect.width();
+    out[u"height"_s] = rect.height();
+    return out;
+}
+
+auto Canvas::membersFromPb(const proto::CanvasInfo& info) -> QVariantList {
+    QVariantList out;
+    out.reserve(info.members().size());
+    for (const auto& member : info.members()) {
+        QVariantMap row;
+        row[u"settingsKey"_s] = member.settingsKey();
+        row[u"rect"_s]        = member.hasRect() ? rectFromPb(member.rect()) : QVariantMap {};
+        QVariantList display_ids;
+        display_ids.reserve(member.displayIds().size());
+        for (const auto display_id : member.displayIds()) {
+            display_ids.append(QVariant::fromValue<quint64>(display_id));
+        }
+        row[u"displayIds"_s]  = display_ids;
+        row[u"onlineCount"_s] = display_ids.size();
+        row[u"overlap"_s]     = display_ids.size() > 1;
+        out.append(row);
+    }
+    return out;
+}
+
+auto Canvas::layoutOverrideFromPb(const proto::CanvasInfo& info) -> QVariantMap {
+    QVariantMap out;
+    if (! info.hasLayoutOverride()) return out;
+    const auto& layout    = info.layoutOverride();
+    out[u"fillmodeSet"_s] = layout.fillmodeSet();
+    out[u"fillmode"_s]    = static_cast<int>(layout.fillmode());
+    out[u"locationSet"_s] = layout.locationSet();
+    out[u"locationX"_s]   = layout.locationX();
+    out[u"locationY"_s]   = layout.locationY();
+    out[u"rotationSet"_s] = layout.rotationSet();
+    out[u"rotation"_s]    = static_cast<int>(layout.rotation());
+    return out;
+}
+
+auto Canvas::effectiveLayoutFromPb(const proto::CanvasInfo& info) -> QVariantMap {
+    QVariantMap out;
+    if (! info.hasEffectiveLayout()) return out;
+    const auto& layout  = info.effectiveLayout();
+    out[u"fillmode"_s]  = static_cast<int>(layout.fillmode());
+    out[u"locationX"_s] = layout.locationX();
+    out[u"locationY"_s] = layout.locationY();
+    out[u"rotation"_s]  = static_cast<int>(layout.rotation());
+    return out;
+}
+
+Canvas::Canvas(const proto::CanvasInfo& info, QObject* parent)
+    : QObject(parent), m_id(info.canvasId()) {
+    updateFrom(info);
+}
+
+void Canvas::updateFrom(const proto::CanvasInfo& info) {
+    rstd_assert(info.canvasId() == m_id, "Canvas::updateFrom id mismatch");
+    auto       members          = membersFromPb(info);
+    auto       extent           = info.hasExtent() ? rectFromPb(info.extent()) : QVariantMap {};
+    const auto width            = info.hasExtent() ? info.extent().width() : 0;
+    const auto height           = info.hasExtent() ? info.extent().height() : 0;
+    auto       layout_override  = layoutOverrideFromPb(info);
+    auto       effective_layout = effectiveLayoutFromPb(info);
+    int        online_count     = 0;
+    for (const auto& member : members) {
+        online_count += member.toMap().value(u"onlineCount"_s).toInt();
+    }
+    if (m_name == info.name() && m_members == members && m_extent == extent && m_width == width &&
+        m_height == height && m_layout_override == layout_override &&
+        m_effective_layout == effective_layout && m_wallpaper_id == info.wallpaperId() &&
+        m_revision == info.revision() && m_online_count == online_count) {
+        return;
+    }
+    m_name             = info.name();
+    m_members          = std::move(members);
+    m_extent           = std::move(extent);
+    m_width            = width;
+    m_height           = height;
+    m_layout_override  = std::move(layout_override);
+    m_effective_layout = std::move(effective_layout);
+    m_wallpaper_id     = info.wallpaperId();
+    m_revision         = info.revision();
+    m_online_count     = online_count;
+    Q_EMIT changed();
+}
+
+void Canvas::updateRuntime(const QList<Display*>& displays) {
+    std::map<QString, QVariantMap> links_by_renderer;
+    QVariantList                   conditions;
+    qint64                         active_playlist_id { 0 };
+    QVariantMap                    playlist_status;
+    for (const auto* display : displays) {
+        if (! display || display->canvasId() != m_id) continue;
+
+        for (const auto& value : display->links()) {
+            auto       link  = value.toMap();
+            const auto key   = link.value(u"rendererId"_s).toString();
+            auto [it, added] = links_by_renderer.emplace(key, link);
+            if (! added && link.value(u"active"_s).toBool()) it->second[u"active"_s] = true;
+        }
+        for (const auto& condition : display->runtimeConditions()) {
+            if (! conditions.contains(condition)) conditions.append(condition);
+        }
+        if (active_playlist_id == 0 && display->activePlaylistId() > 0) {
+            active_playlist_id = display->activePlaylistId();
+            playlist_status    = display->playlistStatus();
+        }
+    }
+
+    QVariantList links;
+    links.reserve(static_cast<qsizetype>(links_by_renderer.size()));
+    for (auto& entry : links_by_renderer) links.append(std::move(entry.second));
+
+    if (m_links == links && m_active_playlist_id == active_playlist_id &&
+        m_playlist_status == playlist_status && m_runtime_conditions == conditions) {
+        return;
+    }
+    m_links              = std::move(links);
+    m_active_playlist_id = active_playlist_id;
+    m_playlist_status    = std::move(playlist_status);
+    m_runtime_conditions = std::move(conditions);
+    Q_EMIT runtimeChanged();
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +358,13 @@ auto DisplayManager::displays() const -> QVariantList {
     return out;
 }
 
+auto DisplayManager::canvases() const -> QVariantList {
+    QVariantList out;
+    out.reserve(m_canvases.size());
+    for (auto* canvas : m_canvases) out.append(QVariant::fromValue(canvas));
+    return out;
+}
+
 auto DisplayManager::hasActivePlaylistDisplays() const -> bool {
     for (const auto* display : m_ordered) {
         if (display->activePlaylistId() > 0) return true;
@@ -206,6 +375,11 @@ auto DisplayManager::hasActivePlaylistDisplays() const -> bool {
 auto DisplayManager::get(quint64 id) const -> Display* {
     auto it = m_by_id.find(id);
     return (it == m_by_id.end()) ? nullptr : it->second;
+}
+
+auto DisplayManager::getCanvas(const QString& id) const -> Canvas* {
+    auto it = m_canvas_by_id.find(id);
+    return it == m_canvas_by_id.end() ? nullptr : it->second;
 }
 
 void DisplayManager::replaceAll(const QList<proto::DisplayInfo>& list) {
@@ -239,6 +413,7 @@ void DisplayManager::replaceAll(const QList<proto::DisplayInfo>& list) {
 
     m_ordered = std::move(next_ordered);
     m_by_id   = std::move(next_by_id);
+    refreshCanvasRuntime();
     if (had_active != hasActivePlaylistDisplays()) Q_EMIT playlistStatusChanged();
     Q_EMIT displaysChanged();
 }
@@ -248,6 +423,7 @@ void DisplayManager::upsert(const proto::DisplayInfo& info) {
     auto it = m_by_id.find(id);
     if (it != m_by_id.end()) {
         it->second->updateFrom(info);
+        refreshCanvasRuntime();
         return;
     }
     auto* d     = new Display(info, this);
@@ -256,6 +432,7 @@ void DisplayManager::upsert(const proto::DisplayInfo& info) {
         return v < x->id();
     });
     m_ordered.insert(pos, d);
+    refreshCanvasRuntime();
     Q_EMIT displaysChanged();
 }
 
@@ -267,8 +444,35 @@ void DisplayManager::remove(quint64 id) {
     m_by_id.erase(it);
     m_ordered.removeOne(d);
     d->deleteLater();
+    refreshCanvasRuntime();
     if (had_active != hasActivePlaylistDisplays()) Q_EMIT playlistStatusChanged();
     Q_EMIT displaysChanged();
+}
+
+void DisplayManager::replaceCanvases(const QList<proto::CanvasInfo>& list, quint64 revision) {
+    std::map<QString, Canvas*> next_by_id;
+    QList<Canvas*>             next_canvases;
+    next_canvases.reserve(list.size());
+    for (const auto& info : list) {
+        auto  it     = m_canvas_by_id.find(info.canvasId());
+        auto* canvas = it == m_canvas_by_id.end() ? new Canvas(info, this) : it->second;
+        if (it != m_canvas_by_id.end()) {
+            canvas->updateFrom(info);
+            m_canvas_by_id.erase(it);
+        }
+        next_by_id[info.canvasId()] = canvas;
+        next_canvases.append(canvas);
+    }
+    for (auto& [id, canvas] : m_canvas_by_id) canvas->deleteLater();
+    std::sort(next_canvases.begin(), next_canvases.end(), [](Canvas* a, Canvas* b) {
+        if (a->name() == b->name()) return a->id() < b->id();
+        return a->name() < b->name();
+    });
+    m_canvas_by_id    = std::move(next_by_id);
+    m_canvases        = std::move(next_canvases);
+    m_canvas_revision = revision;
+    refreshCanvasRuntime();
+    Q_EMIT canvasesChanged();
 }
 
 void DisplayManager::replacePlaylistStatuses(const QList<proto::PlaylistDisplayStatus>& list) {
@@ -281,7 +485,12 @@ void DisplayManager::replacePlaylistStatuses(const QList<proto::PlaylistDisplayS
         auto it = by_id.find(display->id());
         display->updatePlaylistStatus(it == by_id.end() ? nullptr : it->second);
     }
+    refreshCanvasRuntime();
     if (had_active != hasActivePlaylistDisplays()) Q_EMIT playlistStatusChanged();
+}
+
+void DisplayManager::refreshCanvasRuntime() {
+    for (auto* canvas : m_canvases) canvas->updateRuntime(m_ordered);
 }
 
 void DisplayManager::attachTo(Backend* backend) {
@@ -299,6 +508,8 @@ void DisplayManager::handleEvent(const proto::Event& evt) {
         remove(evt.displayRemoved().displayId());
     } else if (evt.hasPlaylistChanged()) {
         replacePlaylistStatuses(evt.playlistChanged().displays());
+    } else if (evt.hasCanvasSnapshot()) {
+        replaceCanvases(evt.canvasSnapshot().canvases(), evt.canvasSnapshot().revision());
     }
 }
 

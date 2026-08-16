@@ -79,6 +79,109 @@
     </message>
 </context>
 <context>
+    <name>CanvasDialog</name>
+    <message>
+        <source>Stretch</source>
+        <translation>Растянуть</translation>
+    </message>
+    <message>
+        <source>Fit</source>
+        <translation>Вписать</translation>
+    </message>
+    <message>
+        <source>Crop</source>
+        <translation>Обрезать</translation>
+    </message>
+    <message>
+        <source>Center</source>
+        <translation>По центру</translation>
+    </message>
+    <message>
+        <source>Edit canvas</source>
+        <translation>Редактировать холст</translation>
+    </message>
+    <message>
+        <source>Save</source>
+        <translation>Сохранить</translation>
+    </message>
+    <message>
+        <source>Canvas name</source>
+        <translation>Название холста</translation>
+    </message>
+    <message>
+        <source>Delete canvas</source>
+        <translation>Удалить холст</translation>
+    </message>
+    <message>
+        <source>Canvas coordinates only control wallpaper composition. Displays with the same identity share one rectangle and overlap.</source>
+        <translation>Координаты холста управляют только композицией обоев. Дисплеи с одинаковым идентификатором используют один прямоугольник и перекрываются.</translation>
+    </message>
+    <message>
+        <source>Empty canvas</source>
+        <translation>Пустой холст</translation>
+    </message>
+    <message>
+        <source>%1 overlapping displays</source>
+        <translation>Перекрывающихся дисплеев: %1</translation>
+    </message>
+    <message>
+        <source>Online</source>
+        <translation>В сети</translation>
+    </message>
+    <message>
+        <source>Offline</source>
+        <translation>Не в сети</translation>
+    </message>
+    <message>
+        <source>Add %1</source>
+        <translation>Добавить %1</translation>
+    </message>
+    <message>
+        <source>X</source>
+        <translation>X</translation>
+    </message>
+    <message>
+        <source>Y</source>
+        <translation>Y</translation>
+    </message>
+    <message>
+        <source>Width</source>
+        <translation>Ширина</translation>
+    </message>
+    <message>
+        <source>Height</source>
+        <translation>Высота</translation>
+    </message>
+    <message>
+        <source>Remove member</source>
+        <translation>Удалить участника</translation>
+    </message>
+    <message>
+        <source>Custom wallpaper layout</source>
+        <translation>Пользовательская компоновка обоев</translation>
+    </message>
+    <message>
+        <source>Apply fill, position, and rotation to the complete canvas.</source>
+        <translation>Применить заполнение, положение и поворот ко всему холсту.</translation>
+    </message>
+    <message>
+        <source>Horizontal %</source>
+        <translation>По горизонтали, %</translation>
+    </message>
+    <message>
+        <source>Vertical %</source>
+        <translation>По вертикали, %</translation>
+    </message>
+    <message>
+        <source>Delete canvas?</source>
+        <translation>Удалить холст?</translation>
+    </message>
+    <message>
+        <source>The canvas layout will be removed. Its displays become independent again.</source>
+        <translation>Компоновка холста будет удалена. Его дисплеи снова станут независимыми.</translation>
+    </message>
+</context>
+<context>
     <name>ContentRatingFilter</name>
     <message>
         <source>is</source>
@@ -265,6 +368,14 @@
         <translation>Мониторы не зарегистрированы</translation>
     </message>
     <message>
+        <source>Surface: %1 × %2</source>
+        <translation>Поверхность: %1 × %2</translation>
+    </message>
+    <message>
+        <source>Settings key: %1</source>
+        <translation>Ключ настроек: %1</translation>
+    </message>
+    <message>
         <source>Display #%1</source>
         <translation>Монитор #%1</translation>
     </message>
@@ -283,6 +394,50 @@
     <message>
         <source>Refresh:</source>
         <translation>Частота:</translation>
+    </message>
+    <message>
+        <source>Canvas update failed</source>
+        <translation>Не удалось обновить холст</translation>
+    </message>
+    <message>
+        <source>empty</source>
+        <translation>пусто</translation>
+    </message>
+    <message>
+        <source>%1/%2 online</source>
+        <translation>%1/%2 в сети</translation>
+    </message>
+    <message>
+        <source>Unnamed canvas</source>
+        <translation>Безымянный холст</translation>
+    </message>
+    <message>
+        <source>Create canvas</source>
+        <translation>Создать холст</translation>
+    </message>
+    <message>
+        <source>Canvas %1</source>
+        <translation>Холст %1</translation>
+    </message>
+    <message>
+        <source>Canvas: %1</source>
+        <translation>Холст: %1</translation>
+    </message>
+    <message>
+        <source>Independent display</source>
+        <translation>Независимый дисплей</translation>
+    </message>
+    <message>
+        <source>Name-based identity may change after rename or reconnect.</source>
+        <translation>Идентификатор на основе имени может измениться после переименования или повторного подключения.</translation>
+    </message>
+    <message>
+        <source>Canvas area:</source>
+        <translation>Область холста:</translation>
+    </message>
+    <message>
+        <source>Canvas</source>
+        <translation>Холст</translation>
     </message>
     <message>
         <source>Connected</source>
@@ -1644,6 +1799,18 @@ Unsaved frame state may be lost.</source>
         <translation>Ко всем</translation>
     </message>
     <message>
+        <source>%1 canvas</source>
+        <translation>Холст %1</translation>
+    </message>
+    <message>
+        <source>Unnamed</source>
+        <translation>Без имени</translation>
+    </message>
+    <message>
+        <source>%1 of %2 members online</source>
+        <translation>Участников в сети: %1 из %2</translation>
+    </message>
+    <message>
         <source>Renderer</source>
         <translation>Рендерер</translation>
     </message>
@@ -1882,6 +2049,14 @@ Unsaved frame state may be lost.</source>
     <message>
         <source>Last modified</source>
         <translation>Дата изменения</translation>
+    </message>
+    <message>
+        <source>%1 canvas</source>
+        <translation>Холст %1</translation>
+    </message>
+    <message>
+        <source>Unnamed</source>
+        <translation>Без имени</translation>
     </message>
     <message>
         <source>Display</source>

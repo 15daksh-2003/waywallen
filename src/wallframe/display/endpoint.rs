@@ -140,12 +140,13 @@ async fn handle_client(
 ) -> Result<()> {
     log::info!("display client connected; performing handshake");
     let registration = do_handshake(&stream, &events_tx, &mut shutdown_rx).await?;
+    let handle = router.try_register_display(registration).await?;
     let DisplayHandle {
         id: display_id,
         session_id,
         presentation,
         rx,
-    } = router.register_display(registration).await;
+    } = handle;
     log::info!("display {display_id} registered with router");
 
     let result = async {

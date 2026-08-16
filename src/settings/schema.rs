@@ -49,6 +49,34 @@ impl DisplayPrefs {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CanvasPrefs {
+    pub name: String,
+    pub members: HashMap<String, CanvasMemberPrefs>,
+    pub last_wallpaper: Option<String>,
+    pub layout: Option<CanvasLayoutPrefs>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanvasMemberPrefs {
+    pub rect: CanvasRect,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CanvasLayoutPrefs {
+    pub fillmode: Option<FillMode>,
+    pub location: Option<Location>,
+    pub rotation: Option<Rotation>,
+}
+
+impl CanvasLayoutPrefs {
+    pub fn is_empty(self) -> bool {
+        self.fillmode.is_none() && self.location.is_none() && self.rotation.is_none()
+    }
+}
+
 /// Layout values resolved against (per-display override → global → built-in defaults).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResolvedLayout {
@@ -700,6 +728,8 @@ pub struct Settings {
     /// Empty entries are pruned by mutators.
     #[serde(default, rename = "display")]
     pub displays: HashMap<String, DisplayPrefs>,
+    #[serde(default, rename = "canvas")]
+    pub canvases: HashMap<String, CanvasPrefs>,
 }
 
 impl Settings {

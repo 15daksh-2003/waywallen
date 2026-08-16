@@ -43,8 +43,8 @@ public:
     Q_INVOKABLE void setItems(qint64 id, const QVariantList& itemIds);
     Q_INVOKABLE void setMode(qint64 id, int mode);
     Q_INVOKABLE void setInterval(qint64 id, int intervalSecs);
-    Q_INVOKABLE void activate(qint64 id, const QVariantList& displayIds, bool autoAttach);
-    Q_INVOKABLE void deactivate(const QVariantList& displayIds, qint64 clearAutoAttach);
+    Q_INVOKABLE void activate(qint64 id, const QVariantList& targets, bool autoAttach);
+    Q_INVOKABLE void deactivate(const QVariantList& targets, qint64 clearAutoAttach);
     Q_INVOKABLE void jumpTo(qint64 id, const QString& entryId);
 
     void reload() override {}

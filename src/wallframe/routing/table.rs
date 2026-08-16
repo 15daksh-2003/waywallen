@@ -39,6 +39,17 @@ pub const FULL_DST: LinkDstRect = LinkDstRect {
     h: f32::INFINITY,
 };
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum LinkProjection {
+    Independent,
+    Canvas {
+        canvas_id: String,
+        extent: crate::wallframe::display::placement::CanvasRect,
+        member: crate::wallframe::display::placement::CanvasRect,
+        layout: crate::settings::ResolvedLayout,
+    },
+}
+
 /// A single renderer-to-display routing edge.
 /// Geometry and ordering are stored per link.
 #[derive(Debug, Clone)]
@@ -47,6 +58,7 @@ pub struct Link {
     pub renderer_id: RendererId,
     pub display_id: DisplayId,
     pub enabled: bool,
+    pub projection: LinkProjection,
     /// Source rect in renderer texture space (use `FULL_SRC` for identity).
     pub src_rect: LinkSrcRect,
     /// Destination rect in display surface space (use `FULL_DST` for identity).
@@ -132,6 +144,21 @@ impl RoutingTable {
         display_id: DisplayId,
         enabled: bool,
     ) -> LinkId {
+        self.add_link_with_projection(
+            renderer_id,
+            display_id,
+            enabled,
+            LinkProjection::Independent,
+        )
+    }
+
+    pub fn add_link_with_projection(
+        &mut self,
+        renderer_id: RendererId,
+        display_id: DisplayId,
+        enabled: bool,
+        projection: LinkProjection,
+    ) -> LinkId {
         // Delete pre-existing links for this display so it has exactly
         // one assigned renderer in the current routing model.
         let existing: Vec<LinkId> = self
@@ -155,6 +182,7 @@ impl RoutingTable {
             renderer_id: renderer_id.clone(),
             display_id,
             enabled,
+            projection,
             src_rect: FULL_SRC,
             dst_rect: FULL_DST,
             transform: 0,
@@ -182,6 +210,12 @@ impl RoutingTable {
             return false;
         };
         let mut changed = false;
+        if src.is_some() || dst.is_some() || transform.is_some() {
+            if link.projection != LinkProjection::Independent {
+                link.projection = LinkProjection::Independent;
+                changed = true;
+            }
+        }
         if let Some(v) = src {
             if link.src_rect != v {
                 link.src_rect = v;
@@ -213,6 +247,47 @@ impl RoutingTable {
             }
         }
         changed
+    }
+
+    pub fn update_canvas_projection(
+        &mut self,
+        link_id: LinkId,
+        canvas_id: String,
+        extent: crate::wallframe::display::placement::CanvasRect,
+        member: crate::wallframe::display::placement::CanvasRect,
+        layout: crate::settings::ResolvedLayout,
+    ) -> bool {
+        let Some(link) = self.links.get_mut(&link_id) else {
+            return false;
+        };
+        let projection = LinkProjection::Canvas {
+            canvas_id,
+            extent,
+            member,
+            layout,
+        };
+        if link.projection == projection {
+            return false;
+        }
+        link.projection = projection;
+        true
+    }
+
+    pub fn set_projection_independent(&mut self, link_id: LinkId) -> bool {
+        let Some(link) = self.links.get_mut(&link_id) else {
+            return false;
+        };
+        if link.projection == LinkProjection::Independent {
+            return false;
+        }
+        link.projection = LinkProjection::Independent;
+        link.src_rect = FULL_SRC;
+        link.dst_rect = FULL_DST;
+        true
+    }
+
+    pub fn all_links(&self) -> Vec<Link> {
+        self.links.values().cloned().collect()
     }
 
     pub fn get_link(&self, link_id: LinkId) -> Option<&Link> {

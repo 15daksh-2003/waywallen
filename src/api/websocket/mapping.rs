@@ -337,6 +337,79 @@ pub(super) fn display_snapshot_to_pb(
             .into_iter()
             .map(runtime_condition_to_pb)
             .collect(),
+        instance_id: s.instance_id.unwrap_or_default(),
+        settings_key: s.settings_key,
+        canvas_id: s.canvas_id.unwrap_or_default(),
+        canvas_rect: s.canvas_rect.map(canvas_rect_to_pb),
+        canvas_overlap_count: s.canvas_overlap_count,
+        selectable_target: s.selectable_target,
+    }
+}
+
+fn canvas_rect_to_pb(rect: crate::wallframe::display::placement::CanvasRect) -> pb::CanvasRect {
+    pb::CanvasRect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+    }
+}
+
+fn canvas_layout_override_to_pb(layout: crate::settings::CanvasLayoutPrefs) -> pb::LayoutOverride {
+    pb::LayoutOverride {
+        fillmode_set: layout.fillmode.is_some(),
+        fillmode: layout
+            .fillmode
+            .map(fillmode_to_pb)
+            .unwrap_or(pb::FillMode::Unspecified) as i32,
+        align_set: false,
+        align: pb::Align::Unspecified as i32,
+        rotation_set: layout.rotation.is_some(),
+        rotation: layout
+            .rotation
+            .map(rotation_to_pb)
+            .unwrap_or(pb::Rotation::Unspecified) as i32,
+        location_set: layout.location.is_some(),
+        location_x: layout.location.map_or(50, |location| u32::from(location.x)),
+        location_y: layout.location.map_or(50, |location| u32::from(location.y)),
+    }
+}
+
+pub(super) fn canvas_snapshot_to_pb(
+    snapshot: crate::wallframe::routing::CanvasSnapshot,
+) -> pb::CanvasInfo {
+    pb::CanvasInfo {
+        canvas_id: snapshot.id,
+        name: snapshot.name,
+        members: snapshot
+            .members
+            .into_iter()
+            .map(|member| pb::CanvasMemberInfo {
+                settings_key: member.settings_key,
+                rect: Some(canvas_rect_to_pb(member.rect)),
+                display_ids: member.display_ids,
+            })
+            .collect(),
+        extent: snapshot.extent.map(canvas_rect_to_pb),
+        layout_override: snapshot.layout_override.map(canvas_layout_override_to_pb),
+        effective_layout: Some(layout_prefs_to_pb_resolved(&snapshot.effective_layout)),
+        wallpaper_id: snapshot.wallpaper_id.unwrap_or_default(),
+        revision: snapshot.revision,
+    }
+}
+
+pub(super) fn canvases_replace_event(
+    snapshot: crate::wallframe::routing::CanvasCollectionSnapshot,
+) -> pb::Event {
+    pb::Event {
+        payload: Some(pb::event::Payload::CanvasSnapshot(pb::CanvasSnapshot {
+            canvases: snapshot
+                .canvases
+                .into_iter()
+                .map(canvas_snapshot_to_pb)
+                .collect(),
+            revision: snapshot.revision,
+        })),
     }
 }
 
@@ -365,6 +438,7 @@ pub(super) fn layout_source_to_pb(source: LayoutSource) -> pb::LayoutSource {
         LayoutSource::Global => pb::LayoutSource::Global,
         LayoutSource::Display => pb::LayoutSource::Display,
         LayoutSource::Wallpaper => pb::LayoutSource::Wallpaper,
+        LayoutSource::Canvas => pb::LayoutSource::Canvas,
     }
 }
 
@@ -798,6 +872,7 @@ pub(super) fn router_event_to_pb(e: RouterEvent, settings: &SettingsStore) -> pb
             })),
         },
         RouterEvent::DisplaysReplace(list) => displays_replace_event(list, settings),
+        RouterEvent::CanvasesReplace(snapshot) => canvases_replace_event(snapshot),
         RouterEvent::RendererUpsert(s) => pb::Event {
             payload: Some(pb::event::Payload::RendererChanged(pb::RendererChanged {
                 renderer: Some(renderer_snapshot_to_pb(s, settings)),

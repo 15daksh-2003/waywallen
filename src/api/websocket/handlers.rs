@@ -6,6 +6,101 @@ pub(super) fn query_error(query: &str, error: impl std::fmt::Display) -> String 
     error
 }
 
+fn canvas_members_from_pb(
+    members: Vec<pb::CanvasMemberInput>,
+) -> Result<std::collections::HashMap<String, crate::settings::CanvasMemberPrefs>, Error> {
+    let mut out = std::collections::HashMap::with_capacity(members.len());
+    for member in members {
+        let key = member.settings_key.trim().to_string();
+        let rect = member
+            .rect
+            .ok_or_else(|| Error::CanvasInvalid(format!("canvas member '{key}' has no rect")))?;
+        let previous = out.insert(
+            key.clone(),
+            crate::settings::CanvasMemberPrefs {
+                rect: crate::wallframe::display::placement::CanvasRect {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.width,
+                    height: rect.height,
+                },
+            },
+        );
+        if previous.is_some() {
+            return Err(Error::CanvasInvalid(format!(
+                "canvas member '{key}' appears more than once"
+            )));
+        }
+    }
+    Ok(out)
+}
+
+fn canvas_layout_from_pb(
+    layout: Option<&pb::LayoutOverride>,
+) -> crate::settings::CanvasLayoutPrefs {
+    let Some(layout) = layout else {
+        return crate::settings::CanvasLayoutPrefs::default();
+    };
+    crate::settings::CanvasLayoutPrefs {
+        fillmode: layout
+            .fillmode_set
+            .then(|| fillmode_from_pb(layout.fillmode))
+            .flatten(),
+        location: layout
+            .location_set
+            .then(|| location_from_pb(layout.location_x, layout.location_y)),
+        rotation: layout
+            .rotation_set
+            .then(|| rotation_from_pb(layout.rotation))
+            .flatten(),
+    }
+}
+
+fn presentation_targets_from_pb(
+    targets: Vec<pb::PresentationTarget>,
+) -> Result<Vec<application::ApplyTarget>, Error> {
+    targets
+        .into_iter()
+        .map(|target| match target.target {
+            Some(pb::presentation_target::Target::DisplayId(display_id)) => {
+                Ok(application::ApplyTarget::Display(display_id))
+            }
+            Some(pb::presentation_target::Target::CanvasId(canvas_id))
+                if !canvas_id.trim().is_empty() =>
+            {
+                Ok(application::ApplyTarget::Canvas(canvas_id))
+            }
+            _ => Err(Error::InvalidArgument(
+                "presentation target is empty".to_string(),
+            )),
+        })
+        .collect()
+}
+
+async fn presentation_display_ids(
+    state: &Arc<DaemonContext>,
+    targets: &[application::ApplyTarget],
+) -> Result<Vec<u64>, Error> {
+    let requested = targets
+        .iter()
+        .map(|target| match target {
+            application::ApplyTarget::Display(display_id) => {
+                crate::wallframe::routing::ConfigTargetId::Display(*display_id)
+            }
+            application::ApplyTarget::Canvas(canvas_id) => {
+                crate::wallframe::routing::ConfigTargetId::Canvas(canvas_id.clone())
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(state
+        .router
+        .resolve_config_targets((!requested.is_empty()).then_some(requested.as_slice()))
+        .await?
+        .into_iter()
+        .flat_map(|target| target.members.into_iter().map(|member| member.display_id))
+        .collect())
+}
+
 pub(super) async fn dispatch(state: &Arc<DaemonContext>, req: pb::Request) -> pb::Response {
     let rid = req.request_id;
     build_response(rid, dispatch_inner(state, req).await)
@@ -850,6 +945,174 @@ pub(super) async fn dispatch_inner(
             Res::DisplayLayoutSet(pb::DisplayLayoutSetResponse { display })
         }
 
+        Req::CanvasList(_) => {
+            let snapshot = state.router.snapshot_canvases().await;
+            Res::CanvasList(pb::CanvasListResponse {
+                canvases: snapshot
+                    .canvases
+                    .into_iter()
+                    .map(canvas_snapshot_to_pb)
+                    .collect(),
+                revision: snapshot.revision,
+            })
+        }
+
+        Req::CanvasCreate(r) => {
+            let layout = canvas_layout_from_pb(r.layout_override.as_ref());
+            let receipt = state.settings.create_canvas(crate::settings::CanvasDraft {
+                name: r.name,
+                members: canvas_members_from_pb(r.members)?,
+                layout: (!layout.is_empty()).then_some(layout),
+            })?;
+            if let Err(error) = application::reconcile_presentation_configs(
+                state,
+                &receipt.affected_display_keys,
+                &[receipt.canvas_id.clone()],
+            )
+            .await
+            {
+                log::warn!(
+                    "canvas {} runtime reconciliation failed: {error}",
+                    receipt.canvas_id
+                );
+            }
+            state
+                .router
+                .canvas_configs_changed([receipt.canvas_id.clone()])
+                .await;
+            let canvas = state
+                .router
+                .snapshot_canvases()
+                .await
+                .canvases
+                .into_iter()
+                .find(|canvas| canvas.id == receipt.canvas_id)
+                .map(canvas_snapshot_to_pb);
+            Res::CanvasCreate(pb::CanvasCreateResponse {
+                canvas,
+                revision: receipt.revision,
+            })
+        }
+
+        Req::CanvasUpdate(r) => {
+            let receipt = state.settings.update_canvas(
+                &r.canvas_id,
+                r.expected_revision,
+                crate::settings::CanvasDraft {
+                    name: r.name,
+                    members: canvas_members_from_pb(r.members)?,
+                    layout: None,
+                },
+            )?;
+            let membership_changed = receipt.previous.as_ref().is_some_and(|previous| {
+                previous
+                    .members
+                    .keys()
+                    .collect::<std::collections::HashSet<_>>()
+                    != receipt
+                        .canvas
+                        .members
+                        .keys()
+                        .collect::<std::collections::HashSet<_>>()
+            });
+            if membership_changed {
+                if let Err(error) = application::reconcile_presentation_configs(
+                    state,
+                    &receipt.affected_display_keys,
+                    &[receipt.canvas_id.clone()],
+                )
+                .await
+                {
+                    log::warn!(
+                        "canvas {} runtime reconciliation failed: {error}",
+                        receipt.canvas_id
+                    );
+                }
+            }
+            state
+                .router
+                .canvas_configs_changed([receipt.canvas_id.clone()])
+                .await;
+            let canvas = state
+                .router
+                .snapshot_canvases()
+                .await
+                .canvases
+                .into_iter()
+                .find(|canvas| canvas.id == receipt.canvas_id)
+                .map(canvas_snapshot_to_pb);
+            Res::CanvasUpdate(pb::CanvasUpdateResponse {
+                canvas,
+                revision: receipt.revision,
+            })
+        }
+
+        Req::CanvasLayoutSet(r) => {
+            let new_fillmode = if r.clear_fillmode {
+                None
+            } else {
+                r.r#override
+                    .as_ref()
+                    .filter(|layout| layout.fillmode_set)
+                    .and_then(|layout| fillmode_from_pb(layout.fillmode))
+            };
+            let new_location = if r.clear_location {
+                None
+            } else {
+                r.r#override
+                    .as_ref()
+                    .filter(|layout| layout.location_set)
+                    .map(|layout| location_from_pb(layout.location_x, layout.location_y))
+            };
+            let new_rotation = if r.clear_rotation {
+                None
+            } else {
+                r.r#override
+                    .as_ref()
+                    .filter(|layout| layout.rotation_set)
+                    .and_then(|layout| rotation_from_pb(layout.rotation))
+            };
+            state
+                .router
+                .set_canvas_layout(
+                    &r.canvas_id,
+                    new_fillmode,
+                    new_location,
+                    new_rotation,
+                    r.clear_fillmode,
+                    r.clear_location,
+                    r.clear_rotation,
+                )
+                .await?;
+            let canvas = state
+                .router
+                .snapshot_canvases()
+                .await
+                .canvases
+                .into_iter()
+                .find(|canvas| canvas.id == r.canvas_id)
+                .map(canvas_snapshot_to_pb);
+            Res::CanvasLayoutSet(pb::CanvasLayoutSetResponse { canvas })
+        }
+
+        Req::CanvasDelete(r) => {
+            let receipt = state
+                .settings
+                .delete_canvas(&r.canvas_id, r.expected_revision)?;
+            let canvas_id = receipt.canvas_id;
+            if let Err(error) = application::reconcile_presentation_configs(
+                state,
+                &receipt.affected_display_keys,
+                &[canvas_id.clone()],
+            )
+            .await
+            {
+                log::warn!("canvas {canvas_id} deletion reconciliation failed: {error}");
+            }
+            state.router.canvas_configs_changed([canvas_id]).await;
+            Res::CanvasDelete(pb::Empty {})
+        }
+
         Req::DisplayRename(r) => {
             let new_alias = if r.clear || r.alias.trim().is_empty() {
                 None
@@ -1187,12 +1450,13 @@ pub(super) async fn dispatch_inner(
         }
 
         Req::WallpaperApply(r) => {
+            let targets = presentation_targets_from_pb(r.targets)?;
             let res = application::apply_wallpaper(
                 state,
                 &r.wallpaper_id,
                 application::ApplyRequest {
                     source: application::ApplySource::UserWallpaper,
-                    display_ids: (!r.display_ids.is_empty()).then_some(r.display_ids),
+                    targets: (!targets.is_empty()).then_some(targets),
                     renderer_name: (!r.renderer_name.is_empty()).then_some(r.renderer_name),
                     first_frame_timeout: Some(application::APPLY_FIRST_FRAME_TIMEOUT),
                     require_display: true,
@@ -1220,6 +1484,21 @@ pub(super) async fn dispatch_inner(
                         all_displays: playlist.all_displays,
                     })
                     .collect(),
+                targets: res
+                    .targets
+                    .into_iter()
+                    .map(|target| pb::PresentationTarget {
+                        target: Some(match target {
+                            application::ApplyTarget::Display(display_id) => {
+                                pb::presentation_target::Target::DisplayId(display_id)
+                            }
+                            application::ApplyTarget::Canvas(canvas_id) => {
+                                pb::presentation_target::Target::CanvasId(canvas_id)
+                            }
+                        }),
+                    })
+                    .collect(),
+                display_ids: res.display_ids,
             })
         }
 
@@ -1782,7 +2061,9 @@ pub(super) async fn dispatch_inner(
         }
 
         Req::PlaylistActivate(r) => {
-            application::activate_playlist(&state, &r.display_ids, r.id).await?;
+            let targets = presentation_targets_from_pb(r.targets)?;
+            let display_ids = presentation_display_ids(state, &targets).await?;
+            application::activate_playlist(&state, &display_ids, r.id).await?;
             if r.auto_attach {
                 let id = r.id;
                 state.settings.update(|s| {
@@ -1794,7 +2075,9 @@ pub(super) async fn dispatch_inner(
         }
 
         Req::PlaylistDeactivate(r) => {
-            application::deactivate_playlist(&state, &r.display_ids).await?;
+            let targets = presentation_targets_from_pb(r.targets)?;
+            let display_ids = presentation_display_ids(state, &targets).await?;
+            application::deactivate_playlist(&state, &display_ids).await?;
             if r.clear_auto_attach > 0 {
                 let id = r.clear_auto_attach;
                 state.settings.update(|s| {

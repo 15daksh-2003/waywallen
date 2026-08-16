@@ -30,12 +30,12 @@ QtObject {
 
         const key = String(page.playlistPlayDisplayId);
         for (let i = 0; i < displays.length; ++i) {
-            if (String(displays[i].id) === key)
+            if (String(displays[i].targetId) === key)
                 return displays[i];
         }
         return displays[0];
     }
-    readonly property var selectedDisplayId: selectedDisplay ? selectedDisplay.id : null
+    readonly property var selectedDisplayId: selectedDisplay ? selectedDisplay.targetId : null
     readonly property bool hasPlayTarget: shareAllDisplays ? playDisplays.length > 0 : selectedDisplay !== null
 
     function displayLabel(display) {
@@ -43,7 +43,7 @@ QtObject {
     }
 
     function selectDisplay(display) {
-        page.playlistPlayDisplayId = display.id;
+        page.playlistPlayDisplayId = display.targetId;
     }
 
     function setShareAllDisplays(shared) {

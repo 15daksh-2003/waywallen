@@ -5,6 +5,27 @@ using namespace Qt::Literals::StringLiterals;
 
 namespace waywallen
 {
+auto presentationTargetsFromVariant(const QVariantList& values)
+    -> QList<proto::PresentationTarget> {
+    QList<proto::PresentationTarget> targets;
+    targets.reserve(values.size());
+    for (const auto& value : values) {
+        const auto                map = value.toMap();
+        proto::PresentationTarget target;
+        const auto                canvas_id = map.value(u"canvasId"_s).toString();
+        if (! canvas_id.isEmpty()) {
+            target.setCanvasId(canvas_id);
+        } else {
+            bool       ok         = false;
+            const auto display_id = map.value(u"displayId"_s).toULongLong(&ok);
+            if (! ok || display_id == 0) continue;
+            target.setDisplayId(display_id);
+        }
+        targets.append(std::move(target));
+    }
+    return targets;
+}
+
 auto runtimeConditionsFromPb(const QList<proto::RuntimeCondition>& conditions) -> QVariantList {
     QVariantList out;
     out.reserve(conditions.size());

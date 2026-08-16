@@ -290,9 +290,9 @@ export class WallpaperApplyQuery : public Query,
 
     Q_PROPERTY(waywallen::model::Wallpaper wallpaper READ wallpaper WRITE setWallpaper NOTIFY
                    wallpaperChanged FINAL)
-    /// Target display ids. Empty list = "apply to all displays" (legacy default).
-    Q_PROPERTY(
-        QVariantList displayIds READ displayIds WRITE setDisplayIds NOTIFY displayIdsChanged FINAL)
+    /// Typed targets. Each map contains either `displayId` or `canvasId`.
+    /// Empty means every selectable target.
+    Q_PROPERTY(QVariantList targets READ targets WRITE setTargets NOTIFY targetsChanged FINAL)
     /// Optional renderer plugin name. Empty (default) lets the daemon pick
     /// the highest-priority renderer for this wallpaper's type.
     Q_PROPERTY(QString rendererName READ rendererName WRITE setRendererName NOTIFY
@@ -307,8 +307,8 @@ public:
     auto wallpaper() const -> const model::Wallpaper&;
     void setWallpaper(const model::Wallpaper&);
 
-    auto displayIds() const -> const QVariantList&;
-    void setDisplayIds(const QVariantList&);
+    auto targets() const -> const QVariantList&;
+    void setTargets(const QVariantList&);
 
     auto rendererName() const -> const QString&;
     void setRendererName(const QString&);
@@ -319,14 +319,14 @@ public:
     void reload() override;
 
     Q_SIGNAL void wallpaperChanged();
-    Q_SIGNAL void displayIdsChanged();
+    Q_SIGNAL void targetsChanged();
     Q_SIGNAL void rendererNameChanged();
     Q_SIGNAL void rendererIdChanged();
     Q_SIGNAL void stoppedPlaylistsChanged();
 
 private:
     model::Wallpaper m_wallpaper;
-    QVariantList     m_display_ids;
+    QVariantList     m_targets;
     QString          m_renderer_name;
     QString          m_renderer_id;
     QVariantList     m_stopped_playlists;

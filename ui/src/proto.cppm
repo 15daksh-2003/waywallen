@@ -51,6 +51,7 @@ using proto::RendererPluginListRequest;
 using proto::RendererPluginListResponse;
 using proto::SettingSchema;
 
+using proto::PresentationTarget;
 using proto::WallpaperApplyRequest;
 using proto::WallpaperApplyResponse;
 using proto::WallpaperApplyStoppedPlaylist;
@@ -82,6 +83,20 @@ using proto::SourceListRequest;
 using proto::SourceListResponse;
 using proto::SourcePluginInfo;
 
+using proto::CanvasCreateRequest;
+using proto::CanvasCreateResponse;
+using proto::CanvasDeleteRequest;
+using proto::CanvasInfo;
+using proto::CanvasLayoutSetRequest;
+using proto::CanvasLayoutSetResponse;
+using proto::CanvasListRequest;
+using proto::CanvasListResponse;
+using proto::CanvasMemberInfo;
+using proto::CanvasMemberInput;
+using proto::CanvasRect;
+using proto::CanvasSnapshot;
+using proto::CanvasUpdateRequest;
+using proto::CanvasUpdateResponse;
 using proto::DisplayInfo;
 using proto::DisplayLayoutSetRequest;
 using proto::DisplayLayoutSetResponse;
@@ -225,6 +240,7 @@ using proto::WallpaperSortKeyGadget::WallpaperSortKey;
 
 export namespace waywallen
 {
+auto presentationTargetsFromVariant(const QVariantList& values) -> QList<proto::PresentationTarget>;
 auto runtimeConditionsFromPb(const QList<proto::RuntimeCondition>& conditions) -> QVariantList;
 auto runtimeTagsFromPb(const QList<proto::RendererRuntimeTag>& tags) -> QVariantList;
 } // namespace waywallen

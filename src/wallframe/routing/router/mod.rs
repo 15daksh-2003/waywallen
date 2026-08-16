@@ -27,6 +27,7 @@ use crate::settings::{
     ResolvedLayout, SettingsStore,
 };
 use crate::wallframe::display::layout::{FillMode, LayoutInput};
+use crate::wallframe::display::placement::CanvasRect;
 use crate::wallframe::ipc::proto::{
     ControlMsg, ControlTransition, EventMsg, RENDERER_STATE_FIELD_CLEAR_COLOR,
     RENDERER_STATE_FIELD_RUNTIME_TAGS,
@@ -37,7 +38,7 @@ use crate::wallframe::renderer_manager::{
 use crate::wallframe::scheduler::{CompositionConfig, DisplayId, DisplayInfo, DisplayMetrics};
 
 use super::auto_replay;
-use super::table::{Link, LinkDstRect, LinkId, LinkSrcRect, RoutingTable};
+use super::table::{Link, LinkDstRect, LinkId, LinkProjection, LinkSrcRect, RoutingTable};
 
 mod composition;
 mod deadline;
@@ -46,7 +47,9 @@ mod lifecycle;
 mod slot;
 mod snapshot;
 
-pub use composition::{ActiveRenderer, ApplyAssignment, ApplyReceipt, AssignmentActivation};
+pub use composition::{
+    ActiveRenderer, ApplyAssignment, ApplyReceipt, AssignmentActivation, AssignmentTarget,
+};
 use slot::{
     PendingRendererStart, RendererLifecycleEvent, RendererSlot, RendererStartCause,
     RendererTransition,
@@ -258,6 +261,7 @@ pub enum RouterEvent {
     /// A batch mutation affected many displays — send the whole list
     /// as a single replace instead of N upserts.
     DisplaysReplace(Vec<DisplaySnapshot>),
+    CanvasesReplace(CanvasCollectionSnapshot),
     /// A renderer was added or its runtime fields changed (status, fps).
     /// Receivers should upsert by `snap.id`.
     RendererUpsert(RendererSnapshot),
@@ -338,6 +342,7 @@ pub struct DisplaySnapshot {
     /// Stable per-display key advertised by v4 consumers, used as the
     /// settings store key for layout overrides.
     pub instance_id: Option<String>,
+    pub settings_key: String,
     pub width: u32,
     pub height: u32,
     pub refresh_mhz: u32,
@@ -347,7 +352,55 @@ pub struct DisplaySnapshot {
     pub display_layout: ResolvedLayout,
     pub effective_layout: ResolvedLayout,
     pub effective_layout_source: LayoutSource,
+    pub canvas_id: Option<String>,
+    pub canvas_rect: Option<CanvasRect>,
+    pub canvas_overlap_count: u32,
+    pub selectable_target: bool,
     pub conditions: Vec<RuntimeCondition>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CanvasMemberSnapshot {
+    pub settings_key: String,
+    pub rect: CanvasRect,
+    pub display_ids: Vec<DisplayId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CanvasSnapshot {
+    pub id: String,
+    pub name: String,
+    pub members: Vec<CanvasMemberSnapshot>,
+    pub extent: Option<CanvasRect>,
+    pub layout_override: Option<crate::settings::CanvasLayoutPrefs>,
+    pub effective_layout: ResolvedLayout,
+    pub wallpaper_id: Option<String>,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CanvasCollectionSnapshot {
+    pub canvases: Vec<CanvasSnapshot>,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ConfigTargetId {
+    Display(DisplayId),
+    Canvas(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedConfigMember {
+    pub display_id: DisplayId,
+    pub rect: Option<CanvasRect>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedConfigTarget {
+    pub id: ConfigTargetId,
+    pub members: Vec<ResolvedConfigMember>,
+    pub extent: Option<CanvasRect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,6 +408,7 @@ pub enum LayoutSource {
     Global,
     Display,
     Wallpaper,
+    Canvas,
 }
 
 #[derive(Clone)]
@@ -669,6 +723,14 @@ impl Router {
         s.resolved_layout(&info.name)
     }
 
+    fn resolved_layout_default(&self) -> ResolvedLayout {
+        ResolvedLayout {
+            fillmode: FillMode::default(),
+            location: Default::default(),
+            rotation: Default::default(),
+        }
+    }
+
     fn resolved_layout_for_renderer(
         &self,
         info: &DisplayInfo,
@@ -702,6 +764,102 @@ impl Router {
         } else {
             LayoutSource::Global
         }
+    }
+
+    fn canvas_for_info(
+        &self,
+        info: &DisplayInfo,
+    ) -> Option<(String, crate::settings::CanvasPrefs)> {
+        self.settings
+            .get()?
+            .canvas_for_member(Self::settings_key_for(info))
+    }
+
+    fn canvas_id_for_link(link: &Link) -> Option<String> {
+        match &link.projection {
+            LinkProjection::Independent => None,
+            LinkProjection::Canvas { canvas_id, .. } => Some(canvas_id.clone()),
+        }
+    }
+
+    fn canvas_layout_for_link(link: &Link) -> Option<ResolvedLayout> {
+        match &link.projection {
+            LinkProjection::Independent => None,
+            LinkProjection::Canvas { layout, .. } => Some(*layout),
+        }
+    }
+
+    fn refresh_canvas_locked(&self, inner: &mut Inner, canvas_id: &str) -> Vec<DisplayId> {
+        let links = inner
+            .table
+            .all_links()
+            .into_iter()
+            .filter(|link| Self::canvas_id_for_link(link).as_deref() == Some(canvas_id))
+            .collect::<Vec<_>>();
+        let Some(settings) = self.settings.get() else {
+            return Vec::new();
+        };
+        let Some(canvas) = settings.canvas(canvas_id) else {
+            for link in &links {
+                inner.table.set_projection_independent(link.id);
+            }
+            return links.into_iter().map(|link| link.display_id).collect();
+        };
+        let extent = crate::wallframe::display::placement::union(
+            canvas.members.values().map(|member| member.rect),
+        );
+        let mut affected = Vec::new();
+        for link in links {
+            let Some(info) = inner
+                .displays
+                .get(&link.display_id)
+                .map(|display| &display.info)
+            else {
+                continue;
+            };
+            let key = Self::settings_key_for(info);
+            match (extent, canvas.members.get(key)) {
+                (Some(extent), Some(member)) => {
+                    let inherited = Self::canvas_layout_for_link(&link)
+                        .unwrap_or_else(|| settings.resolved_global_layout());
+                    let layout = settings.resolved_canvas_layout(canvas_id, inherited);
+                    inner.table.update_canvas_projection(
+                        link.id,
+                        canvas_id.to_string(),
+                        extent,
+                        member.rect,
+                        layout,
+                    );
+                }
+                _ => {
+                    inner.table.set_projection_independent(link.id);
+                }
+            }
+            affected.push(link.display_id);
+        }
+        affected
+    }
+
+    pub async fn canvas_configs_changed(
+        self: &Arc<Self>,
+        canvas_ids: impl IntoIterator<Item = String>,
+    ) {
+        let mut affected = {
+            let mut inner = self.inner.lock().await;
+            canvas_ids
+                .into_iter()
+                .flat_map(|canvas_id| self.refresh_canvas_locked(&mut inner, &canvas_id))
+                .collect::<Vec<_>>()
+        };
+        affected.sort_unstable();
+        affected.dedup();
+        self.resync_display_compositions(affected).await;
+        self.emit(RouterEvent::DisplaysReplace(self.snapshot_displays().await));
+        self.emit(RouterEvent::CanvasesReplace(self.snapshot_canvases().await));
+    }
+
+    pub async fn publish_canvas_snapshot(self: &Arc<Self>) {
+        self.emit(RouterEvent::CanvasesReplace(self.snapshot_canvases().await));
     }
 
     /// Settings TOML key used for this display's persistent prefs.
@@ -832,6 +990,49 @@ impl Router {
             self.emit(RouterEvent::DisplayUpsert(snap));
         }
         Some(target_id)
+    }
+
+    pub async fn set_canvas_layout(
+        self: &Arc<Self>,
+        canvas_id: &str,
+        new_fillmode: Option<crate::wallframe::display::layout::FillMode>,
+        new_location: Option<crate::wallframe::display::layout::Location>,
+        new_rotation: Option<crate::wallframe::display::layout::Rotation>,
+        clear_fillmode: bool,
+        clear_location: bool,
+        clear_rotation: bool,
+    ) -> crate::error::Result<()> {
+        let settings = self.settings.get().ok_or_else(|| {
+            crate::error::Error::FailedPrecondition("settings are not attached".to_string())
+        })?;
+        let mut layout = settings
+            .canvas(canvas_id)
+            .ok_or_else(|| crate::error::Error::CanvasNotFound(canvas_id.to_string()))?
+            .layout
+            .unwrap_or_default();
+        if clear_fillmode {
+            layout.fillmode = None;
+        }
+        if let Some(fillmode) = new_fillmode {
+            layout.fillmode = Some(fillmode);
+        }
+        if clear_location {
+            layout.location = None;
+        }
+        if let Some(location) = new_location {
+            layout.location = Some(location);
+        }
+        if clear_rotation {
+            layout.rotation = None;
+        }
+        if let Some(rotation) = new_rotation {
+            layout.rotation = Some(rotation);
+        }
+        let layout = (!layout.is_empty()).then_some(layout);
+        if settings.set_canvas_layout(canvas_id, layout)? {
+            self.canvas_configs_changed([canvas_id.to_string()]).await;
+        }
+        Ok(())
     }
 
     pub async fn set_display_alias(
@@ -1256,6 +1457,39 @@ impl Router {
                     .wallpaper_layout_overrides
                     .insert(renderer_id.to_string(), layout);
             }
+            let canvas_ids = inner
+                .table
+                .links_for_renderer(renderer_id)
+                .iter()
+                .filter_map(Self::canvas_id_for_link)
+                .collect::<HashSet<_>>();
+            for canvas_id in canvas_ids {
+                let canvas_layout = self
+                    .settings
+                    .get()
+                    .map(|settings| {
+                        let inherited = layout.apply_to(settings.resolved_global_layout());
+                        settings.resolved_canvas_layout(&canvas_id, inherited)
+                    })
+                    .unwrap_or_else(|| layout.apply_to(self.resolved_layout_default()));
+                for link in inner.table.all_links().into_iter().filter(|link| {
+                    Self::canvas_id_for_link(link).as_deref() == Some(canvas_id.as_str())
+                }) {
+                    match link.projection {
+                        LinkProjection::Independent => {}
+                        LinkProjection::Canvas { extent, member, .. } => {
+                            inner.table.update_canvas_projection(
+                                link.id,
+                                canvas_id.clone(),
+                                extent,
+                                member,
+                                canvas_layout,
+                            );
+                        }
+                    }
+                }
+                self.refresh_canvas_locked(&mut inner, &canvas_id);
+            }
             inner
                 .table
                 .links_for_renderer(renderer_id)
@@ -1344,7 +1578,17 @@ impl Router {
     // ---------------------------------------------------------------
     // Display lifecycle
 
+    #[cfg(test)]
     pub async fn register_display(self: &Arc<Self>, reg: DisplayRegistration) -> DisplayHandle {
+        self.try_register_display(reg)
+            .await
+            .expect("display registration rejected")
+    }
+
+    pub async fn try_register_display(
+        self: &Arc<Self>,
+        reg: DisplayRegistration,
+    ) -> crate::error::Result<DisplayHandle> {
         // One-time legacy migration: if the consumer advertised a v4
         // instance_id, copy any legacy name-keyed settings once.
         if let (Some(iid), Some(settings)) =
@@ -1366,7 +1610,7 @@ impl Router {
         }
         let (tx, rx) = mpsc::unbounded_channel();
         let initial_window_state_flags = reg.window_state_flags;
-        let (display_id, display_session_id, auto_linked) = {
+        let (display_id, display_session_id, auto_linked, canvas_id) = {
             let mut inner = self.inner.lock().await;
             inner.next_display_id += 1;
             inner.next_display_session_id = inner
@@ -1382,6 +1626,7 @@ impl Router {
                 metrics: reg.metrics,
                 bound: false,
             };
+            let canvas = self.canvas_for_info(&info);
             let pause_effect = self.resolved_pause_effect(reg.presentation_caps);
             let presentation = PresentationSnapshot {
                 config: PresentationConfig {
@@ -1394,10 +1639,15 @@ impl Router {
                     pause_effect: PauseEffectState { active: false },
                 },
             };
-            let restored_renderer = info
-                .instance_id
-                .as_ref()
-                .and_then(|instance_id| inner.disconnected_assignments.get(instance_id))
+            let settings_key = Self::settings_key_for(&info).to_string();
+            if info.instance_id.is_none() {
+                log::info!(
+                    "display {id}: using name-based identity '{settings_key}'; rename or reconnect may change Canvas membership"
+                );
+            }
+            let restored_renderer = inner
+                .disconnected_assignments
+                .get(&settings_key)
                 .filter(|renderer_id| inner.renderer_slots.contains_key(*renderer_id))
                 .cloned();
             inner.displays.insert(
@@ -1418,16 +1668,67 @@ impl Router {
                     consumption_epoch: Arc::new(AtomicU64::new(1)),
                 },
             );
-            let auto = restored_renderer.or_else(|| {
-                let mut ids = inner.renderer_slots.keys().cloned().collect::<Vec<_>>();
-                ids.sort();
-                ids.into_iter().next()
-            });
-            if let Some(rid) = auto.clone() {
-                let enabled = !inner.manual_stopped;
-                inner.table.add_link_with_enabled(rid, id, enabled);
-            }
-            (id, session_id, auto)
+            let canvas_id = canvas.as_ref().map(|(canvas_id, _)| canvas_id.clone());
+            let auto = if let Some((canvas_id, canvas)) = canvas {
+                let existing = inner
+                    .table
+                    .all_links()
+                    .into_iter()
+                    .find(|link| {
+                        Self::canvas_id_for_link(link).as_deref() == Some(canvas_id.as_str())
+                    })
+                    .map(|link| link.renderer_id)
+                    .or(restored_renderer);
+                if let (Some(renderer_id), Some(extent), Some(member)) = (
+                    existing.clone(),
+                    crate::wallframe::display::placement::union(
+                        canvas.members.values().map(|member| member.rect),
+                    ),
+                    canvas.members.get(&settings_key),
+                ) {
+                    let wallpaper_layout = inner
+                        .wallpaper_layout_overrides
+                        .get(&renderer_id)
+                        .copied()
+                        .unwrap_or_default();
+                    let layout = self
+                        .settings
+                        .get()
+                        .map(|settings| {
+                            let inherited =
+                                wallpaper_layout.apply_to(settings.resolved_global_layout());
+                            settings.resolved_canvas_layout(&canvas_id, inherited)
+                        })
+                        .unwrap_or_else(|| {
+                            wallpaper_layout.apply_to(self.resolved_layout_default())
+                        });
+                    let enabled = !inner.manual_stopped;
+                    inner.table.add_link_with_projection(
+                        renderer_id,
+                        id,
+                        enabled,
+                        LinkProjection::Canvas {
+                            canvas_id,
+                            extent,
+                            member: member.rect,
+                            layout,
+                        },
+                    );
+                }
+                existing
+            } else {
+                let auto = restored_renderer.or_else(|| {
+                    let mut ids = inner.renderer_slots.keys().cloned().collect::<Vec<_>>();
+                    ids.sort();
+                    ids.into_iter().next()
+                });
+                if let Some(renderer_id) = auto.clone() {
+                    let enabled = !inner.manual_stopped;
+                    inner.table.add_link_with_enabled(renderer_id, id, enabled);
+                }
+                auto
+            };
+            (id, session_id, auto, canvas_id)
         };
         // A freshly auto-linked renderer just gained an audience —
         // cancel any pending orphan timer so it survives.
@@ -1453,6 +1754,9 @@ impl Router {
         if let Some(snap) = self.snapshot_display(display_id).await {
             self.emit(RouterEvent::DisplayUpsert(snap));
         }
+        if canvas_id.is_some() {
+            self.publish_canvas_snapshot().await;
+        }
         let presentation = {
             let mut inner = self.inner.lock().await;
             let state = inner
@@ -1462,37 +1766,58 @@ impl Router {
             state.accepted = true;
             state.presentation
         };
-        DisplayHandle {
+        Ok(DisplayHandle {
             id: display_id,
             session_id: display_session_id,
             presentation,
             rx,
-        }
+        })
     }
 
     pub async fn unregister_display(self: &Arc<Self>, display_id: DisplayId) {
-        let cancelled_starts = {
+        let (cancelled_starts, mut canvas_affected, member_canvas_id) = {
             let mut inner = self.inner.lock().await;
-            if let Some(display) = inner.displays.get(&display_id) {
-                if let (Some(instance_id), Some(link)) = (
-                    display.info.instance_id.clone(),
-                    inner.table.links_for_display(display_id).into_iter().next(),
-                ) {
-                    inner
-                        .disconnected_assignments
-                        .insert(instance_id, link.renderer_id);
-                }
+            let member_canvas_id = inner
+                .displays
+                .get(&display_id)
+                .and_then(|display| self.canvas_for_info(&display.info))
+                .map(|(canvas_id, _)| canvas_id);
+            let disconnected = inner.displays.get(&display_id).and_then(|display| {
+                inner
+                    .table
+                    .links_for_display(display_id)
+                    .into_iter()
+                    .next()
+                    .map(|link| {
+                        (
+                            Self::settings_key_for(&display.info).to_string(),
+                            link.renderer_id,
+                        )
+                    })
+            });
+            if let Some((settings_key, renderer_id)) = disconnected {
+                inner
+                    .disconnected_assignments
+                    .insert(settings_key, renderer_id);
             }
             inner.displays.remove(&display_id);
             inner.display_conditions.remove(&display_id);
             let removed_links = inner.table.remove_display(display_id);
+            let canvas_ids = removed_links
+                .iter()
+                .filter_map(Self::canvas_id_for_link)
+                .collect::<HashSet<_>>();
+            let mut canvas_affected = Vec::new();
+            for canvas_id in canvas_ids {
+                canvas_affected.extend(self.refresh_canvas_locked(&mut inner, &canvas_id));
+            }
             let mut renderer_ids = removed_links
-                .into_iter()
-                .map(|link| link.renderer_id)
+                .iter()
+                .map(|link| link.renderer_id.clone())
                 .collect::<Vec<_>>();
             renderer_ids.sort();
             renderer_ids.dedup();
-            renderer_ids
+            let cancelled_starts = renderer_ids
                 .into_iter()
                 .filter(|renderer_id| {
                     inner.table.links_for_renderer(renderer_id).is_empty()
@@ -1501,7 +1826,8 @@ impl Router {
                             .get_mut(renderer_id)
                             .is_some_and(|slot| slot.pending_start.take().is_some())
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (cancelled_starts, canvas_affected, member_canvas_id)
         };
         for renderer_id in cancelled_starts {
             self.deadlines
@@ -1514,6 +1840,15 @@ impl Router {
         self.reconcile_buffer_flags().await;
         self.refresh_runtime_health().await;
         self.emit(RouterEvent::DisplayRemoved(display_id));
+        canvas_affected.sort_unstable();
+        canvas_affected.dedup();
+        if !canvas_affected.is_empty() {
+            self.resync_display_compositions(canvas_affected).await;
+            self.emit(RouterEvent::DisplaysReplace(self.snapshot_displays().await));
+        }
+        if member_canvas_id.is_some() {
+            self.publish_canvas_snapshot().await;
+        }
     }
 
     pub async fn on_consumer_import_failed(
@@ -1639,12 +1974,15 @@ impl Router {
             );
             return;
         }
-        let changed = {
+        let (changed, size_changed, settings_key) = {
             let mut inner = self.inner.lock().await;
             if let Some(s) = inner.displays.get_mut(&display_id) {
                 let differs = s.info.metrics != metrics;
+                let size_differs = s.info.metrics.width != metrics.width
+                    || s.info.metrics.height != metrics.height;
+                let settings_key = Self::settings_key_for(&s.info).to_string();
                 s.info.metrics = metrics;
-                differs
+                (differs, size_differs, settings_key)
             } else {
                 return;
             }
@@ -1652,6 +1990,26 @@ impl Router {
         // Layout depends on disp_w/disp_h, so any size change must
         // trigger a fresh composition config under the resolved fillmode/align.
         if changed {
+            if size_changed {
+                if let Some(settings) = self.settings.get() {
+                    match settings.update_canvas_member_size(
+                        &settings_key,
+                        metrics.width,
+                        metrics.height,
+                    ) {
+                        Ok(Some(canvas_id)) => {
+                            self.canvas_configs_changed([canvas_id]).await;
+                            return;
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            log::warn!(
+                                "display {display_id:?} resize could not update its canvas: {error}"
+                            );
+                        }
+                    }
+                }
+            }
             self.resync_display_composition(display_id).await;
         }
         if let Some(snap) = self.snapshot_display(display_id).await {
@@ -1984,6 +2342,172 @@ impl Router {
         ids
     }
 
+    pub async fn resolve_config_targets(
+        self: &Arc<Self>,
+        requested: Option<&[ConfigTargetId]>,
+    ) -> crate::error::Result<Vec<ResolvedConfigTarget>> {
+        let settings = self.settings.get().ok_or_else(|| {
+            crate::error::Error::Internal(anyhow::anyhow!("settings unavailable"))
+        })?;
+        let canvases = settings.canvases();
+        let inner = self.inner.lock().await;
+        let resolve_canvas = |canvas_id: &str,
+                              canvas: &crate::settings::CanvasPrefs|
+         -> crate::error::Result<ResolvedConfigTarget> {
+            let extent = crate::wallframe::display::placement::union(
+                canvas.members.values().map(|member| member.rect),
+            );
+            let mut members = inner
+                .displays
+                .iter()
+                .filter_map(|(display_id, display)| {
+                    canvas
+                        .members
+                        .get(Self::settings_key_for(&display.info))
+                        .map(|member| ResolvedConfigMember {
+                            display_id: *display_id,
+                            rect: Some(member.rect),
+                        })
+                })
+                .collect::<Vec<_>>();
+            members.sort_by_key(|member| member.display_id);
+            if members.is_empty() {
+                return Err(crate::error::Error::CanvasHasNoLiveDisplay(
+                    canvas_id.to_string(),
+                ));
+            }
+            Ok(ResolvedConfigTarget {
+                id: ConfigTargetId::Canvas(canvas_id.to_string()),
+                members,
+                extent,
+            })
+        };
+
+        let target_ids = if let Some(requested) = requested {
+            let mut seen = HashSet::new();
+            let mut out = Vec::with_capacity(requested.len());
+            for target in requested {
+                if !seen.insert(target.clone()) {
+                    continue;
+                }
+                out.push(target.clone());
+            }
+            out
+        } else {
+            let mut canvas_ids = canvases.keys().cloned().collect::<Vec<_>>();
+            canvas_ids.sort();
+            let mut out = canvas_ids
+                .into_iter()
+                .filter(|canvas_id| {
+                    let canvas = &canvases[canvas_id];
+                    inner.displays.values().any(|display| {
+                        canvas
+                            .members
+                            .contains_key(Self::settings_key_for(&display.info))
+                    })
+                })
+                .map(ConfigTargetId::Canvas)
+                .collect::<Vec<_>>();
+            let mut display_ids = inner.displays.keys().copied().collect::<Vec<_>>();
+            display_ids.sort_unstable();
+            out.extend(display_ids.into_iter().filter_map(|display_id| {
+                let display = &inner.displays[&display_id];
+                self.canvas_for_info(&display.info)
+                    .is_none()
+                    .then_some(ConfigTargetId::Display(display_id))
+            }));
+            out
+        };
+
+        let mut resolved = Vec::with_capacity(target_ids.len());
+        let mut claimed_displays = HashSet::new();
+        for target in target_ids {
+            let config = match &target {
+                ConfigTargetId::Canvas(canvas_id) => {
+                    let canvas = canvases
+                        .get(canvas_id)
+                        .ok_or_else(|| crate::error::Error::CanvasNotFound(canvas_id.clone()))?;
+                    resolve_canvas(canvas_id, canvas)?
+                }
+                ConfigTargetId::Display(display_id) => {
+                    let display = inner
+                        .displays
+                        .get(display_id)
+                        .ok_or(crate::error::Error::DisplayNotFound(*display_id))?;
+                    if let Some((canvas_id, _)) = self.canvas_for_info(&display.info) {
+                        return Err(crate::error::Error::DisplayBelongsToCanvas {
+                            display_id: *display_id,
+                            canvas_id,
+                        });
+                    }
+                    ResolvedConfigTarget {
+                        id: target.clone(),
+                        members: vec![ResolvedConfigMember {
+                            display_id: *display_id,
+                            rect: None,
+                        }],
+                        extent: None,
+                    }
+                }
+            };
+            for member in &config.members {
+                if !claimed_displays.insert(member.display_id) {
+                    return Err(crate::error::Error::CanvasInvalid(format!(
+                        "display {} is selected by more than one config",
+                        member.display_id
+                    )));
+                }
+            }
+            resolved.push(config);
+        }
+        Ok(resolved)
+    }
+
+    pub async fn config_targets_for_displays(
+        self: &Arc<Self>,
+        display_ids: &[DisplayId],
+    ) -> crate::error::Result<Vec<ConfigTargetId>> {
+        let settings = self.settings.get().ok_or_else(|| {
+            crate::error::Error::Internal(anyhow::anyhow!("settings unavailable"))
+        })?;
+        let canvases = settings.canvases();
+        let inner = self.inner.lock().await;
+        let mut seen = HashSet::new();
+        let mut targets = Vec::new();
+        for display_id in display_ids {
+            let display = inner
+                .displays
+                .get(display_id)
+                .ok_or(crate::error::Error::DisplayNotFound(*display_id))?;
+            let key = Self::settings_key_for(&display.info);
+            let target = canvases
+                .iter()
+                .find(|(_, canvas)| canvas.members.contains_key(key))
+                .map(|(canvas_id, _)| ConfigTargetId::Canvas(canvas_id.clone()))
+                .unwrap_or(ConfigTargetId::Display(*display_id));
+            if seen.insert(target.clone()) {
+                targets.push(target);
+            }
+        }
+        Ok(targets)
+    }
+
+    pub async fn expand_display_config_members(
+        self: &Arc<Self>,
+        display_ids: &[DisplayId],
+    ) -> crate::error::Result<Vec<DisplayId>> {
+        let targets = self.config_targets_for_displays(display_ids).await?;
+        let mut display_ids = self
+            .resolve_config_targets(Some(&targets))
+            .await?
+            .into_iter()
+            .flat_map(|target| target.members.into_iter().map(|member| member.display_id))
+            .collect::<Vec<_>>();
+        display_ids.sort_unstable();
+        display_ids.dedup();
+        Ok(display_ids)
+    }
+
     /// Enabled display links currently using `renderer_id`, ordered by id.
     pub async fn renderer_display_ids(self: &Arc<Self>, renderer_id: &str) -> Vec<DisplayId> {
         let inner = self.inner.lock().await;
@@ -2127,6 +2651,20 @@ impl Router {
         let inner = self.inner.lock().await;
         let s = inner.displays.get(&id)?;
         let link_rows = inner.table.links_for_display(id);
+        let settings_key = Self::settings_key_for(&s.info).to_string();
+        let canvas = self.canvas_for_info(&s.info);
+        let canvas_id = canvas.as_ref().map(|(id, _)| id.clone());
+        let canvas_rect = canvas
+            .as_ref()
+            .and_then(|(_, canvas)| canvas.members.get(&settings_key).map(|member| member.rect));
+        let canvas_overlap_count = canvas_id.as_ref().map_or(0, |_| {
+            inner
+                .displays
+                .values()
+                .filter(|display| Self::settings_key_for(&display.info) == settings_key)
+                .count() as u32
+        });
+        let selectable_target = canvas_id.is_none();
         let display_layout = self.resolved_layout(&s.info);
         let display_layout_source = self.display_layout_source(&s.info);
         let wallpaper_layout_override = link_rows.first().and_then(|l| {
@@ -2136,12 +2674,14 @@ impl Router {
                 .copied()
                 .filter(|layout| !layout.is_empty())
         });
-        let (effective_layout, effective_layout_source) =
-            if let Some(layout) = wallpaper_layout_override {
-                (layout.apply_to(display_layout), LayoutSource::Wallpaper)
-            } else {
-                (display_layout, display_layout_source)
-            };
+        let canvas_layout = link_rows.first().and_then(Self::canvas_layout_for_link);
+        let (effective_layout, effective_layout_source) = if let Some(layout) = canvas_layout {
+            (layout, LayoutSource::Canvas)
+        } else if let Some(layout) = wallpaper_layout_override {
+            (layout.apply_to(display_layout), LayoutSource::Wallpaper)
+        } else {
+            (display_layout, display_layout_source)
+        };
         let links = link_rows
             .into_iter()
             .map(|l| DisplayLinkSnapshot {
@@ -2154,6 +2694,7 @@ impl Router {
             id,
             name: s.info.name.clone(),
             instance_id: s.info.instance_id.clone(),
+            settings_key,
             width: s.info.metrics.width,
             height: s.info.metrics.height,
             refresh_mhz: s.info.metrics.refresh_mhz,
@@ -2163,6 +2704,10 @@ impl Router {
             display_layout,
             effective_layout,
             effective_layout_source,
+            canvas_id,
+            canvas_rect,
+            canvas_overlap_count,
+            selectable_target,
             conditions: inner
                 .display_conditions
                 .get(&id)
@@ -2250,6 +2795,20 @@ impl Router {
             .filter_map(|id| {
                 let s = inner.displays.get(&id)?;
                 let link_rows = inner.table.links_for_display(id);
+                let settings_key = Self::settings_key_for(&s.info).to_string();
+                let canvas = self.canvas_for_info(&s.info);
+                let canvas_id = canvas.as_ref().map(|(id, _)| id.clone());
+                let canvas_rect = canvas.as_ref().and_then(|(_, canvas)| {
+                    canvas.members.get(&settings_key).map(|member| member.rect)
+                });
+                let canvas_overlap_count = canvas_id.as_ref().map_or(0, |_| {
+                    inner
+                        .displays
+                        .values()
+                        .filter(|display| Self::settings_key_for(&display.info) == settings_key)
+                        .count() as u32
+                });
+                let selectable_target = canvas_id.is_none();
                 let display_layout = self.resolved_layout(&s.info);
                 let display_layout_source = self.display_layout_source(&s.info);
                 let wallpaper_layout_override = link_rows.first().and_then(|l| {
@@ -2259,8 +2818,11 @@ impl Router {
                         .copied()
                         .filter(|layout| !layout.is_empty())
                 });
+                let canvas_layout = link_rows.first().and_then(Self::canvas_layout_for_link);
                 let (effective_layout, effective_layout_source) =
-                    if let Some(layout) = wallpaper_layout_override {
+                    if let Some(layout) = canvas_layout {
+                        (layout, LayoutSource::Canvas)
+                    } else if let Some(layout) = wallpaper_layout_override {
                         (layout.apply_to(display_layout), LayoutSource::Wallpaper)
                     } else {
                         (display_layout, display_layout_source)
@@ -2277,6 +2839,7 @@ impl Router {
                     id,
                     name: s.info.name.clone(),
                     instance_id: s.info.instance_id.clone(),
+                    settings_key,
                     width: s.info.metrics.width,
                     height: s.info.metrics.height,
                     refresh_mhz: s.info.metrics.refresh_mhz,
@@ -2286,6 +2849,10 @@ impl Router {
                     display_layout,
                     effective_layout,
                     effective_layout_source,
+                    canvas_id,
+                    canvas_rect,
+                    canvas_overlap_count,
+                    selectable_target,
                     conditions: inner
                         .display_conditions
                         .get(&id)
@@ -2294,6 +2861,60 @@ impl Router {
                 })
             })
             .collect()
+    }
+
+    pub async fn snapshot_canvases(self: &Arc<Self>) -> CanvasCollectionSnapshot {
+        let settings = self
+            .settings
+            .get()
+            .expect("settings must be initialized before snapshots");
+        let canvases = settings.canvases();
+        let revision = settings.canvas_revision();
+        let inner = self.inner.lock().await;
+        let inherited = settings.resolved_global_layout();
+        let mut snapshots = canvases
+            .into_iter()
+            .map(|(canvas_id, canvas)| {
+                let mut members = canvas
+                    .members
+                    .iter()
+                    .map(|(settings_key, member)| {
+                        let mut display_ids = inner
+                            .displays
+                            .iter()
+                            .filter_map(|(display_id, display)| {
+                                (Self::settings_key_for(&display.info) == settings_key)
+                                    .then_some(*display_id)
+                            })
+                            .collect::<Vec<_>>();
+                        display_ids.sort_unstable();
+                        CanvasMemberSnapshot {
+                            settings_key: settings_key.clone(),
+                            rect: member.rect,
+                            display_ids,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                members.sort_by(|a, b| a.settings_key.cmp(&b.settings_key));
+                CanvasSnapshot {
+                    id: canvas_id.clone(),
+                    name: canvas.name,
+                    extent: crate::wallframe::display::placement::union(
+                        canvas.members.values().map(|member| member.rect),
+                    ),
+                    members,
+                    layout_override: canvas.layout,
+                    effective_layout: settings.resolved_canvas_layout(&canvas_id, inherited),
+                    wallpaper_id: canvas.last_wallpaper,
+                    revision,
+                }
+            })
+            .collect::<Vec<_>>();
+        snapshots.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        CanvasCollectionSnapshot {
+            canvases: snapshots,
+            revision,
+        }
     }
 
     /// For each requested `DisplayId`, return its settings key —
@@ -2862,6 +3483,17 @@ mod tests {
     use super::*;
     use crate::wallframe::renderer_manager::RendererManager;
 
+    fn assignment_targets(display_ids: Vec<DisplayId>) -> Vec<AssignmentTarget> {
+        vec![AssignmentTarget {
+            projections: display_ids
+                .iter()
+                .copied()
+                .map(|display_id| (display_id, LinkProjection::Independent))
+                .collect(),
+            display_ids,
+        }]
+    }
+
     #[test]
     fn lifecycle_control_labels_name_the_actual_action() {
         let transition = || ControlTransition { fade_ms: 0 };
@@ -3171,7 +3803,7 @@ mod tests {
         let receipt = router
             .apply_assignment(ApplyAssignment {
                 spawn_request,
-                display_ids: vec![display_id],
+                targets: assignment_targets(vec![display_id]),
                 duplicate_renderers: false,
                 wallpaper_layout_override: WallpaperLayoutOverride::default(),
                 preempt_pending_start: false,
@@ -3207,7 +3839,7 @@ mod tests {
                     renderer_name: Some("video".into()),
                     ..Default::default()
                 },
-                display_ids: vec![display_id],
+                targets: assignment_targets(vec![display_id]),
                 duplicate_renderers: false,
                 wallpaper_layout_override: WallpaperLayoutOverride::default(),
                 preempt_pending_start: true,
@@ -3248,7 +3880,7 @@ mod tests {
                     renderer_name: Some("video".into()),
                     ..Default::default()
                 },
-                display_ids: vec![display_id],
+                targets: assignment_targets(vec![display_id]),
                 duplicate_renderers: false,
                 wallpaper_layout_override: WallpaperLayoutOverride::default(),
                 preempt_pending_start: true,
@@ -3492,6 +4124,408 @@ mod tests {
         // Unknown ids are dropped.
         let keys = router.display_settings_keys(&[h1.id, 9999]).await;
         assert_eq!(keys, vec![(h1.id, "uuid-1".into())]);
+    }
+
+    #[tokio::test]
+    async fn reverse_registration_order_keeps_wallpaper_identity() {
+        let settings = test_settings_store().await;
+        settings.update(|state| {
+            state
+                .displays
+                .entry("display-a".into())
+                .or_default()
+                .last_wallpaper = Some("wallpaper-a".into());
+            state
+                .displays
+                .entry("display-b".into())
+                .or_default()
+                .last_wallpaper = Some("wallpaper-b".into());
+        });
+        let router = Router::new(Arc::new(RendererManager::new_default()));
+        router.attach_settings(settings.clone());
+
+        let b = router.register_display(reg_iid("Right", "display-b")).await;
+        let a = router.register_display(reg_iid("Left", "display-a")).await;
+        let by_id = router
+            .snapshot_displays()
+            .await
+            .into_iter()
+            .map(|display| (display.id, display.settings_key))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(
+            settings.resolved_last_wallpaper(&by_id[&a.id]).as_deref(),
+            Some("wallpaper-a")
+        );
+        assert_eq!(
+            settings.resolved_last_wallpaper(&by_id[&b.id]).as_deref(),
+            Some("wallpaper-b")
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_live_instance_id_is_kept_as_distinct_session_displays() {
+        let router = Router::new(Arc::new(RendererManager::new_default()));
+        let left = router
+            .try_register_display(reg_iid("Left", "same-display"))
+            .await
+            .unwrap();
+        let right = router
+            .try_register_display(reg_iid("Right", "same-display"))
+            .await
+            .unwrap();
+
+        assert_ne!(left.id, right.id);
+        assert_eq!(router.display_count().await, 2);
+        let snapshots = router.snapshot_displays().await;
+        assert!(snapshots
+            .iter()
+            .all(|display| display.settings_key == "same-display"));
+    }
+
+    #[tokio::test]
+    async fn canvas_membership_and_extent_are_projected_from_persistent_config() {
+        let settings = test_settings_store().await;
+        let receipt = settings
+            .create_canvas(crate::settings::CanvasDraft {
+                name: "Office".into(),
+                members: HashMap::from([
+                    (
+                        "display-left".into(),
+                        crate::settings::CanvasMemberPrefs {
+                            rect: CanvasRect {
+                                x: -100,
+                                y: 20,
+                                width: 100,
+                                height: 100,
+                            },
+                        },
+                    ),
+                    (
+                        "display-right".into(),
+                        crate::settings::CanvasMemberPrefs {
+                            rect: CanvasRect {
+                                x: 0,
+                                y: 20,
+                                width: 200,
+                                height: 100,
+                            },
+                        },
+                    ),
+                ]),
+                layout: None,
+            })
+            .unwrap();
+        let router = Router::new(Arc::new(RendererManager::new_default()));
+        router.attach_settings(settings.clone());
+        let left = router
+            .register_display(reg_iid("Left", "display-left"))
+            .await;
+        let right = router
+            .register_display(reg_iid("Right", "display-right"))
+            .await;
+        let left = router.snapshot_display(left.id).await.unwrap();
+        let right = router.snapshot_display(right.id).await.unwrap();
+        assert_eq!(left.canvas_id.as_deref(), Some(receipt.canvas_id.as_str()));
+        assert_eq!(right.canvas_id.as_deref(), Some(receipt.canvas_id.as_str()));
+        assert_eq!(
+            left.canvas_rect,
+            Some(CanvasRect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            })
+        );
+        let canvas = router.snapshot_canvases().await;
+        assert_eq!(canvas.canvases.len(), 1);
+        assert_eq!(
+            canvas.canvases[0].extent,
+            Some(CanvasRect {
+                x: 0,
+                y: 0,
+                width: 300,
+                height: 100,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn canvas_member_resize_and_layout_refresh_every_projection() {
+        let settings = test_settings_store().await;
+        let receipt = settings
+            .create_canvas(crate::settings::CanvasDraft {
+                name: "Office".into(),
+                members: HashMap::from([
+                    (
+                        "display-left".into(),
+                        crate::settings::CanvasMemberPrefs {
+                            rect: CanvasRect {
+                                x: 0,
+                                y: 0,
+                                width: 1920,
+                                height: 1080,
+                            },
+                        },
+                    ),
+                    (
+                        "display-right".into(),
+                        crate::settings::CanvasMemberPrefs {
+                            rect: CanvasRect {
+                                x: 1920,
+                                y: 0,
+                                width: 1920,
+                                height: 1080,
+                            },
+                        },
+                    ),
+                ]),
+                layout: None,
+            })
+            .unwrap();
+        let manager = Arc::new(RendererManager::new_default());
+        let router = Router::new(manager.clone());
+        router.attach_settings(settings.clone());
+        let renderer = RendererHandle::test_stub("canvas-renderer", "image");
+        renderer.test_publish_pool(fake_published_pool(1, 3840, 1080));
+        manager.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer).await;
+        let mut left = router
+            .register_display(reg_iid("Left", "display-left"))
+            .await;
+        let mut right = router
+            .register_display(reg_iid("Right", "display-right"))
+            .await;
+        {
+            let mut inner = router.inner.lock().await;
+            let extent = CanvasRect {
+                x: 0,
+                y: 0,
+                width: 3840,
+                height: 1080,
+            };
+            for (display_id, member) in [
+                (
+                    left.id,
+                    CanvasRect {
+                        x: 0,
+                        y: 0,
+                        width: 1920,
+                        height: 1080,
+                    },
+                ),
+                (
+                    right.id,
+                    CanvasRect {
+                        x: 1920,
+                        y: 0,
+                        width: 1920,
+                        height: 1080,
+                    },
+                ),
+            ] {
+                inner.table.add_link_with_projection(
+                    "canvas-renderer".into(),
+                    display_id,
+                    true,
+                    LinkProjection::Canvas {
+                        canvas_id: receipt.canvas_id.clone(),
+                        extent,
+                        member,
+                        layout: settings.resolved_global_layout(),
+                    },
+                );
+            }
+        }
+        router.sync_display(left.id).await;
+        router.sync_display(right.id).await;
+        let _ = last_composition_config(&mut left.rx);
+        let _ = last_composition_config(&mut right.rx);
+
+        router
+            .set_display_metrics(
+                right.id,
+                DisplayMetrics {
+                    width: 2560,
+                    height: 1440,
+                    refresh_mhz: 60_000,
+                },
+            )
+            .await;
+
+        assert!(last_composition_config(&mut left.rx).is_some());
+        assert!(last_composition_config(&mut right.rx).is_some());
+        let canvas = settings.canvas(&receipt.canvas_id).unwrap();
+        assert_eq!(canvas.members["display-right"].rect.x, 1920);
+        assert_eq!(canvas.members["display-right"].rect.y, 0);
+        assert_eq!(canvas.members["display-right"].rect.width, 2560);
+        assert_eq!(canvas.members["display-right"].rect.height, 1440);
+        assert_eq!(settings.canvas_revision(), receipt.revision);
+        assert_eq!(
+            router.snapshot_canvases().await.canvases[0].extent,
+            Some(CanvasRect {
+                x: 0,
+                y: 0,
+                width: 4480,
+                height: 1440,
+            })
+        );
+
+        router
+            .set_canvas_layout(
+                &receipt.canvas_id,
+                Some(FillMode::PreserveAspectFit),
+                Some(crate::wallframe::display::layout::Location::new(25, 75)),
+                Some(crate::wallframe::display::layout::Rotation::Cw90),
+                false,
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert!(last_composition_config(&mut left.rx).is_some());
+        assert!(last_composition_config(&mut right.rx).is_some());
+        let canvas = settings.canvas(&receipt.canvas_id).unwrap();
+        assert_eq!(
+            canvas.layout,
+            Some(crate::settings::CanvasLayoutPrefs {
+                fillmode: Some(FillMode::PreserveAspectFit),
+                location: Some(crate::wallframe::display::layout::Location::new(25, 75)),
+                rotation: Some(crate::wallframe::display::layout::Rotation::Cw90),
+            })
+        );
+        assert_eq!(settings.canvas_revision(), receipt.revision);
+    }
+
+    #[tokio::test]
+    async fn duplicate_canvas_members_attach_to_the_same_projection() {
+        let settings = test_settings_store().await;
+        let receipt = settings
+            .create_canvas(crate::settings::CanvasDraft {
+                name: "Mirror".into(),
+                members: HashMap::from([(
+                    "same-display".into(),
+                    crate::settings::CanvasMemberPrefs {
+                        rect: CanvasRect {
+                            x: 0,
+                            y: 0,
+                            width: 1920,
+                            height: 1080,
+                        },
+                    },
+                )]),
+                layout: None,
+            })
+            .unwrap();
+        let manager = Arc::new(RendererManager::new_default());
+        let router = Router::new(manager.clone());
+        router.attach_settings(settings.clone());
+        let renderer = RendererHandle::test_stub("canvas-renderer", "image");
+        manager.register_test_handle(renderer.clone()).await;
+        router.register_renderer(renderer).await;
+        let first = router
+            .register_display(reg_iid("Mirror A", "same-display"))
+            .await;
+        let rect = CanvasRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        {
+            let mut inner = router.inner.lock().await;
+            inner.table.add_link_with_projection(
+                "canvas-renderer".into(),
+                first.id,
+                true,
+                LinkProjection::Canvas {
+                    canvas_id: receipt.canvas_id.clone(),
+                    extent: rect,
+                    member: rect,
+                    layout: settings.resolved_global_layout(),
+                },
+            );
+        }
+
+        let second = router
+            .register_display(reg_iid("Mirror B", "same-display"))
+            .await;
+        let inner = router.inner.lock().await;
+        for display_id in [first.id, second.id] {
+            let links = inner.table.links_for_display(display_id);
+            assert_eq!(links.len(), 1);
+            assert!(matches!(
+                &links[0].projection,
+                LinkProjection::Canvas {
+                    canvas_id,
+                    extent,
+                    member,
+                    ..
+                } if canvas_id == &receipt.canvas_id && *extent == rect && *member == rect
+            ));
+        }
+        drop(inner);
+        let canvas = router.snapshot_canvases().await;
+        assert_eq!(canvas.canvases[0].members[0].display_ids.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn config_resolver_selects_each_canvas_once_and_rejects_member_display_targets() {
+        let settings = test_settings_store().await;
+        let receipt = settings
+            .create_canvas(crate::settings::CanvasDraft {
+                name: "Office".into(),
+                members: HashMap::from([(
+                    "canvas-display".into(),
+                    crate::settings::CanvasMemberPrefs {
+                        rect: CanvasRect {
+                            x: 0,
+                            y: 0,
+                            width: 100,
+                            height: 100,
+                        },
+                    },
+                )]),
+                layout: None,
+            })
+            .unwrap();
+        let router = Router::new(Arc::new(RendererManager::new_default()));
+        router.attach_settings(settings);
+        let canvas_a = router
+            .register_display(reg_iid("Canvas A", "canvas-display"))
+            .await;
+        let canvas_b = router
+            .register_display(reg_iid("Canvas B", "canvas-display"))
+            .await;
+        let standalone = router.register_display(reg("Standalone", 100, 100)).await;
+
+        let resolved = router.resolve_config_targets(None).await.unwrap();
+        assert_eq!(resolved.len(), 2);
+        let canvas = resolved
+            .iter()
+            .find(|target| target.id == ConfigTargetId::Canvas(receipt.canvas_id.clone()))
+            .unwrap();
+        assert_eq!(
+            canvas
+                .members
+                .iter()
+                .map(|member| member.display_id)
+                .collect::<Vec<_>>(),
+            vec![canvas_a.id, canvas_b.id]
+        );
+        assert!(resolved.iter().any(|target| {
+            target.id == ConfigTargetId::Display(standalone.id) && target.members.len() == 1
+        }));
+
+        let member_target = router
+            .resolve_config_targets(Some(&[ConfigTargetId::Display(canvas_a.id)]))
+            .await;
+        assert!(matches!(
+            member_target,
+            Err(crate::error::Error::DisplayBelongsToCanvas { display_id, canvas_id })
+                if display_id == canvas_a.id && canvas_id == receipt.canvas_id
+        ));
     }
 
     #[tokio::test]
@@ -4226,6 +5260,7 @@ mod tests {
             renderer_id: rid.to_string(),
             display_id: did,
             enabled: true,
+            projection: LinkProjection::Independent,
             src_rect: super::super::table::FULL_SRC,
             dst_rect: super::super::table::FULL_DST,
             transform: 0,
@@ -4286,6 +5321,41 @@ mod tests {
         );
         // Explicit clear color survives.
         assert_eq!(cfg.clear_rgba, [1.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn project_link_keeps_canvas_config_valid_when_content_is_offscreen() {
+        let pool = fake_published_pool(1, 100, 100);
+        let info = make_info("Left", 100, 100);
+        let mut link = make_link("r1", 1);
+        let canvas_layout = ResolvedLayout {
+            fillmode: FillMode::PreserveAspectFit,
+            location: Default::default(),
+            rotation: Default::default(),
+        };
+        link.projection = LinkProjection::Canvas {
+            canvas_id: "canvas".into(),
+            extent: CanvasRect {
+                x: 0,
+                y: 0,
+                width: 300,
+                height: 100,
+            },
+            member: CanvasRect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            layout: canvas_layout,
+        };
+        let cfg = project_link(&link, &pool, &info, 2, 1, &canvas_layout);
+
+        assert!(cfg.source_w > 0.0);
+        assert!(cfg.source_h > 0.0);
+        assert!(cfg.dest_w > 0.0);
+        assert!(cfg.dest_h > 0.0);
+        assert!(cfg.dest_x >= cfg.display_w);
     }
 
     // -----------------------------------------------------------------
@@ -5043,7 +6113,7 @@ mod tests {
         let retained_id = router
             .apply_assignment(ApplyAssignment {
                 spawn_request: request,
-                display_ids: vec![h.id],
+                targets: assignment_targets(vec![h.id]),
                 duplicate_renderers: false,
                 wallpaper_layout_override: WallpaperLayoutOverride::default(),
                 preempt_pending_start: false,
@@ -5153,7 +6223,7 @@ mod tests {
         let retained_id = router
             .apply_assignment(ApplyAssignment {
                 spawn_request: request,
-                display_ids: vec![display.id],
+                targets: assignment_targets(vec![display.id]),
                 duplicate_renderers: false,
                 wallpaper_layout_override: WallpaperLayoutOverride::default(),
                 preempt_pending_start: false,
@@ -5566,7 +6636,7 @@ mod tests {
         let result = router
             .apply_assignment(ApplyAssignment {
                 spawn_request: request,
-                display_ids: vec![display.id],
+                targets: assignment_targets(vec![display.id]),
                 duplicate_renderers: false,
                 wallpaper_layout_override: WallpaperLayoutOverride::default(),
                 preempt_pending_start: true,
@@ -5617,7 +6687,7 @@ mod tests {
         let renderer_id = router
             .apply_assignment(ApplyAssignment {
                 spawn_request: request,
-                display_ids: Vec::new(),
+                targets: assignment_targets(Vec::new()),
                 duplicate_renderers: false,
                 wallpaper_layout_override: WallpaperLayoutOverride::default(),
                 preempt_pending_start: false,

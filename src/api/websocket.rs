@@ -263,6 +263,10 @@ impl WsSession {
         self.frames
             .event(displays_replace_event(snap, &self.state.settings))?;
 
+        self.frames.event(canvases_replace_event(
+            self.state.router.snapshot_canvases().await,
+        ))?;
+
         let snap = self.state.router.snapshot_renderers().await;
         self.frames
             .event(renderers_replace_event(snap, &self.state.settings))?;

@@ -57,13 +57,6 @@ static QStringList toStr(const QVariantList& v) {
     return out;
 }
 
-static QtProtobuf::uint64List toU64(const QVariantList& v) {
-    QtProtobuf::uint64List out;
-    out.reserve(v.size());
-    for (const auto& x : v) out.append(x.toULongLong());
-    return out;
-}
-
 void PlaylistMutationQuery::send(proto::Request req, bool captureCreate) {
     setStatus(Status::Querying);
     auto backend = App::instance()->backend();
@@ -139,19 +132,19 @@ void PlaylistMutationQuery::setInterval(qint64 id, int intervalSecs) {
     send(std::move(req), false);
 }
 
-void PlaylistMutationQuery::activate(qint64 id, const QVariantList& displayIds, bool autoAttach) {
+void PlaylistMutationQuery::activate(qint64 id, const QVariantList& targets, bool autoAttach) {
     proto::PlaylistActivateRequest r;
     r.setId_proto(id);
-    r.setDisplayIds(toU64(displayIds));
+    r.setTargets(presentationTargetsFromVariant(targets));
     r.setAutoAttach(autoAttach);
     proto::Request req;
     req.setPlaylistActivate(std::move(r));
     send(std::move(req), false);
 }
 
-void PlaylistMutationQuery::deactivate(const QVariantList& displayIds, qint64 clearAutoAttach) {
+void PlaylistMutationQuery::deactivate(const QVariantList& targets, qint64 clearAutoAttach) {
     proto::PlaylistDeactivateRequest r;
-    r.setDisplayIds(toU64(displayIds));
+    r.setTargets(presentationTargetsFromVariant(targets));
     r.setClearAutoAttach(clearAutoAttach);
     proto::Request req;
     req.setPlaylistDeactivate(std::move(r));

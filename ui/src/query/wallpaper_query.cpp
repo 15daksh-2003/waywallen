@@ -539,11 +539,11 @@ void WallpaperApplyQuery::setWallpaper(const model::Wallpaper& v) {
     }
 }
 
-auto WallpaperApplyQuery::displayIds() const -> const QVariantList& { return m_display_ids; }
-void WallpaperApplyQuery::setDisplayIds(const QVariantList& v) {
-    if (m_display_ids != v) {
-        m_display_ids = v;
-        Q_EMIT displayIdsChanged();
+auto WallpaperApplyQuery::targets() const -> const QVariantList& { return m_targets; }
+void WallpaperApplyQuery::setTargets(const QVariantList& v) {
+    if (m_targets != v) {
+        m_targets = v;
+        Q_EMIT targetsChanged();
     }
 }
 
@@ -573,16 +573,7 @@ void WallpaperApplyQuery::reload() {
     auto req   = proto::Request {};
     auto inner = proto::WallpaperApplyRequest {};
     inner.setWallpaperId(m_wallpaper.id_proto());
-    // Empty list is a legitimate value: daemon treats it as "apply to
-    // all displays". Non-empty restricts the relink to named ids.
-    QtProtobuf::uint64List ids;
-    ids.reserve(m_display_ids.size());
-    for (const auto& v : m_display_ids) {
-        bool ok = false;
-        auto id = v.toULongLong(&ok);
-        if (ok) ids.append(id);
-    }
-    inner.setDisplayIds(ids);
+    inner.setTargets(presentationTargetsFromVariant(m_targets));
     inner.setRendererName(m_renderer_name);
     req.setWallpaperApply(std::move(inner));
 

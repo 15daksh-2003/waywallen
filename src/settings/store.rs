@@ -1,4 +1,69 @@
 use super::*;
+use std::collections::HashSet;
+
+#[derive(Debug, Clone)]
+pub struct CanvasDraft {
+    pub name: String,
+    pub members: HashMap<String, CanvasMemberPrefs>,
+    pub layout: Option<CanvasLayoutPrefs>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CanvasMutationReceipt {
+    pub canvas_id: String,
+    pub canvas: CanvasPrefs,
+    pub revision: u64,
+    pub affected_display_keys: Vec<String>,
+    pub previous: Option<CanvasPrefs>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CanvasDeleteReceipt {
+    pub canvas_id: String,
+    pub revision: u64,
+    pub affected_display_keys: Vec<String>,
+    pub canvas: CanvasPrefs,
+}
+
+fn normalize_canvas_draft(mut draft: CanvasDraft) -> crate::error::Result<CanvasPrefs> {
+    draft.name = draft.name.trim().to_string();
+    if draft.name.is_empty() {
+        return Err(crate::error::Error::CanvasInvalid(
+            "canvas name is empty".to_string(),
+        ));
+    }
+    if draft.members.len() > 128 {
+        return Err(crate::error::Error::CanvasInvalid(
+            "canvas has more than 128 members".to_string(),
+        ));
+    }
+    let mut keys = draft.members.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    if keys.iter().any(|key| key.trim().is_empty()) {
+        return Err(crate::error::Error::CanvasInvalid(
+            "canvas member has an empty display key".to_string(),
+        ));
+    }
+    let mut rects = keys
+        .iter()
+        .map(|key| draft.members[key].rect)
+        .collect::<Vec<_>>();
+    crate::wallframe::display::placement::canonicalize(&mut rects)
+        .map_err(|message| crate::error::Error::CanvasInvalid(message.to_string()))?;
+    for (key, rect) in keys.into_iter().zip(rects) {
+        draft
+            .members
+            .get_mut(&key)
+            .expect("canvas member missing")
+            .rect = rect;
+    }
+    Ok(CanvasPrefs {
+        name: draft.name,
+        members: draft.members,
+        last_wallpaper: None,
+        layout: draft.layout,
+    })
+}
 
 pub struct SettingsStore {
     inner: Arc<StdRwLock<Settings>>,
@@ -10,6 +75,7 @@ pub struct SettingsStore {
     /// Set when the in-memory state diverges from disk.
     /// Cleared by a successful `flush()`.
     dirty: AtomicBool,
+    canvas_revision: AtomicU64,
     writer_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -22,6 +88,7 @@ impl SettingsStore {
             path: PathBuf::from("/dev/null"),
             flush_lock: tokio::sync::Mutex::new(()),
             dirty: AtomicBool::new(false),
+            canvas_revision: AtomicU64::new(1),
             writer_task: StdMutex::new(None),
         })
     }
@@ -71,6 +138,7 @@ impl SettingsStore {
             // Mark dirty when no on-disk file exists so the seed flush
             // writes the default config.
             dirty: AtomicBool::new(seed_on_disk),
+            canvas_revision: AtomicU64::new(1),
             writer_task: StdMutex::new(None),
         });
 
@@ -170,6 +238,46 @@ impl SettingsStore {
         }
     }
 
+    pub fn resolved_global_layout(&self) -> ResolvedLayout {
+        let g = self.inner.read().expect("settings poisoned");
+        let defaults = &g.global.layout;
+        ResolvedLayout {
+            fillmode: defaults.fillmode,
+            location: defaults
+                .location
+                .unwrap_or_else(|| Location::from_align(defaults.align)),
+            rotation: defaults.rotation,
+        }
+    }
+
+    pub fn canvas_for_member(&self, display_key: &str) -> Option<(String, CanvasPrefs)> {
+        let g = self.inner.read().expect("settings poisoned");
+        g.canvases
+            .iter()
+            .find(|(_, canvas)| canvas.members.contains_key(display_key))
+            .map(|(id, canvas)| (id.clone(), canvas.clone()))
+    }
+
+    pub fn resolved_canvas_layout(
+        &self,
+        canvas_id: &str,
+        inherited: ResolvedLayout,
+    ) -> ResolvedLayout {
+        let g = self.inner.read().expect("settings poisoned");
+        let canvas = g.canvases.get(canvas_id).and_then(|canvas| canvas.layout);
+        ResolvedLayout {
+            fillmode: canvas
+                .and_then(|layout| layout.fillmode)
+                .unwrap_or(inherited.fillmode),
+            location: canvas
+                .and_then(|layout| layout.location)
+                .unwrap_or(inherited.location),
+            rotation: canvas
+                .and_then(|layout| layout.rotation)
+                .unwrap_or(inherited.rotation),
+        }
+    }
+
     pub fn resolved_auto_replay(&self, display_name: &str) -> AutoReplayPolicy {
         let g = self.inner.read().expect("settings poisoned");
         if let Some(policy) = g
@@ -229,6 +337,253 @@ impl SettingsStore {
             .keys()
             .cloned()
             .collect()
+    }
+
+    pub fn canvas_revision(&self) -> u64 {
+        self.canvas_revision.load(Ordering::Acquire)
+    }
+
+    pub fn canvases(&self) -> HashMap<String, CanvasPrefs> {
+        self.inner
+            .read()
+            .expect("settings poisoned")
+            .canvases
+            .clone()
+    }
+
+    pub fn canvas(&self, canvas_id: &str) -> Option<CanvasPrefs> {
+        self.inner
+            .read()
+            .expect("settings poisoned")
+            .canvases
+            .get(canvas_id)
+            .cloned()
+    }
+
+    pub fn update_canvas_member_size(
+        &self,
+        display_key: &str,
+        width: u32,
+        height: u32,
+    ) -> crate::error::Result<Option<String>> {
+        let next_size = CanvasRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        next_size
+            .validate()
+            .map_err(|message| crate::error::Error::CanvasInvalid(message.to_string()))?;
+        let changed_canvas_id = {
+            let mut settings = self.inner.write().expect("settings poisoned");
+            let Some((canvas_id, canvas)) = settings
+                .canvases
+                .iter()
+                .find(|(_, canvas)| canvas.members.contains_key(display_key))
+            else {
+                return Ok(None);
+            };
+            let canvas_id = canvas_id.clone();
+            let current = canvas.members[display_key].rect;
+            if current.width == width && current.height == height {
+                return Ok(None);
+            }
+            let next = CanvasRect {
+                x: current.x,
+                y: current.y,
+                width,
+                height,
+            };
+            let extent = crate::wallframe::display::placement::union(canvas.members.iter().map(
+                |(key, member)| {
+                    if key == display_key {
+                        next
+                    } else {
+                        member.rect
+                    }
+                },
+            ));
+            if extent.is_none() {
+                return Err(crate::error::Error::CanvasInvalid(
+                    "canvas extent is invalid after display resize".to_string(),
+                ));
+            }
+            settings
+                .canvases
+                .get_mut(&canvas_id)
+                .expect("canvas disappeared while resizing member")
+                .members
+                .get_mut(display_key)
+                .expect("canvas member disappeared while resizing")
+                .rect = next;
+            canvas_id
+        };
+        self.dirty.store(true, Ordering::Release);
+        self.notify.notify_one();
+        Ok(Some(changed_canvas_id))
+    }
+
+    pub fn set_canvas_layout(
+        &self,
+        canvas_id: &str,
+        layout: Option<CanvasLayoutPrefs>,
+    ) -> crate::error::Result<bool> {
+        let changed = {
+            let mut settings = self.inner.write().expect("settings poisoned");
+            let canvas = settings
+                .canvases
+                .get_mut(canvas_id)
+                .ok_or_else(|| crate::error::Error::CanvasNotFound(canvas_id.to_string()))?;
+            if canvas.layout == layout {
+                false
+            } else {
+                canvas.layout = layout;
+                true
+            }
+        };
+        if changed {
+            self.dirty.store(true, Ordering::Release);
+            self.notify.notify_one();
+        }
+        Ok(changed)
+    }
+
+    fn check_canvas_members(
+        settings: &Settings,
+        except_canvas_id: Option<&str>,
+        members: &HashMap<String, CanvasMemberPrefs>,
+    ) -> crate::error::Result<()> {
+        for key in members.keys() {
+            if let Some((canvas_id, canvas)) =
+                settings.canvases.iter().find(|(canvas_id, canvas)| {
+                    Some(canvas_id.as_str()) != except_canvas_id && canvas.members.contains_key(key)
+                })
+            {
+                return Err(crate::error::Error::CanvasMemberConflict {
+                    display_key: key.clone(),
+                    canvas_id: canvas_id.clone(),
+                    canvas_name: canvas.name.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn create_canvas(&self, draft: CanvasDraft) -> crate::error::Result<CanvasMutationReceipt> {
+        let canvas = normalize_canvas_draft(draft)?;
+        let canvas_id = uuid::Uuid::new_v4().to_string();
+        let affected_display_keys = canvas.members.keys().cloned().collect::<Vec<_>>();
+        let revision = {
+            let mut settings = self.inner.write().expect("settings poisoned");
+            Self::check_canvas_members(&settings, None, &canvas.members)?;
+            settings.canvases.insert(canvas_id.clone(), canvas.clone());
+            self.canvas_revision.fetch_add(1, Ordering::AcqRel) + 1
+        };
+        self.dirty.store(true, Ordering::Release);
+        self.notify.notify_one();
+        Ok(CanvasMutationReceipt {
+            canvas_id,
+            canvas,
+            revision,
+            affected_display_keys,
+            previous: None,
+        })
+    }
+
+    pub fn update_canvas(
+        &self,
+        canvas_id: &str,
+        expected_revision: u64,
+        draft: CanvasDraft,
+    ) -> crate::error::Result<CanvasMutationReceipt> {
+        let mut canvas = normalize_canvas_draft(draft)?;
+        let (affected_display_keys, previous, revision) = {
+            let mut settings = self.inner.write().expect("settings poisoned");
+            let current_revision = self.canvas_revision();
+            if expected_revision != current_revision {
+                return Err(crate::error::Error::CanvasRevisionConflict {
+                    expected: expected_revision,
+                    current: current_revision,
+                });
+            }
+            Self::check_canvas_members(&settings, Some(canvas_id), &canvas.members)?;
+            let old = settings
+                .canvases
+                .get(canvas_id)
+                .cloned()
+                .ok_or_else(|| crate::error::Error::CanvasNotFound(canvas_id.to_string()))?;
+            canvas.last_wallpaper = old.last_wallpaper.clone();
+            canvas.layout = old.layout;
+            let mut affected = old.members.keys().cloned().collect::<HashSet<_>>();
+            affected.extend(canvas.members.keys().cloned());
+            settings
+                .canvases
+                .insert(canvas_id.to_string(), canvas.clone());
+            let revision = self.canvas_revision.fetch_add(1, Ordering::AcqRel) + 1;
+            (affected.into_iter().collect::<Vec<_>>(), old, revision)
+        };
+        self.dirty.store(true, Ordering::Release);
+        self.notify.notify_one();
+        Ok(CanvasMutationReceipt {
+            canvas_id: canvas_id.to_string(),
+            canvas,
+            revision,
+            affected_display_keys,
+            previous: Some(previous),
+        })
+    }
+
+    pub fn delete_canvas(
+        &self,
+        canvas_id: &str,
+        expected_revision: u64,
+    ) -> crate::error::Result<CanvasDeleteReceipt> {
+        let (canvas, revision) = {
+            let mut settings = self.inner.write().expect("settings poisoned");
+            let current_revision = self.canvas_revision();
+            if expected_revision != current_revision {
+                return Err(crate::error::Error::CanvasRevisionConflict {
+                    expected: expected_revision,
+                    current: current_revision,
+                });
+            }
+            let canvas = settings
+                .canvases
+                .remove(canvas_id)
+                .ok_or_else(|| crate::error::Error::CanvasNotFound(canvas_id.to_string()))?;
+            let revision = self.canvas_revision.fetch_add(1, Ordering::AcqRel) + 1;
+            (canvas, revision)
+        };
+        let affected_display_keys = canvas.members.keys().cloned().collect::<Vec<_>>();
+        self.dirty.store(true, Ordering::Release);
+        self.notify.notify_one();
+        Ok(CanvasDeleteReceipt {
+            canvas_id: canvas_id.to_string(),
+            revision,
+            affected_display_keys,
+            canvas,
+        })
+    }
+
+    pub fn set_canvas_wallpaper(
+        &self,
+        canvas_id: &str,
+        wallpaper_id: Option<String>,
+    ) -> crate::error::Result<()> {
+        let mut settings = self.inner.write().expect("settings poisoned");
+        let canvas = settings
+            .canvases
+            .get_mut(canvas_id)
+            .ok_or_else(|| crate::error::Error::CanvasNotFound(canvas_id.to_string()))?;
+        if canvas.last_wallpaper == wallpaper_id {
+            return Ok(());
+        }
+        canvas.last_wallpaper = wallpaper_id;
+        drop(settings);
+        self.dirty.store(true, Ordering::Release);
+        self.notify.notify_one();
+        Ok(())
     }
 
     /// Apply an in-memory mutation and compare before/after state.

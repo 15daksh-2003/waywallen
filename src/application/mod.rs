@@ -19,6 +19,8 @@ pub struct ApplyResult {
     pub entry: WallpaperEntry,
     pub activation: ApplyActivation,
     pub stopped_playlists: Vec<StoppedPlaylist>,
+    pub targets: Vec<ApplyTarget>,
+    pub display_ids: Vec<DisplayId>,
 }
 
 pub struct StoppedPlaylist {
@@ -81,10 +83,16 @@ pub enum RendererSharingPolicy {
     Shared,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ApplyTarget {
+    Display(DisplayId),
+    Canvas(String),
+}
+
 #[derive(Clone, Debug)]
 pub struct ApplyRequest {
     pub source: ApplySource,
-    pub display_ids: Option<Vec<DisplayId>>,
+    pub targets: Option<Vec<ApplyTarget>>,
     pub renderer_name: Option<String>,
     pub first_frame_timeout: Option<Duration>,
     pub require_display: bool,

@@ -93,6 +93,11 @@ message Request {
     GlobalPauseSetRequest       global_pause_set = 76;
     GlobalMuteSetRequest        global_mute_set = 77;
     GlobalStopSetRequest        global_stop_set = 78;
+    CanvasListRequest           canvas_list = 79;
+    CanvasCreateRequest         canvas_create = 80;
+    CanvasUpdateRequest         canvas_update = 81;
+    CanvasDeleteRequest         canvas_delete = 82;
+    CanvasLayoutSetRequest      canvas_layout_set = 83;
   }
 }
 
@@ -173,6 +178,11 @@ message Response {
     GlobalPauseSetResponse     global_pause_set = 76;
     GlobalMuteSetResponse      global_mute_set = 77;
     GlobalStopSetResponse      global_stop_set = 78;
+    CanvasListResponse          canvas_list = 79;
+    CanvasCreateResponse        canvas_create = 80;
+    CanvasUpdateResponse        canvas_update = 81;
+    Empty                       canvas_delete = 82;
+    CanvasLayoutSetResponse     canvas_layout_set = 83;
   }
 }
 
@@ -232,6 +242,15 @@ enum ErrorCode {
   // Playlists
   ERROR_CODE_PLAYLIST_NOT_FOUND = 500;
   ERROR_CODE_PLAYLIST_INVALID = 501;
+
+  // Displays
+  ERROR_CODE_DISPLAY_NOT_FOUND = 600;
+  ERROR_CODE_CANVAS_NOT_FOUND = 601;
+  ERROR_CODE_CANVAS_INVALID = 602;
+  ERROR_CODE_CANVAS_MEMBER_CONFLICT = 603;
+  ERROR_CODE_DISPLAY_BELONGS_TO_CANVAS = 604;
+  ERROR_CODE_CANVAS_HAS_NO_LIVE_DISPLAY = 605;
+  ERROR_CODE_CANVAS_REVISION_CONFLICT = 606;
 }
 
 message Empty {}
@@ -602,17 +621,19 @@ message SourcePluginInfo {
 
 message WallpaperApplyRequest {
   string wallpaper_id = 1;
-  // Target displays. Empty means "apply to all currently registered displays"
-  // (the pre-M4 default behaviour). Non-empty: apply only to the listed
-  // display_ids (others keep their current wallpaper). Resolution/fps are
-  // resolved from settings (global default + plugin overrides), not from
-  // this request.
-  repeated uint64 display_ids = 5;
+  // Empty means every Canvas once plus every independent live display.
+  repeated PresentationTarget targets = 5;
   // Optional renderer plugin name. Empty (default) lets the daemon pick
   // the highest-priority renderer registered for the wallpaper's type.
   // Non-empty selects that exact renderer; the daemon validates that it
   // is registered AND advertises this wallpaper's type.
   string renderer_name = 6;
+}
+message PresentationTarget {
+  oneof target {
+    uint64 display_id = 1;
+    string canvas_id = 2;
+  }
 }
 message WallpaperApplyResponse {
   string renderer_id = 1;
@@ -621,6 +642,8 @@ message WallpaperApplyResponse {
   string name = 4;
   bool deferred = 5;
   repeated WallpaperApplyStoppedPlaylist stopped_playlists = 6;
+  repeated PresentationTarget targets = 7;
+  repeated uint64 display_ids = 8;
 }
 message WallpaperApplyStoppedPlaylist {
   int64 playlist_id = 1;
@@ -740,6 +763,7 @@ enum LayoutSource {
   LAYOUT_SOURCE_GLOBAL = 1;
   LAYOUT_SOURCE_DISPLAY = 2;
   LAYOUT_SOURCE_WALLPAPER = 3;
+  LAYOUT_SOURCE_CANVAS = 4;
 }
 
 message DisplayInfo {
@@ -769,6 +793,87 @@ message DisplayInfo {
   LayoutPrefs display_layout = 12;
   LayoutSource effective_layout_source = 13;
   repeated RuntimeCondition conditions = 14;
+  string instance_id = 15;
+  string settings_key = 16;
+  string canvas_id = 17;
+  CanvasRect canvas_rect = 18;
+  uint32 canvas_overlap_count = 19;
+  bool selectable_target = 20;
+}
+
+message CanvasRect {
+  sint32 x = 1;
+  sint32 y = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+}
+
+message CanvasMemberInfo {
+  string settings_key = 1;
+  CanvasRect rect = 2;
+  repeated uint64 display_ids = 3;
+}
+
+message CanvasInfo {
+  string canvas_id = 1;
+  string name = 2;
+  repeated CanvasMemberInfo members = 3;
+  CanvasRect extent = 4;
+  LayoutOverride layout_override = 5;
+  LayoutPrefs effective_layout = 6;
+  string wallpaper_id = 7;
+  uint64 revision = 8;
+}
+
+message CanvasMemberInput {
+  string settings_key = 1;
+  CanvasRect rect = 2;
+}
+
+message CanvasListRequest {}
+message CanvasListResponse {
+  repeated CanvasInfo canvases = 1;
+  uint64 revision = 2;
+}
+
+message CanvasCreateRequest {
+  string name = 1;
+  repeated CanvasMemberInput members = 2;
+  LayoutOverride layout_override = 3;
+}
+message CanvasCreateResponse {
+  CanvasInfo canvas = 1;
+  uint64 revision = 2;
+}
+
+message CanvasUpdateRequest {
+  string canvas_id = 1;
+  uint64 expected_revision = 2;
+  string name = 3;
+  repeated CanvasMemberInput members = 4;
+  reserved 5, 6;
+  reserved "layout_override", "reset_layout_override";
+}
+message CanvasUpdateResponse {
+  CanvasInfo canvas = 1;
+  uint64 revision = 2;
+}
+
+message CanvasDeleteRequest {
+  string canvas_id = 1;
+  uint64 expected_revision = 2;
+}
+
+message CanvasLayoutSetRequest {
+  string canvas_id = 1;
+  LayoutOverride override = 2;
+  bool clear_fillmode = 3;
+  bool clear_rotation = 4;
+  bool clear_location = 5;
+}
+
+message CanvasLayoutSetResponse {
+  CanvasInfo canvas = 1;
 }
 
 message DisplayRenameRequest {
@@ -1146,6 +1251,7 @@ message Event {
     Empty                  plugin_changed            = 21;
     QrLoginProgress        qr_login_progress         = 23;
     Empty                  plugin_state_changed      = 24;
+    CanvasSnapshot         canvas_snapshot           = 25;
   }
 }
 
@@ -1252,6 +1358,11 @@ message DisplayChanged {
 // A display was unregistered. Receivers should drop the entry.
 message DisplayRemoved {
   uint64 display_id = 1;
+}
+
+message CanvasSnapshot {
+  repeated CanvasInfo canvases = 1;
+  uint64 revision = 2;
 }
 
 // Full replacement for the active-renderer list. Sent once on WS
@@ -1528,12 +1639,14 @@ message PlaylistSetIntervalRequest {
 
 message PlaylistActivateRequest {
   int64 id = 1;
-  repeated uint64 display_ids = 2;
+  // Empty selects every live Canvas once plus every independent display.
+  repeated PresentationTarget targets = 2;
   bool auto_attach = 3;
 }
 
 message PlaylistDeactivateRequest {
-  repeated uint64 display_ids = 1;
+  // Empty selects every live Canvas once plus every independent display.
+  repeated PresentationTarget targets = 1;
   int64 clear_auto_attach = 2;
 }
 

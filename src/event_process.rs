@@ -11,6 +11,12 @@ use crate::DaemonContext;
 const DISPLAY_CONNECTION_NOTIFICATION_ID: &str =
     "org.waywallen.waywallen.display-connection-failed";
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct RecallKey {
+    wallpaper_id: String,
+    canvas_id: Option<String>,
+}
+
 /// Spawn the dispatcher. `restore_last` mirrors `cli.restore_last` —
 /// when false the wallpaper-recall watcher is never started even
 pub fn spawn(state: Arc<DaemonContext>, restore_last: bool) {
@@ -99,8 +105,7 @@ fn spawn_wallpaper_recall(state: Arc<DaemonContext>) {
             const IDLE_PARK: Duration = Duration::from_secs(3600);
 
             let mut seen: HashSet<scheduler::DisplayId> = HashSet::new();
-            // wp_id -> (deadline, accumulated display ids)
-            let mut pending: HashMap<String, (tokio::time::Instant, Vec<scheduler::DisplayId>)> =
+            let mut pending: HashMap<RecallKey, (tokio::time::Instant, Vec<scheduler::DisplayId>)> =
                 HashMap::new();
             let mut events_rx = state.router.subscribe_events();
             let mut shutdown = state.shutdown_subscribe();
@@ -142,13 +147,15 @@ fn spawn_wallpaper_recall(state: Arc<DaemonContext>) {
                     }
                     _ = &mut sleep => {
                         let now = tokio::time::Instant::now();
-                        let due: Vec<String> = pending
+                        let due: Vec<RecallKey> = pending
                             .iter()
                             .filter_map(|(k, (d, _))| (*d <= now).then(|| k.clone()))
                             .collect();
-                        for wp_id in due {
-                            if let Some((_, ids)) = pending.remove(&wp_id) {
+                        for key in due {
+                            if let Some((_, ids)) = pending.remove(&key) {
                                 let state2 = state.clone();
+                                let wp_id = key.wallpaper_id.clone();
+                                let canvas_id = key.canvas_id.clone();
                                 let task_name = format!("wallpaper/recall/{wp_id}");
                                 state.tasks.spawn_async(
                                     tasks::TaskKind::Apply,
@@ -158,14 +165,23 @@ fn spawn_wallpaper_recall(state: Arc<DaemonContext>) {
                                             "wallpaper recall: applying {wp_id} to {} display(s)",
                                             ids.len()
                                         );
-                                        crate::application::apply_wallpaper_to_displays_with_first_frame_timeout(
-                                            &state2,
-                                            &wp_id,
-                                            &ids,
-                                            crate::application::APPLY_FIRST_FRAME_TIMEOUT,
-                                            crate::application::ApplySource::DisplayRecall,
-                                        )
-                                        .await
+                                        let result = if let Some(canvas_id) = canvas_id {
+                                            crate::application::restore_wallpaper_canvas(
+                                                &state2,
+                                                &wp_id,
+                                                Some(crate::application::APPLY_FIRST_FRAME_TIMEOUT),
+                                                canvas_id,
+                                            ).await
+                                        } else {
+                                            crate::application::apply_wallpaper_to_displays_with_first_frame_timeout(
+                                                &state2,
+                                                &wp_id,
+                                                &ids,
+                                                crate::application::APPLY_FIRST_FRAME_TIMEOUT,
+                                                crate::application::ApplySource::DisplayRecall,
+                                            ).await
+                                        };
+                                        result
                                         .map(|_| ())
                                         .map_err(anyhow::Error::from)
                                     },
@@ -186,7 +202,7 @@ fn spawn_wallpaper_recall(state: Arc<DaemonContext>) {
 
 fn record(
     state: &Arc<DaemonContext>,
-    pending: &mut HashMap<String, (tokio::time::Instant, Vec<scheduler::DisplayId>)>,
+    pending: &mut HashMap<RecallKey, (tokio::time::Instant, Vec<scheduler::DisplayId>)>,
     snap: routing::DisplaySnapshot,
     settle: Duration,
 ) {
@@ -195,11 +211,25 @@ fn record(
     if playlist_owned {
         return;
     }
-    let Some(wp_id) = state.settings.resolved_last_wallpaper(key) else {
-        return;
+    let (wp_id, canvas_id) = match state.settings.canvas_for_member(key) {
+        Some((canvas_id, canvas)) => {
+            let Some(wallpaper_id) = canvas.last_wallpaper else {
+                return;
+            };
+            (wallpaper_id, Some(canvas_id))
+        }
+        None => {
+            let Some(wallpaper_id) = state.settings.resolved_last_wallpaper(key) else {
+                return;
+            };
+            (wallpaper_id, None)
+        }
     };
     let entry = pending
-        .entry(wp_id)
+        .entry(RecallKey {
+            wallpaper_id: wp_id,
+            canvas_id,
+        })
         .or_insert_with(|| (tokio::time::Instant::now() + settle, Vec::new()));
     entry.1.push(snap.id);
 }

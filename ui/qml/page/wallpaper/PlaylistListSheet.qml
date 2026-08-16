@@ -72,7 +72,7 @@ MD.BottomSheet {
                 Layout.maximumWidth: 280
                 text: control.sheetState.selectedDisplay ? control.sheetState.displayLabel(control.sheetState.selectedDisplay) : qsTr("No displays")
                 enabled: control.sheetState.playDisplays.length > 0 && !control.sheetState.shareAllDisplays
-                icon.name: MD.Token.icon.monitor
+                icon.name: control.sheetState.selectedDisplay?.targetIcon || MD.Token.icon.monitor
                 trailingIconName: MD.Token.icon.expand_more
                 mdState.borderWidth: 1
                 onClicked: playlistDisplayMenu.open()
@@ -87,7 +87,7 @@ MD.BottomSheet {
                     contentDelegate: MD.MenuItem {
                         required property var modelData
                         text: control.sheetState.displayLabel(modelData)
-                        icon.name: String(modelData.id) === String(control.sheetState.selectedDisplayId) ? MD.Token.icon.check : " "
+                        icon.name: String(modelData.targetId) === String(control.sheetState.selectedDisplayId) ? MD.Token.icon.check : " "
                         onClicked: {
                             control.sheetState.selectDisplay(modelData);
                             playlistDisplayMenu.close();

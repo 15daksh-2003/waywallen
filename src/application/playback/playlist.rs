@@ -107,16 +107,21 @@ async fn resume_ids(
         return HashMap::new();
     }
     let mut ids = HashMap::new();
+    let snapshots = app.router.snapshot_displays().await;
     for display_id in display_ids {
-        let Some(key) = display_settings_key(app, *display_id).await else {
+        let Some(display) = snapshots.iter().find(|display| display.id == *display_id) else {
             continue;
         };
-        let Some(entry_id) = app
-            .settings
-            .display_prefs(&key)
-            .and_then(|prefs| prefs.last_wallpaper)
-            .filter(|entry_id| definition.items.contains(entry_id))
-        else {
+        let entry_id = if let Some(canvas_id) = &display.canvas_id {
+            app.settings
+                .canvas(canvas_id)
+                .and_then(|canvas| canvas.last_wallpaper)
+        } else {
+            app.settings
+                .display_prefs(&display.settings_key)
+                .and_then(|prefs| prefs.last_wallpaper)
+        };
+        let Some(entry_id) = entry_id.filter(|entry_id| definition.items.contains(entry_id)) else {
             continue;
         };
         ids.insert(*display_id, entry_id);
@@ -211,6 +216,7 @@ async fn activate_inner(
     } else {
         display_ids.to_vec()
     };
+    let targets = app.router.expand_display_config_members(&targets).await?;
     let resume_by_display = if resume {
         resume_ids(app, &definition, &targets).await
     } else {
@@ -264,7 +270,9 @@ pub async fn deactivate(app: &Arc<DaemonContext>, display_ids: &[DisplayId]) -> 
     let targets = if display_ids.is_empty() {
         app.playlists.owned_display_ids().await
     } else {
-        display_ids.to_vec()
+        app.router
+            .expand_display_config_members(display_ids)
+            .await?
     };
     app.playlists.deactivate(&targets).await;
     persist_assignments(app, &targets, None, AutoAttachUpdate::Preserve).await;

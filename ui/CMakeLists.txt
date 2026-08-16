@@ -188,6 +188,7 @@ set(QML_FILES
   qml/dialog/QrLoginDialog.qml
   qml/dialog/PluginActionFormDialog.qml
   qml/dialog/DisplayEditDialog.qml
+  qml/dialog/CanvasDialog.qml
   qml/page/WallpaperPage.qml
   qml/page/PlaylistDetailPanel.qml
   qml/page/WallpaperDetailPanel.qml
@@ -211,6 +212,7 @@ set(QML_FILES
   qml/page/PluginManagePage.qml
   qml/page/SettingsPage.qml
   qml/page/DisplaysPage.qml
+  qml/page/display/CanvasEditorState.qml
   qml/page/SourceManagePage.qml
   qml/page/AddLibraryPage.qml
   qml/page/AboutPage.qml

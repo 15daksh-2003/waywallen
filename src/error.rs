@@ -169,6 +169,31 @@ pub enum Error {
     #[error("playlist invalid: {0}")]
     PlaylistInvalid(String),
 
+    #[error("display {0} is not registered")]
+    DisplayNotFound(u64),
+
+    #[error("canvas not found: {0}")]
+    CanvasNotFound(String),
+
+    #[error("invalid canvas: {0}")]
+    CanvasInvalid(String),
+
+    #[error("canvas revision changed: expected {expected}, current {current}")]
+    CanvasRevisionConflict { expected: u64, current: u64 },
+
+    #[error("display '{display_key}' already belongs to canvas '{canvas_name}' ({canvas_id})")]
+    CanvasMemberConflict {
+        display_key: String,
+        canvas_id: String,
+        canvas_name: String,
+    },
+
+    #[error("display {display_id} belongs to canvas {canvas_id}")]
+    DisplayBelongsToCanvas { display_id: u64, canvas_id: String },
+
+    #[error("canvas has no live display: {0}")]
+    CanvasHasNoLiveDisplay(String),
+
     /// Diagnostic wrapper that attaches context without changing type.
     /// `error_code()` recurses to the source error.
     #[error("{context}: {source}")]
@@ -235,6 +260,13 @@ impl Error {
             Self::LibraryNotFound(_) => E::LibraryNotFound,
             Self::PlaylistNotFound(_) => E::PlaylistNotFound,
             Self::PlaylistInvalid(_) => E::PlaylistInvalid,
+            Self::DisplayNotFound(_) => E::DisplayNotFound,
+            Self::CanvasNotFound(_) => E::CanvasNotFound,
+            Self::CanvasInvalid(_) => E::CanvasInvalid,
+            Self::CanvasRevisionConflict { .. } => E::CanvasRevisionConflict,
+            Self::CanvasMemberConflict { .. } => E::CanvasMemberConflict,
+            Self::DisplayBelongsToCanvas { .. } => E::DisplayBelongsToCanvas,
+            Self::CanvasHasNoLiveDisplay(_) => E::CanvasHasNoLiveDisplay,
         }
     }
 
@@ -252,16 +284,23 @@ impl Error {
             | E::NoRendererForType
             | E::SettingsValidationFailed
             | E::WallpaperTypeNotSupported
-            | E::PlaylistInvalid => S::InvalidArgument,
+            | E::PlaylistInvalid
+            | E::CanvasInvalid => S::InvalidArgument,
             E::FailedPrecondition
             | E::NoDisplayRegistered
             | E::SourceItemRemoveUnsupported
-            | E::SourceItemUnsubscribeUnsupported => S::FailedPrecondition,
+            | E::SourceItemUnsubscribeUnsupported
+            | E::CanvasMemberConflict
+            | E::DisplayBelongsToCanvas
+            | E::CanvasHasNoLiveDisplay
+            | E::CanvasRevisionConflict => S::FailedPrecondition,
             E::WallpaperNotFound
             | E::RendererNotFound
             | E::SourcePluginNotFound
             | E::LibraryNotFound
-            | E::PlaylistNotFound => S::NotFound,
+            | E::PlaylistNotFound
+            | E::DisplayNotFound
+            | E::CanvasNotFound => S::NotFound,
             E::Internal
             | E::Db
             | E::RendererSpawnFailed
@@ -301,7 +340,8 @@ impl From<Error> for zbus::fdo::Error {
             | E::RendererNotFound
             | E::SourcePluginNotFound
             | E::LibraryNotFound
-            | E::PlaylistNotFound => zbus::fdo::Error::FileNotFound(msg),
+            | E::PlaylistNotFound
+            | E::CanvasNotFound => zbus::fdo::Error::FileNotFound(msg),
             E::InvalidArgument
             | E::UnexpectedPayload
             | E::Decode
@@ -309,7 +349,8 @@ impl From<Error> for zbus::fdo::Error {
             | E::NoRendererForType
             | E::SettingsValidationFailed
             | E::WallpaperTypeNotSupported
-            | E::PlaylistInvalid => zbus::fdo::Error::InvalidArgs(msg),
+            | E::PlaylistInvalid
+            | E::CanvasInvalid => zbus::fdo::Error::InvalidArgs(msg),
             // FailedPrecondition / NoDisplayRegistered / Internal-class
             // / Db / Spawn / Control / Extras / SettingsApply — no
             _ => zbus::fdo::Error::Failed(msg),

@@ -690,7 +690,37 @@ MD.Page {
     }
 
     property var playlistPlayDisplayId: null
-    readonly property var playlistPlayDisplays: W.App.displayManager.displays || []
+    readonly property var playlistPlayDisplays: {
+        const targets = [];
+        for (const canvas of W.App.displayManager.canvases || []) {
+            const displayIds = [];
+            for (const member of canvas.members || []) {
+                for (const displayId of member.displayIds || [])
+                    displayIds.push(displayId);
+            }
+            if (displayIds.length > 0) {
+                targets.push({
+                    targetId: "canvas:" + canvas.id,
+                    targetLabel: canvas.name || qsTr("Unnamed canvas"),
+                    targetIcon: MD.Token.icon.dashboard,
+                    target: { canvasId: canvas.id },
+                    displayIds: displayIds
+                });
+            }
+        }
+        for (const display of W.App.displayManager.displays || []) {
+            if (display.selectableTarget) {
+                targets.push({
+                    targetId: "display:" + display.id,
+                    targetLabel: root.rawDisplayLabel(display),
+                    targetIcon: MD.Token.icon.monitor,
+                    target: { displayId: display.id },
+                    displayIds: [display.id]
+                });
+            }
+        }
+        return targets;
+    }
 
     onPlaylistPlayDisplaysChanged: {
         if (playlistPlayDisplays.length === 0) {
@@ -698,7 +728,7 @@ MD.Page {
             return;
         }
         if (!root.displayById(playlistPlayDisplayId))
-            playlistPlayDisplayId = playlistPlayDisplays[0].id;
+            playlistPlayDisplayId = playlistPlayDisplays[0].targetId;
     }
 
     function displayById(id) {
@@ -707,7 +737,7 @@ MD.Page {
         const key = String(id);
         const displays = root.playlistPlayDisplays || [];
         for (let i = 0; i < displays.length; ++i) {
-            if (String(displays[i].id) === key)
+            if (String(displays[i].targetId) === key)
                 return displays[i];
         }
         return null;
@@ -716,6 +746,12 @@ MD.Page {
     function displayLabel(display) {
         if (!display)
             return qsTr("Display");
+        if ((display.targetLabel || "").length)
+            return display.targetLabel;
+        return root.rawDisplayLabel(display);
+    }
+
+    function rawDisplayLabel(display) {
         let base = display.alias || "";
         if (!base.length)
             base = (display.name || "").replace(/^waywallen-[a-z]+-[a-z]+-/, "");
@@ -733,14 +769,15 @@ MD.Page {
 
     function selectedPlaylistDisplayId() {
         const display = root.selectedPlaylistDisplay();
-        return display ? display.id : null;
+        const ids = display?.displayIds || [];
+        return ids.length > 0 ? ids[0] : null;
     }
 
     function playlistDisplayStatuses(playlist) {
         if (!playlist)
             return [];
         const playlistId = String(playlist.id);
-        const statuses = root.playlistPlayDisplays || [];
+        const statuses = W.App.displayManager.displays || [];
         const out = [];
         for (let i = 0; i < statuses.length; ++i) {
             if (String(statuses[i].activePlaylistId) === playlistId)
@@ -750,29 +787,34 @@ MD.Page {
     }
 
     function playlistDisplayLabels(playlist) {
-        const statuses = root.playlistDisplayStatuses(playlist);
         const out = [];
-        for (let i = 0; i < statuses.length; ++i)
-            out.push(root.displayLabel(statuses[i]));
+        const playlistId = String(playlist?.id || "");
+        for (const target of root.playlistPlayDisplays || []) {
+            const ids = target.displayIds || [];
+            const active = ids.some(id => {
+                const display = W.App.displayManager.get(id);
+                return display && String(display.activePlaylistId) === playlistId;
+            });
+            if (active)
+                out.push(root.displayLabel(target));
+        }
         return out;
     }
 
     function playlistIsPlayingOnSelectedDisplay(playlist) {
-        const displayId = root.selectedPlaylistDisplayId();
-        if (!playlist || displayId === null || displayId === undefined)
+        const target = root.selectedPlaylistDisplay();
+        if (!playlist || !target)
             return false;
         const playlistId = String(playlist.id);
-        const displayKey = String(displayId);
-        const statuses = root.playlistPlayDisplays || [];
-        for (let i = 0; i < statuses.length; ++i) {
-            if (String(statuses[i].id) === displayKey && String(statuses[i].activePlaylistId) === playlistId)
-                return true;
-        }
-        return false;
+        const ids = target.displayIds || [];
+        return ids.length > 0 && ids.every(id => {
+            const display = W.App.displayManager.get(id);
+            return display && String(display.activePlaylistId) === playlistId;
+        });
     }
 
     function playlistIsSharedActive(playlist) {
-        const displays = root.playlistPlayDisplays || [];
+        const displays = W.App.displayManager.displays || [];
         if (!playlist || displays.length === 0)
             return false;
         return root.playlistDisplayStatuses(playlist).length === displays.length;
@@ -783,24 +825,23 @@ MD.Page {
             return;
 
         if (shareAllDisplays) {
-            const displayIds = (root.playlistPlayDisplays || []).map(display => display.id);
-            if (displayIds.length === 0)
+            if (root.playlistPlayDisplays.length === 0)
                 return;
             if (root.playlistIsSharedActive(playlist))
-                playlistPlaybackMutation.deactivate(displayIds, playlist.id);
+                playlistPlaybackMutation.deactivate([], playlist.id);
             else
-                playlistPlaybackMutation.activate(playlist.id, displayIds, true);
+                playlistPlaybackMutation.activate(playlist.id, [], true);
             return;
         }
 
         const display = root.selectedPlaylistDisplay();
         if (!display)
             return;
-        const displayIds = [display.id];
+        const targets = [display.target];
         if (root.playlistIsPlayingOnSelectedDisplay(playlist))
-            playlistPlaybackMutation.deactivate(displayIds, 0);
+            playlistPlaybackMutation.deactivate(targets, 0);
         else
-            playlistPlaybackMutation.activate(playlist.id, displayIds, false);
+            playlistPlaybackMutation.activate(playlist.id, targets, false);
     }
 
     function togglePlaylistListSheet() {

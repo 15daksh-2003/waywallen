@@ -172,6 +172,230 @@ fn display_prefs_is_empty_tracks_last_wallpaper() {
 }
 
 #[test]
+fn canvas_roundtrip_and_layout_resolution() {
+    let input = r#"
+[global.layout]
+fillmode = "stretched"
+rotation = "cw90"
+
+[canvas.office]
+name = "Office"
+last_wallpaper = "42"
+
+[canvas.office.members.display-a.rect]
+x = -1920
+y = 0
+width = 1920
+height = 1080
+
+[canvas.office.members.display-b.rect]
+x = 0
+y = 0
+width = 2560
+height = 1440
+
+[canvas.office.layout]
+fillmode = "preserve_aspect_fit"
+"#;
+    let settings: Settings = toml::from_str(input).unwrap();
+    let rect = settings.canvases["office"].members["display-a"].rect;
+    assert_eq!(rect.x, -1920);
+    assert_eq!(rect.width, 1920);
+    assert_eq!(settings.canvases["office"].members.len(), 2);
+    assert_eq!(
+        settings.canvases["office"].last_wallpaper.as_deref(),
+        Some("42")
+    );
+    let store = SettingsStore::from_test_settings(settings.clone());
+    let resolved = store.resolved_canvas_layout("office", store.resolved_global_layout());
+    assert_eq!(resolved.fillmode, FillMode::PreserveAspectFit);
+    assert_eq!(resolved.rotation, Rotation::Cw90);
+
+    let encoded = toml::to_string(&settings).unwrap();
+    let decoded: Settings = toml::from_str(&encoded).unwrap();
+    assert_eq!(decoded, settings);
+}
+
+#[test]
+fn canvas_mutation_is_canonical_and_rejects_cross_canvas_membership() {
+    let store = SettingsStore::from_test_settings(Settings::default());
+    let first = store
+        .create_canvas(CanvasDraft {
+            name: "  Office  ".into(),
+            members: HashMap::from([
+                (
+                    "left".into(),
+                    CanvasMemberPrefs {
+                        rect: CanvasRect {
+                            x: -200,
+                            y: 40,
+                            width: 100,
+                            height: 80,
+                        },
+                    },
+                ),
+                (
+                    "right".into(),
+                    CanvasMemberPrefs {
+                        rect: CanvasRect {
+                            x: 20,
+                            y: 0,
+                            width: 120,
+                            height: 100,
+                        },
+                    },
+                ),
+            ]),
+            layout: None,
+        })
+        .unwrap();
+    assert_eq!(first.canvas.name, "Office");
+    assert_eq!(first.canvas.members["left"].rect.x, 0);
+    assert_eq!(first.canvas.members["left"].rect.y, 40);
+    assert_eq!(first.canvas.members["right"].rect.x, 220);
+
+    let conflict = store.create_canvas(CanvasDraft {
+        name: "Mirror".into(),
+        members: HashMap::from([(
+            "left".into(),
+            CanvasMemberPrefs {
+                rect: CanvasRect {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 80,
+                },
+            },
+        )]),
+        layout: None,
+    });
+    assert!(matches!(
+        conflict,
+        Err(crate::error::Error::CanvasMemberConflict { display_key, .. })
+            if display_key == "left"
+    ));
+
+    let stale = store.update_canvas(
+        &first.canvas_id,
+        first.revision - 1,
+        CanvasDraft {
+            name: "Stale".into(),
+            members: HashMap::new(),
+            layout: None,
+        },
+    );
+    assert!(matches!(
+        stale,
+        Err(crate::error::Error::CanvasRevisionConflict { .. })
+    ));
+}
+
+#[test]
+fn canvas_runtime_layout_and_member_size_do_not_change_topology_revision() {
+    let store = SettingsStore::from_test_settings(Settings::default());
+    let created = store
+        .create_canvas(CanvasDraft {
+            name: "Office".into(),
+            members: HashMap::from([
+                (
+                    "left".into(),
+                    CanvasMemberPrefs {
+                        rect: CanvasRect {
+                            x: 0,
+                            y: 0,
+                            width: 100,
+                            height: 80,
+                        },
+                    },
+                ),
+                (
+                    "right".into(),
+                    CanvasMemberPrefs {
+                        rect: CanvasRect {
+                            x: 100,
+                            y: 20,
+                            width: 120,
+                            height: 90,
+                        },
+                    },
+                ),
+            ]),
+            layout: None,
+        })
+        .unwrap();
+    let revision = created.revision;
+    let layout = CanvasLayoutPrefs {
+        fillmode: Some(FillMode::PreserveAspectFit),
+        location: Some(Location::new(25, 75)),
+        rotation: Some(Rotation::Cw90),
+    };
+
+    assert!(store
+        .set_canvas_layout(&created.canvas_id, Some(layout))
+        .unwrap());
+    assert!(!store
+        .set_canvas_layout(&created.canvas_id, Some(layout))
+        .unwrap());
+    assert_eq!(store.canvas_revision(), revision);
+
+    assert_eq!(
+        store.update_canvas_member_size("right", 150, 120).unwrap(),
+        Some(created.canvas_id.clone())
+    );
+    assert_eq!(
+        store.update_canvas_member_size("right", 150, 120).unwrap(),
+        None
+    );
+    assert_eq!(store.canvas_revision(), revision);
+    let canvas = store.canvas(&created.canvas_id).unwrap();
+    assert_eq!(canvas.members["right"].rect.x, 100);
+    assert_eq!(canvas.members["right"].rect.y, 20);
+    assert_eq!(canvas.members["right"].rect.width, 150);
+    assert_eq!(canvas.members["right"].rect.height, 120);
+
+    let updated = store
+        .update_canvas(
+            &created.canvas_id,
+            revision,
+            CanvasDraft {
+                name: "Renamed".into(),
+                members: canvas.members,
+                layout: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(updated.canvas.layout, Some(layout));
+}
+
+#[test]
+fn empty_canvas_survives_update_until_explicit_delete() {
+    let store = SettingsStore::from_test_settings(Settings::default());
+    let created = store
+        .create_canvas(CanvasDraft {
+            name: "Empty".into(),
+            members: HashMap::new(),
+            layout: None,
+        })
+        .unwrap();
+    let updated = store
+        .update_canvas(
+            &created.canvas_id,
+            created.revision,
+            CanvasDraft {
+                name: "Still empty".into(),
+                members: HashMap::new(),
+                layout: None,
+            },
+        )
+        .unwrap();
+    assert!(store.canvas(&created.canvas_id).unwrap().members.is_empty());
+    store
+        .delete_canvas(&created.canvas_id, updated.revision)
+        .unwrap();
+    assert!(store.canvas(&created.canvas_id).is_none());
+}
+
+#[test]
 fn auto_replay_default_actions() {
     let policy = AutoReplayPolicy::default();
     assert_eq!(policy.fullscreen, AutoAction::Pause);
@@ -360,6 +584,7 @@ fn make_store_with(plugins: HashMap<String, HashMap<String, String>>) -> Arc<Set
         global: GlobalSettings::default(),
         plugins,
         displays: HashMap::new(),
+        canvases: HashMap::new(),
     })
 }
 

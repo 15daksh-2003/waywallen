@@ -8,6 +8,59 @@ pub(super) fn project_link(
     buffer_generation: u64,
     layout: &ResolvedLayout,
 ) -> CompositionConfig {
+    if let crate::wallframe::routing::table::LinkProjection::Canvas {
+        extent,
+        member,
+        layout: canvas_layout,
+        ..
+    } = &link.projection
+    {
+        let projection = crate::wallframe::display::placement::project_canvas(
+            pool.width,
+            pool.height,
+            info.metrics.width,
+            info.metrics.height,
+            *extent,
+            *member,
+            *canvas_layout,
+            link.clear_rgba,
+        );
+        return match projection {
+            Some(projection) => CompositionConfig {
+                generation: config_generation,
+                buffer_generation,
+                display_w: info.metrics.width as f32,
+                display_h: info.metrics.height as f32,
+                source_x: projection.source.x,
+                source_y: projection.source.y,
+                source_w: projection.source.w,
+                source_h: projection.source.h,
+                dest_x: projection.dest.x,
+                dest_y: projection.dest.y,
+                dest_w: projection.dest.w,
+                dest_h: projection.dest.h,
+                transform: projection.transform,
+                clear_rgba: link.clear_rgba,
+            },
+            None => CompositionConfig {
+                generation: config_generation,
+                buffer_generation,
+                display_w: info.metrics.width as f32,
+                display_h: info.metrics.height as f32,
+                source_x: 0.0,
+                source_y: 0.0,
+                source_w: 0.0,
+                source_h: 0.0,
+                dest_x: 0.0,
+                dest_y: 0.0,
+                dest_w: 0.0,
+                dest_h: 0.0,
+                transform: canvas_layout.rotation.to_wl_transform(),
+                clear_rgba: link.clear_rgba,
+            },
+        };
+    }
+
     let src_full = link.src_rect == crate::wallframe::routing::table::FULL_SRC;
     let dst_full = link.dst_rect == crate::wallframe::routing::table::FULL_DST;
 

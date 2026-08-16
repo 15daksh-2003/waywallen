@@ -3,10 +3,16 @@ use super::*;
 #[derive(Debug, Clone)]
 pub struct ApplyAssignment {
     pub spawn_request: crate::wallframe::renderer_manager::SpawnRequest,
-    pub display_ids: Vec<DisplayId>,
+    pub targets: Vec<AssignmentTarget>,
     pub duplicate_renderers: bool,
     pub wallpaper_layout_override: WallpaperLayoutOverride,
     pub preempt_pending_start: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AssignmentTarget {
+    pub display_ids: Vec<DisplayId>,
+    pub projections: HashMap<DisplayId, LinkProjection>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +66,21 @@ impl Router {
             crate::catalog::properties::normalize_renderer_user_properties(
                 request.spawn_request.default_user_properties,
             );
+        let display_ids = request
+            .targets
+            .iter()
+            .flat_map(|target| target.display_ids.iter().copied())
+            .collect::<Vec<_>>();
+        let projections = request
+            .targets
+            .iter()
+            .flat_map(|target| {
+                target
+                    .projections
+                    .iter()
+                    .map(|(id, value)| (*id, value.clone()))
+            })
+            .collect::<HashMap<_, _>>();
         let renderer_name = request
             .spawn_request
             .renderer_name
@@ -67,21 +88,22 @@ impl Router {
             .unwrap_or_default();
         let commit = {
             let mut inner = self.inner.lock().await;
-            let groups = if request.display_ids.is_empty() {
+            let groups = if display_ids.is_empty() {
                 vec![Vec::new()]
             } else if request.duplicate_renderers {
                 request
-                    .display_ids
+                    .targets
                     .iter()
-                    .map(|display_id| vec![*display_id])
+                    .map(|target| target.display_ids.clone())
                     .collect::<Vec<_>>()
             } else {
-                vec![request.display_ids.clone()]
+                vec![display_ids.clone()]
             };
             let mut primary_renderer_id = None;
             let mut selected_renderers = Vec::new();
             let mut affected_displays = Vec::new();
             let mut displaced_renderers = HashSet::new();
+            let mut affected_canvases = HashSet::new();
 
             for group in groups {
                 let existing = if group.is_empty() {
@@ -93,6 +115,13 @@ impl Router {
                         .map(|link| link.renderer_id)
                         .collect::<HashSet<_>>()
                 };
+                for display_id in &group {
+                    for link in inner.table.links_for_display(*display_id) {
+                        if let Some(canvas_id) = Self::canvas_id_for_link(&link) {
+                            affected_canvases.insert(canvas_id);
+                        }
+                    }
+                }
                 displaced_renderers.extend(existing.iter().cloned());
                 let has_demand = group.iter().any(|display_id| {
                     inner.displays.get(display_id).is_some_and(|display| {
@@ -191,9 +220,19 @@ impl Router {
                             .displays
                             .get(&display_id)
                             .is_some_and(|display| display.auto_replay.stop_applied);
-                    inner
-                        .table
-                        .add_link_with_enabled(renderer_id.clone(), display_id, enabled);
+                    let projection = projections
+                        .get(&display_id)
+                        .cloned()
+                        .unwrap_or(LinkProjection::Independent);
+                    if let LinkProjection::Canvas { canvas_id, .. } = &projection {
+                        affected_canvases.insert(canvas_id.clone());
+                    }
+                    inner.table.add_link_with_projection(
+                        renderer_id.clone(),
+                        display_id,
+                        enabled,
+                        projection,
+                    );
                     if let Some(display) = inner.displays.get(&display_id) {
                         display.invalidate_consumption();
                     }
@@ -205,6 +244,9 @@ impl Router {
 
             selected_renderers.sort();
             selected_renderers.dedup();
+            for canvas_id in affected_canvases {
+                affected_displays.extend(self.refresh_canvas_locked(&mut inner, &canvas_id));
+            }
             let selected = selected_renderers.iter().cloned().collect::<HashSet<_>>();
             let mut dropped_renderers = Vec::new();
             let mut removed_renderers = Vec::new();
@@ -594,6 +636,35 @@ impl Router {
         if !applied.is_empty() {
             let all = self.snapshot_displays().await;
             self.emit(RouterEvent::DisplaysReplace(all));
+        }
+    }
+
+    pub async fn clear_display_assignments(self: &Arc<Self>, display_ids: &[DisplayId]) {
+        let affected = {
+            let mut inner = self.inner.lock().await;
+            let mut affected = Vec::new();
+            for display_id in display_ids {
+                if !inner.displays.contains_key(display_id) {
+                    continue;
+                }
+                for link in inner.table.links_for_display(*display_id) {
+                    inner.table.remove_link(link.id);
+                }
+                if let Some(display) = inner.displays.get(display_id) {
+                    display.invalidate_consumption();
+                }
+                affected.push(*display_id);
+            }
+            affected
+        };
+        for display_id in &affected {
+            self.sync_display(*display_id).await;
+        }
+        self.mark_orphans(None).await;
+        self.reconcile_lifecycle().await;
+        self.reconcile_buffer_flags().await;
+        if !affected.is_empty() {
+            self.emit(RouterEvent::DisplaysReplace(self.snapshot_displays().await));
         }
     }
 

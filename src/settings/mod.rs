@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
@@ -10,6 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::sync::Notify;
 
 use crate::wallframe::display::layout::{Align, FillMode, Location, Rotation};
+use crate::wallframe::display::placement::CanvasRect;
 
 mod paths;
 mod schema;

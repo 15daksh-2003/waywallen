@@ -137,6 +137,8 @@ void App::init() {
         // Queries are parented to the manager so they don't leak.
         auto* dq = new DisplayListQuery(d->m_display_mgr.get());
         dq->reload();
+        auto* cq = new CanvasListQuery(d->m_display_mgr.get());
+        cq->reload();
         auto* rq = new RendererListQuery(d->m_renderer_mgr.get());
         rq->reload();
         auto* lq = new LibraryListQuery(d->m_library_mgr.get());

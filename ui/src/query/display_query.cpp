@@ -145,6 +145,64 @@ void DisplayLayoutSetQuery::reload() {
     });
 }
 
+CanvasLayoutSetQuery::CanvasLayoutSetQuery(QObject* parent): Query(parent) {}
+
+#define WW_SET(field, val)          \
+    do {                            \
+        if (this->field != val) {   \
+            this->field = val;      \
+            Q_EMIT paramsChanged(); \
+        }                           \
+    } while (0)
+
+void CanvasLayoutSetQuery::setCanvasId(const QString& v) { WW_SET(m_canvas_id, v); }
+void CanvasLayoutSetQuery::setFillmodeSet(bool v) { WW_SET(m_fillmode_set, v); }
+void CanvasLayoutSetQuery::setFillmode(int v) { WW_SET(m_fillmode, v); }
+void CanvasLayoutSetQuery::setLocationSet(bool v) { WW_SET(m_location_set, v); }
+void CanvasLayoutSetQuery::setLocationX(int v) { WW_SET(m_location_x, v); }
+void CanvasLayoutSetQuery::setLocationY(int v) { WW_SET(m_location_y, v); }
+void CanvasLayoutSetQuery::setRotationSet(bool v) { WW_SET(m_rotation_set, v); }
+void CanvasLayoutSetQuery::setRotation(int v) { WW_SET(m_rotation, v); }
+void CanvasLayoutSetQuery::setClearFillmode(bool v) { WW_SET(m_clear_fillmode, v); }
+void CanvasLayoutSetQuery::setClearLocation(bool v) { WW_SET(m_clear_location, v); }
+void CanvasLayoutSetQuery::setClearRotation(bool v) { WW_SET(m_clear_rotation, v); }
+#undef WW_SET
+
+void CanvasLayoutSetQuery::reload() {
+    setStatus(Status::Querying);
+    auto backend = App::instance()->backend();
+
+    proto::LayoutOverride ovr;
+    ovr.setFillmodeSet(m_fillmode_set);
+    ovr.setFillmode(static_cast<proto::FillMode>(m_fillmode));
+    ovr.setLocationSet(m_location_set);
+    ovr.setLocationX(static_cast<quint32>(std::clamp(m_location_x, 0, 100)));
+    ovr.setLocationY(static_cast<quint32>(std::clamp(m_location_y, 0, 100)));
+    ovr.setRotationSet(m_rotation_set);
+    ovr.setRotation(static_cast<proto::Rotation>(m_rotation));
+
+    proto::CanvasLayoutSetRequest inner;
+    inner.setCanvasId(m_canvas_id);
+    inner.setOverride(std::move(ovr));
+    inner.setClearFillmode(m_clear_fillmode);
+    inner.setClearLocation(m_clear_location);
+    inner.setClearRotation(m_clear_rotation);
+
+    auto req = proto::Request {};
+    req.setCanvasLayoutSet(std::move(inner));
+
+    auto self = QWatcher { this };
+    spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
+        auto result = co_await backend->send(std::move(req));
+        if (! co_await QAsyncResult::qexecutor()) co_return;
+        if (! self) co_return;
+        self->inspect_set(result, [](const proto::Response& rsp) {
+            (void)rsp;
+        });
+        co_return;
+    });
+}
+
 DisplayRenameQuery::DisplayRenameQuery(QObject* parent): Query(parent) {}
 
 #define WW_SET(field, val)          \
@@ -182,6 +240,111 @@ void DisplayRenameQuery::reload() {
 
         self->inspect_set(result, [](const proto::Response& rsp) {
             (void)rsp;
+        });
+        co_return;
+    });
+}
+
+CanvasListQuery::CanvasListQuery(QObject* parent): Query(parent) {}
+
+void CanvasListQuery::reload() {
+    setStatus(Status::Querying);
+    auto backend = App::instance()->backend();
+
+    proto::Request req;
+    req.setCanvasList(proto::CanvasListRequest {});
+    auto self = QWatcher { this };
+    spawn([self, backend, req = std::move(req)]() mutable -> task<void> {
+        auto result = co_await backend->send(std::move(req));
+        if (! co_await QAsyncResult::qexecutor()) co_return;
+        if (! self) co_return;
+        self->inspect_set(result, [](const proto::Response& response) {
+            if (auto* manager = DisplayManager::instance()) {
+                manager->replaceCanvases(response.canvasList().canvases(),
+                                         response.canvasList().revision());
+            }
+        });
+        co_return;
+    });
+}
+
+CanvasMutationQuery::CanvasMutationQuery(QObject* parent): Query(parent) {}
+
+static auto canvasMembersFromVariant(const QVariantList& values)
+    -> QList<proto::CanvasMemberInput> {
+    QList<proto::CanvasMemberInput> members;
+    members.reserve(values.size());
+    for (const auto& value : values) {
+        const auto        map = value.toMap();
+        proto::CanvasRect rect;
+        rect.setX(map.value(u"x"_s).toInt());
+        rect.setY(map.value(u"y"_s).toInt());
+        rect.setWidth(map.value(u"width"_s).toUInt());
+        rect.setHeight(map.value(u"height"_s).toUInt());
+        proto::CanvasMemberInput member;
+        member.setSettingsKey(map.value(u"settingsKey"_s).toString());
+        member.setRect(std::move(rect));
+        members.append(std::move(member));
+    }
+    return members;
+}
+
+void CanvasMutationQuery::createCanvas(const QString& name, const QVariantList& members) {
+    proto::CanvasCreateRequest inner;
+    inner.setName(name);
+    inner.setMembers(canvasMembersFromVariant(members));
+    proto::Request request;
+    request.setCanvasCreate(std::move(inner));
+    m_request = std::move(request);
+    reload();
+}
+
+void CanvasMutationQuery::updateCanvas(const QString& id, quint64 expectedRevision,
+                                       const QString& name, const QVariantList& members) {
+    proto::CanvasUpdateRequest inner;
+    inner.setCanvasId(id);
+    inner.setExpectedRevision(expectedRevision);
+    inner.setName(name);
+    inner.setMembers(canvasMembersFromVariant(members));
+    proto::Request request;
+    request.setCanvasUpdate(std::move(inner));
+    m_request = std::move(request);
+    reload();
+}
+
+void CanvasMutationQuery::removeCanvas(const QString& id, quint64 expectedRevision) {
+    proto::CanvasDeleteRequest inner;
+    inner.setCanvasId(id);
+    inner.setExpectedRevision(expectedRevision);
+    proto::Request request;
+    request.setCanvasDelete(std::move(inner));
+    m_request = std::move(request);
+    reload();
+}
+
+void CanvasMutationQuery::reload() {
+    if (! m_request) return;
+    setStatus(Status::Querying);
+    auto backend = App::instance()->backend();
+    auto request = std::move(*m_request);
+    m_request.reset();
+    const auto deleted_id =
+        request.hasCanvasDelete() ? request.canvasDelete().canvasId() : QString {};
+
+    auto self = QWatcher { this };
+    spawn([self, backend, request = std::move(request), deleted_id]() mutable -> task<void> {
+        auto result = co_await backend->send(std::move(request));
+        if (! co_await QAsyncResult::qexecutor()) co_return;
+        if (! self) co_return;
+        self->inspect_set(result, [self, deleted_id](const proto::Response& response) {
+            if (response.hasCanvasCreate() && response.canvasCreate().hasCanvas()) {
+                Q_EMIT self->canvasCreated(response.canvasCreate().canvas().canvasId());
+            } else if (response.hasCanvasUpdate() && response.canvasUpdate().hasCanvas()) {
+                Q_EMIT self->canvasUpdated(response.canvasUpdate().canvas().canvasId(),
+                                           response.canvasUpdate().revision());
+            } else if (response.hasCanvasDelete()) {
+                Q_EMIT self->canvasDeleted(deleted_id);
+            }
         });
         co_return;
     });
