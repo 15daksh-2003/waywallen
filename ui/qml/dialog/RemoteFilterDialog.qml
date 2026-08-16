@@ -56,6 +56,18 @@ MD.Dialog {
     function hasFilterValue(filter) {
         return selectedFor(filter).length > 0;
     }
+    function usesInlineValues(filter) {
+        return Number(filter?.type ?? 0) === 2 && filterValues(filter).length <= 6;
+    }
+    function toggleFilterValue(filter, value) {
+        const selected = selectedFor(filter);
+        const index = selected.indexOf(value);
+        if (index >= 0)
+            selected.splice(index, 1);
+        else
+            selected.push(value);
+        setFilterValues(filter, selected);
+    }
     function collect(filter, nextValues) {
         let selected = selectedMap();
         for (const value of filterValues(filter))
@@ -209,6 +221,7 @@ MD.Dialog {
                             }
                             MD.IconButton {
                                 icon.name: MD.Token.icon.edit
+                                visible: !root.usesInlineValues(filterRow.modelData)
                                 onClicked: root.openValueDialog(filterRow.modelData)
                             }
                         }
@@ -222,7 +235,23 @@ MD.Dialog {
                         }
                         Flow {
                             Layout.fillWidth: true
-                            visible: root.selectedFor(filterRow.modelData).length > 0
+                            visible: root.usesInlineValues(filterRow.modelData)
+                            spacing: 8
+
+                            Repeater {
+                                model: root.filterValues(filterRow.modelData)
+                                delegate: MD.FilterChip {
+                                    required property var modelData
+                                    checkable: false
+                                    text: modelData
+                                    checked: root.selectedFor(filterRow.modelData).indexOf(modelData) >= 0
+                                    onClicked: root.toggleFilterValue(filterRow.modelData, modelData)
+                                }
+                            }
+                        }
+                        Flow {
+                            Layout.fillWidth: true
+                            visible: !root.usesInlineValues(filterRow.modelData) && root.selectedFor(filterRow.modelData).length > 0
                             spacing: 6
 
                             Repeater {
