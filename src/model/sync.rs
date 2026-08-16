@@ -121,6 +121,7 @@ pub async fn sync_plugin_entries(
                     preview_path: preview_rel.as_deref(),
                     description: entry.description.as_deref(),
                     external_id: entry.external_id.as_deref(),
+                    web_url: entry.web_url.as_deref(),
                     size,
                     width,
                     height,
@@ -175,6 +176,7 @@ mod tests {
             description: None,
             tags: Vec::new(),
             external_id: None,
+            web_url: None,
             size: None,
             width: None,
             height: None,
@@ -335,6 +337,7 @@ mod tests {
             description: Some("rain and music".to_owned()),
             tags: vec!["Nature".to_owned(), "relaxing".to_owned()],
             external_id: Some("12345".to_owned()),
+            web_url: Some("https://example.invalid/item/12345".to_owned()),
             size: None,
             width: None,
             height: None,
@@ -365,6 +368,10 @@ mod tests {
         assert_eq!(it.preview_path.as_deref(), Some("12345/preview.gif"));
         assert_eq!(it.description.as_deref(), Some("rain and music"));
         assert_eq!(it.external_id.as_deref(), Some("12345"));
+        assert_eq!(
+            it.web_url.as_deref(),
+            Some("https://example.invalid/item/12345")
+        );
         let tags = repo::list_tags_of_item(&db, it.id).await.unwrap();
         assert_eq!(tags.len(), 2);
     }

@@ -46,6 +46,7 @@ fn minimal_args<'a>(
         preview_path: None,
         description: None,
         external_id: None,
+        web_url: None,
         size: None,
         width: None,
         height: None,
@@ -107,6 +108,7 @@ async fn upsert_item_refreshes_every_column_on_conflict() {
             preview_path: None,
             description: None,
             external_id: None,
+            web_url: None,
             size: None,
             width: None,
             height: None,
@@ -126,6 +128,7 @@ async fn upsert_item_refreshes_every_column_on_conflict() {
             preview_path: Some("new/preview.png"),
             description: Some("now animated"),
             external_id: Some("ext-42"),
+            web_url: Some("https://example.invalid/item/ext-42"),
             size: None,
             width: None,
             height: None,
@@ -139,6 +142,10 @@ async fn upsert_item_refreshes_every_column_on_conflict() {
     assert_eq!(updated.preview_path.as_deref(), Some("new/preview.png"));
     assert_eq!(updated.description.as_deref(), Some("now animated"));
     assert_eq!(updated.external_id.as_deref(), Some("ext-42"));
+    assert_eq!(
+        updated.web_url.as_deref(),
+        Some("https://example.invalid/item/ext-42")
+    );
 }
 
 #[tokio::test]
@@ -157,6 +164,7 @@ async fn upsert_item_persists_media_meta() {
             preview_path: None,
             description: None,
             external_id: None,
+            web_url: None,
             size: Some(123_456),
             width: Some(1920),
             height: Some(1080),
@@ -183,6 +191,7 @@ async fn upsert_item_persists_media_meta() {
             preview_path: None,
             description: None,
             external_id: None,
+            web_url: None,
             size: None,
             width: None,
             height: None,

@@ -1566,6 +1566,7 @@ impl LuaPluginRuntime {
                 description: tbl.get::<String>("description").ok(),
                 tags: tbl.get::<Vec<String>>("tags").unwrap_or_default(),
                 external_id: tbl.get::<String>("external_id").ok(),
+                web_url: tbl.get::<String>("web_url").ok(),
                 // Optional plugin-supplied media metadata.
                 // Plugins that know it can skip later probing.
                 size: tbl.get::<i64>("size").ok(),
@@ -1971,6 +1972,9 @@ impl LuaPluginRuntime {
         }
         if let Some(eid) = &entry.external_id {
             entry_tbl.set("external_id", eid.clone())?;
+        }
+        if let Some(web_url) = &entry.web_url {
+            entry_tbl.set("web_url", web_url.clone())?;
         }
         if let Some(size) = entry.size {
             entry_tbl.set("size", size)?;
@@ -2445,6 +2449,7 @@ impl LuaPluginRuntime {
                 "external_id",
                 "module.discover.download result",
             )?,
+            web_url: Self::optional_string(&result, "web_url", "module.discover.download result")?,
             size: result.get::<i64>("size").ok(),
             width: result.get::<u32>("width").ok(),
             height: result.get::<u32>("height").ok(),

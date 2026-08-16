@@ -336,6 +336,8 @@ pub struct DiscoverDownload {
     pub description: String,
     pub tags: Vec<String>,
     pub external_id: String,
+    #[serde(default)]
+    pub web_url: String,
     pub size: Option<i64>,
     pub width: Option<u32>,
     pub height: Option<u32>,

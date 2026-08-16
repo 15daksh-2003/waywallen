@@ -505,6 +505,9 @@ message WallpaperEntry {
   // True when this scanned item maps to a subscription owned by its source.
   // Subscription state is not queried; clients initially treat it as subscribed.
   bool supports_item_unsubscribe = 19;
+  // Source-provided page for this wallpaper on its remote service.
+  // Empty for local wallpapers and sources that do not provide one.
+  string web_url = 20;
 }
 
 message WallpaperListRequest {

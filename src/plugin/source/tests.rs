@@ -425,6 +425,7 @@ function M.discover.download(ctx, id)
         title = names.name(),
         tags = {"tag"},
         external_id = id,
+        web_url = "https://example.invalid/item/" .. id,
         size = 42,
         width = 10,
         height = 20,
@@ -454,6 +455,7 @@ return M
     assert_eq!(dl.title, "Imported");
     assert_eq!(dl.tags, vec!["tag"]);
     assert_eq!(dl.external_id, "abc");
+    assert_eq!(dl.web_url, "https://example.invalid/item/abc");
     assert_eq!(dl.size, Some(42));
     let detail = block_value(async { mgr.call_details("imported", "abc").await.unwrap() });
     assert_eq!(detail.width, Some(10));
@@ -508,6 +510,7 @@ return M
         description: None,
         tags: vec!["tag".to_string()],
         external_id: Some("ext-1".to_string()),
+        web_url: None,
         size: None,
         width: None,
         height: None,
@@ -557,6 +560,7 @@ return M
         description: None,
         tags: Vec::new(),
         external_id: None,
+        web_url: None,
         size: None,
         width: None,
         height: None,
@@ -736,6 +740,14 @@ end
     let mapped: LuaTable = details.call(detail.clone()).unwrap();
     assert_eq!(
         mapped.get::<String>("web_url").unwrap(),
+        "https://wallhaven.cc/w/abc123"
+    );
+
+    let download: LuaFunction = map.get("download").unwrap();
+    detail.set("id", "abc123").unwrap();
+    let download_mapped: LuaTable = download.call(detail.clone()).unwrap();
+    assert_eq!(
+        download_mapped.get::<String>("web_url").unwrap(),
         "https://wallhaven.cc/w/abc123"
     );
     // A wallpaper Wallhaven reports no uploader for keeps the empty author
@@ -1469,6 +1481,7 @@ return M
         description: None,
         tags: Vec::new(),
         external_id: Some("item".to_string()),
+        web_url: None,
         size: None,
         width: None,
         height: None,
@@ -1848,6 +1861,7 @@ return M
         description: None,
         tags: Vec::new(),
         external_id: None,
+        web_url: None,
         size: None,
         width: None,
         height: None,

@@ -27,6 +27,9 @@ pub struct WallpaperEntry {
     /// Stable identifier assigned by the source plugin.
     #[serde(default)]
     pub external_id: Option<String>,
+    /// Source-provided page for this wallpaper on its remote service.
+    #[serde(default)]
+    pub web_url: Option<String>,
     /// File size in bytes.
     #[serde(default)]
     pub size: Option<i64>,

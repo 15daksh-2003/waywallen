@@ -366,10 +366,11 @@ Item {
     }
 
     MD.Action {
-        id: closeAction
-        text: qsTr("Close")
-        icon.name: MD.Token.icon.close
-        onTriggered: root.back()
+        id: linkAction
+        text: qsTr("Open web page")
+        icon.name: MD.Token.icon.web
+        visible: String(root.wp?.webUrl ?? "").length > 0
+        onTriggered: MD.Util.openUrlExternally(root.wp.webUrl)
     }
 
     MD.Action {
@@ -416,7 +417,7 @@ Item {
 
     readonly property MD.Action activeApplyAction: ((root.wp?.wpType ?? "") === "image" && (W.App.displayManager.displays || []).length === 0) ? applyViaPortalAction : applyAction
 
-    readonly property list<MD.Action> detailActions: (root.wp?.supportsItemUnsubscribe ?? false) ? [unsubscribeAction, openContainerFolderAction, infoAction, closeAction] : (root.wp?.supportsItemRemove ?? false) ? [removeAction, openContainerFolderAction, infoAction, closeAction] : [openContainerFolderAction, infoAction, closeAction]
+    readonly property list<MD.Action> detailActions: (root.wp?.supportsItemUnsubscribe ?? false) ? [unsubscribeAction, linkAction, openContainerFolderAction, infoAction] : (root.wp?.supportsItemRemove ?? false) ? [removeAction, linkAction, openContainerFolderAction, infoAction] : [linkAction, openContainerFolderAction, infoAction]
 
     ColumnLayout {
         anchors.fill: parent
@@ -472,8 +473,20 @@ Item {
                         maximumLineCount: 1
                     }
 
-                    W.DetailActionBar {
-                        actions: root.detailActions
+                    RowLayout {
+                        spacing: 0
+
+                        W.DetailActionBar {
+                            actions: root.detailActions
+                        }
+
+                        MD.SmallIconButton {
+                            icon.name: MD.Token.icon.close
+                            hoverEnabled: true
+                            MD.ToolTip.text: qsTr("Close")
+                            MD.ToolTip.visible: hovered && !pressed
+                            onClicked: root.back()
+                        }
                     }
                 }
 

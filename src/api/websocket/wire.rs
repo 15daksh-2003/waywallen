@@ -63,5 +63,6 @@ pub(super) fn entry_to_pb(
         wallpaper_layout_override_set,
         supports_item_remove,
         supports_item_unsubscribe,
+        web_url: e.web_url.clone().unwrap_or_default(),
     }
 }

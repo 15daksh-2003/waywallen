@@ -201,6 +201,7 @@ mod tests {
                     preview_path: None,
                     description: None,
                     external_id: None,
+                    web_url: None,
                     size: None,
                     width: None,
                     height: None,

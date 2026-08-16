@@ -87,6 +87,7 @@ function M.download(detail)
         description = detail.source or detail.url or "",
         tags = tags_from_detail(detail),
         external_id = tostring(detail.id or ""),
+        web_url = detail.url or "",
         size = detail.file_size,
         width = detail.dimension_x,
         height = detail.dimension_y,
