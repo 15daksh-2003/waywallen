@@ -1,5 +1,6 @@
 use crate::error::{Error, Result, ResultExt};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::net::Shutdown;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::os::unix::process::ExitStatusExt;
@@ -85,6 +86,8 @@ const MAX_RUNTIME_TAG_KEY_BYTES: usize = 32;
 const MAX_RUNTIME_TAG_VALUE_BYTES: usize = 64;
 const WRITER_QUEUE_CAPACITY: usize = 64;
 const RENDERER_FAILED_EXIT_GRACE: Duration = Duration::from_millis(250);
+const RENDERER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const RENDERER_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn renderer_exit_status(status: &ExitStatus) -> String {
     let hint = match status.code() {
@@ -152,6 +155,28 @@ fn renderer_spawn_error_reason(error: Error) -> String {
     match error {
         Error::RendererSpawnFailed(reason) => reason,
         other => other.to_string(),
+    }
+}
+
+async fn run_init_handshake_with_timeout(
+    sock: &StdUnixStream,
+    init: ControlMsg,
+    timeout: Duration,
+) -> Result<DrmNode> {
+    let handshake_stream = sock.try_clone().context("try_clone for Init handshake")?;
+    let mut handshake =
+        tokio::task::spawn_blocking(move || run_init_handshake(&handshake_stream, &init));
+    match tokio::time::timeout(timeout, &mut handshake).await {
+        Ok(result) => result.context("init handshake join")?,
+        Err(_) => {
+            let _ = sock.shutdown(Shutdown::Both);
+            if let Err(error) = handshake.await {
+                log::warn!("renderer Init handshake worker failed after timeout: {error}");
+            }
+            Err(Error::RendererSpawnFailed(format!(
+                "timed out waiting for renderer Ready after {timeout:?}"
+            )))
+        }
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -844,7 +869,7 @@ impl RendererManager {
 
         // A dynamic-loader or early initialization failure happens after
         // exec succeeds, so observe the child while waiting for IPC.
-        let connect_timeout = tokio::time::sleep(Duration::from_secs(10));
+        let connect_timeout = tokio::time::sleep(RENDERER_CONNECT_TIMEOUT);
         tokio::pin!(connect_timeout);
         let (tokio_stream, _addr) = tokio::select! {
             accepted = listener.accept() => accepted.context("accept")?,
@@ -872,13 +897,8 @@ impl RendererManager {
 
         // Emit typed Init right after accept; CLI extras only identify
         // launch resources now.
-        let handshake_stream = std_stream
-            .try_clone()
-            .context("try_clone for Init handshake")?;
         let handshake =
-            tokio::task::spawn_blocking(move || run_init_handshake(&handshake_stream, &init_msg))
-                .await
-                .context("init handshake join")?;
+            run_init_handshake_with_timeout(&std_stream, init_msg, RENDERER_INIT_TIMEOUT).await;
         let gpu = match handshake {
             Ok(gpu) => gpu,
             Err(error) => {
@@ -2416,6 +2436,23 @@ mod init_handshake_tests {
             Some("0.8 0.7 0.6")
         );
         assert_eq!(properties.get("speed").map(String::as_str), Some("100"));
+    }
+
+    #[tokio::test]
+    async fn init_handshake_times_out_and_unblocks_receiver() {
+        let (daemon, _renderer) = StdUnixStream::pair().expect("UnixStream::pair");
+        let init = build_init_msg(&SpawnRequest::default(), &def_legacy("timeout-renderer"));
+
+        let error = run_init_handshake_with_timeout(&daemon, init, Duration::from_millis(20))
+            .await
+            .expect_err("missing Ready must time out");
+
+        assert!(
+            error
+                .to_string()
+                .contains("timed out waiting for renderer Ready after 20ms"),
+            "{error}"
+        );
     }
 
     #[test]
