@@ -309,6 +309,64 @@ mod handshake {
         let _ = std::fs::remove_file(&sock);
     }
 
+    /// A `hello` whose *shape* comes from another revision of the protocol
+    /// dies in the decoder, long before `protocol_version` is ever read, so
+    /// version negotiation never gets a turn. The daemon must still answer:
+    /// closing in silence reaches the consumer as a bare EOF and leaves it
+    /// nothing to show the user but an empty display list.
+    #[tokio::test]
+    async fn undecodable_hello_is_answered_not_hung_up_on() {
+        let (sock, server_task, _events_rx) = start_display_endpoint("display-foreign-hello").await;
+        let sock_for_client = sock.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            use std::io::Write;
+            use std::os::unix::net::UnixStream;
+
+            let hello = Request::Hello {
+                client_name: "foreign-revision".to_string(),
+                client_version: "0.0.1".to_string(),
+                protocol_version: PROTOCOL_VERSION,
+            };
+            let mut body = Vec::new();
+            hello.encode(&mut body);
+            // One field this revision of `hello` does not carry.
+            body.extend_from_slice(&0_u32.to_le_bytes());
+            let total = u16::try_from(body.len() + 4)?;
+            let mut frame = Vec::with_capacity(total as usize);
+            frame.extend_from_slice(&hello.opcode().to_le_bytes());
+            frame.extend_from_slice(&total.to_le_bytes());
+            frame.extend_from_slice(&body);
+
+            let mut stream = UnixStream::connect(&sock_for_client)?;
+            stream.write_all(&frame)?;
+
+            match codec::recv_event(&stream) {
+                Ok((Event::Error { code, message }, _)) => {
+                    anyhow::ensure!(
+                        code == DisplayErrorCode::ProtocolViolation,
+                        "code={code:?} message={message:?}"
+                    );
+                    anyhow::ensure!(
+                        message.contains(&format!(
+                            "[{}..={}]",
+                            endpoint::MIN_SUPPORTED_CLIENT_VERSION,
+                            endpoint::MAX_SUPPORTED_CLIENT_VERSION
+                        )),
+                        "error text does not name the accepted range: {message:?}"
+                    );
+                    Ok(())
+                }
+                Ok((other, _)) => anyhow::bail!("expected error, got opcode {}", other.opcode()),
+                Err(error) => anyhow::bail!("client was hung up on without a word: {error}"),
+            }
+        })
+        .await
+        .expect("client join")
+        .expect("client flow");
+        server_task.abort();
+        let _ = std::fs::remove_file(&sock);
+    }
+
     /// `protocol_version` outside the daemon's supported range
     /// must produce `error{code = VERSION_UNSUPPORTED}` followed by close.
     #[tokio::test]

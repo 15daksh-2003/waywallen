@@ -21,6 +21,11 @@
     - `hello` is the first request and `welcome` is the first reply.
     - The daemon accepts exactly protocol v8 and rejects other versions
       before reading registration capabilities or creating router state.
+    - The daemon never ends a handshake in silence. A frame it cannot even
+      decode — the shape a client of another revision sends — is answered
+      with `error` naming the accepted version range, then the connection
+      closes. Clients should surface that text rather than treat the
+      disconnect as "no daemon".
     - `register_display` is sent exactly once after `welcome` and contains
       every consumer-owned fact required for initial routing.
     - `display_accepted` is the first event after registration. Its
