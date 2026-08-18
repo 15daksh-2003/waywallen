@@ -183,61 +183,119 @@ async fn handle_client(
 // ---------------------------------------------------------------------------
 // Handshake
 
+/// Why a handshake stopped before the display was registered.
+enum HandshakeAbort {
+    /// The peer is still on the other end of the socket and is owed an
+    /// explanation before the connection goes away.
+    Reject {
+        code: wire::DisplayErrorCode,
+        message: String,
+    },
+    /// Nobody left to talk to: peer gone, local IO fault, daemon shutdown.
+    Hangup(Error),
+}
+
+impl From<Error> for HandshakeAbort {
+    fn from(error: Error) -> Self {
+        Self::Hangup(error)
+    }
+}
+
+fn reject(code: wire::DisplayErrorCode, message: String) -> HandshakeAbort {
+    HandshakeAbort::Reject { code, message }
+}
+
+/// What the handshake has managed to learn about the peer so far. A refusal
+/// can land before any of it is known, so both fields start blank.
+#[derive(Default)]
+struct HandshakePeer {
+    client_name: String,
+    protocol_version: u32,
+}
+
+/// Every refusal leaves through this one place, so no handshake step can
+/// drop a client without first saying why — on the wire and in the UI event
+/// stream. A silent close arrives at the consumer as a bare EOF, and the
+/// only thing it can report from that is "no displays".
 async fn do_handshake(
     stream: &StdUnixStream,
     events_tx: &tokio::sync::broadcast::Sender<GlobalEvent>,
     shutdown_rx: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<DisplayRegistration> {
-    let (hello, _fds): (Request, _) = match recv_request_cancellable(stream, shutdown_rx).await {
-        Ok(request) => request,
-        Err(error) => {
-            if error.is_protocol_failure() {
-                let reason = format!("incompatible or malformed display hello: {error}");
-                report_connection_failure(
-                    events_tx,
-                    String::new(),
-                    0,
-                    wire::DisplayErrorCode::ProtocolViolation,
-                    reason,
-                );
-            }
-            return Err(Error::Internal(anyhow!("recv hello: {error}")));
+    let mut peer = HandshakePeer::default();
+    match handshake_steps(stream, &mut peer, shutdown_rx).await {
+        Ok(registration) => Ok(registration),
+        Err(HandshakeAbort::Hangup(error)) => Err(error),
+        Err(HandshakeAbort::Reject { code, message }) => {
+            let _ = send_error(stream, code, message.clone()).await;
+            report_connection_failure(
+                events_tx,
+                peer.client_name,
+                peer.protocol_version,
+                code,
+                message.clone(),
+            );
+            Err(Error::Internal(anyhow!(message)))
         }
-    };
+    }
+}
+
+/// Read one handshake frame. A frame the daemon cannot decode at all is
+/// refused like any other bad frame instead of ending the connection in
+/// silence. That is the only way a client built against another revision of
+/// this protocol can learn what happened: the decoder gives up on the frame
+/// long before `hello.protocol_version` is reachable, so version negotiation
+/// never gets its say.
+async fn recv_handshake_frame(
+    stream: &StdUnixStream,
+    stage: &'static str,
+    shutdown_rx: &mut tokio::sync::watch::Receiver<bool>,
+) -> std::result::Result<(Request, Vec<OwnedFd>), HandshakeAbort> {
+    recv_request_cancellable(stream, shutdown_rx)
+        .await
+        .map_err(|error| {
+            if error.is_protocol_failure() {
+                reject(
+                    wire::DisplayErrorCode::ProtocolViolation,
+                    format!(
+                        "incompatible or malformed display {stage}: {error}; \
+                         daemon accepts protocol \
+                         [{MIN_SUPPORTED_CLIENT_VERSION}..={MAX_SUPPORTED_CLIENT_VERSION}]"
+                    ),
+                )
+            } else {
+                HandshakeAbort::Hangup(Error::Internal(anyhow!("recv {stage}: {error}")))
+            }
+        })
+}
+
+async fn handshake_steps(
+    stream: &StdUnixStream,
+    peer: &mut HandshakePeer,
+    shutdown_rx: &mut tokio::sync::watch::Receiver<bool>,
+) -> std::result::Result<DisplayRegistration, HandshakeAbort> {
+    let (hello, _fds) = recv_handshake_frame(stream, "hello", shutdown_rx).await?;
     let Request::Hello {
         client_name,
         client_version,
         protocol_version,
     } = hello
     else {
-        let message = format!("expected hello, got opcode {}", hello.opcode());
-        let _ = send_error(
-            stream,
+        return Err(reject(
             wire::DisplayErrorCode::ProtocolViolation,
-            message.clone(),
-        )
-        .await;
-        return Err(Error::Internal(anyhow!(message)));
+            format!("expected hello, got opcode {}", hello.opcode()),
+        ));
     };
+    peer.client_name = client_name.clone();
+    peer.protocol_version = protocol_version;
     if !(MIN_SUPPORTED_CLIENT_VERSION..=MAX_SUPPORTED_CLIENT_VERSION).contains(&protocol_version) {
-        let msg = format!(
-            "client protocol v{protocol_version} not supported; \
-             daemon accepts [{MIN_SUPPORTED_CLIENT_VERSION}..={MAX_SUPPORTED_CLIENT_VERSION}]"
-        );
-        let _ = send_error(
-            stream,
+        return Err(reject(
             wire::DisplayErrorCode::VersionUnsupported,
-            msg.clone(),
-        )
-        .await;
-        report_connection_failure(
-            events_tx,
-            client_name.clone(),
-            protocol_version,
-            wire::DisplayErrorCode::VersionUnsupported,
-            msg.clone(),
-        );
-        return Err(Error::Internal(anyhow!("version mismatch: {msg}")));
+            format!(
+                "client protocol v{protocol_version} not supported; \
+                 daemon accepts [{MIN_SUPPORTED_CLIENT_VERSION}..={MAX_SUPPORTED_CLIENT_VERSION}]"
+            ),
+        ));
     }
     log::info!("display hello: {client_name} v{client_version} (proto v{protocol_version})");
 
@@ -255,22 +313,7 @@ async fn do_handshake(
     .context("welcome join")?
     .map_err(|e| Error::Internal(anyhow!("send welcome: {e}")))?;
 
-    let (reg, _fds): (Request, _) = match recv_request_cancellable(stream, shutdown_rx).await {
-        Ok(request) => request,
-        Err(error) => {
-            if error.is_protocol_failure() {
-                let reason = format!("incompatible or malformed display registration: {error}");
-                report_connection_failure(
-                    events_tx,
-                    client_name.clone(),
-                    protocol_version,
-                    wire::DisplayErrorCode::ProtocolViolation,
-                    reason,
-                );
-            }
-            return Err(Error::Internal(anyhow!("recv register_display: {error}")));
-        }
-    };
+    let (reg, _fds) = recv_handshake_frame(stream, "registration", shutdown_rx).await?;
     let Request::RegisterDisplay {
         name,
         instance_id,
@@ -280,14 +323,10 @@ async fn do_handshake(
         window_state_flags,
     } = reg
     else {
-        let message = format!("expected register_display, got opcode {}", reg.opcode());
-        let _ = send_error(
-            stream,
+        return Err(reject(
             wire::DisplayErrorCode::ProtocolViolation,
-            message.clone(),
-        )
-        .await;
-        return Err(Error::Internal(anyhow!(message)));
+            format!("expected register_display, got opcode {}", reg.opcode()),
+        ));
     };
     let instance_id = if instance_id.is_empty() {
         None
@@ -295,40 +334,28 @@ async fn do_handshake(
         Some(instance_id)
     };
     if metrics.width == 0 || metrics.height == 0 {
-        let msg = format!(
-            "register_display has invalid extent {}x{}",
-            metrics.width, metrics.height
-        );
-        let _ = send_error(
-            stream,
+        return Err(reject(
             wire::DisplayErrorCode::ProtocolViolation,
-            msg.clone(),
-        )
-        .await;
-        return Err(Error::Internal(anyhow!(msg)));
+            format!(
+                "register_display has invalid extent {}x{}",
+                metrics.width, metrics.height
+            ),
+        ));
     }
     if window_state_flags & !crate::wallframe::routing::auto_replay::FLAGS_KNOWN != 0 {
-        let msg = format!("register_display has unknown window flags 0x{window_state_flags:x}");
-        let _ = send_error(
-            stream,
+        return Err(reject(
             wire::DisplayErrorCode::ProtocolViolation,
-            msg.clone(),
-        )
-        .await;
-        return Err(Error::Internal(anyhow!(msg)));
+            format!("register_display has unknown window flags 0x{window_state_flags:x}"),
+        ));
     }
     if presentation_caps.flags & !crate::wallframe::routing::PRESENTATION_CAP_PAUSE_BLUR != 0 {
-        let msg = format!(
-            "register_display has unknown presentation capability flags 0x{:x}",
-            presentation_caps.flags
-        );
-        let _ = send_error(
-            stream,
+        return Err(reject(
             wire::DisplayErrorCode::ProtocolViolation,
-            msg.clone(),
-        )
-        .await;
-        return Err(Error::Internal(anyhow!(msg)));
+            format!(
+                "register_display has unknown presentation capability flags 0x{:x}",
+                presentation_caps.flags
+            ),
+        ));
     }
     let drm = crate::wallframe::renderer_manager::DrmNode {
         major: consumer_caps.drm_render_major,
@@ -349,21 +376,10 @@ async fn do_handshake(
     ) {
         Ok(capabilities) => capabilities,
         Err(error) => {
-            let message = format!("malformed consumer capabilities: {error:?}");
-            let _ = send_error(
-                stream,
+            return Err(reject(
                 wire::DisplayErrorCode::ProtocolViolation,
-                message.clone(),
-            )
-            .await;
-            report_connection_failure(
-                events_tx,
-                client_name,
-                protocol_version,
-                wire::DisplayErrorCode::ProtocolViolation,
-                message.clone(),
-            );
-            return Err(Error::Internal(anyhow!(message)));
+                format!("malformed consumer capabilities: {error:?}"),
+            ));
         }
     };
     let prefix = format!("display {name}: consumer capabilities");
@@ -1189,6 +1205,26 @@ mod tests {
                 assert!(reason.contains(DISPLAY_UPDATE_HINT));
             }
             event => panic!("unexpected event: {event:?}"),
+        }
+
+        // The peer must not be dropped in silence: a frame we could not
+        // decode still earns an `error` event naming the protocol range we
+        // do speak, so the client has something to print.
+        match codec::recv_event(&client) {
+            Ok((
+                Event::Error {
+                    code: wire::DisplayErrorCode::ProtocolViolation,
+                    message,
+                },
+                _,
+            )) => {
+                assert!(message.contains("incompatible or malformed display hello"));
+                assert!(message.contains(&format!(
+                    "[{MIN_SUPPORTED_CLIENT_VERSION}..={MAX_SUPPORTED_CLIENT_VERSION}]"
+                )));
+            }
+            Ok((event, _)) => panic!("expected error event, got opcode {}", event.opcode()),
+            Err(error) => panic!("client got no answer at all: {error}"),
         }
     }
 
