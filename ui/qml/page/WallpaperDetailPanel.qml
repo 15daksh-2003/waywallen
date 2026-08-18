@@ -939,6 +939,7 @@ Item {
                     visible: m_prop_delegate.type === "combo" && m_prop_delegate.supported
                     Layout.fillWidth: true
                     mdState.size: MD.Enum.S
+                    popupMaximumHeight: Math.min(320, (Window.window?.height ?? 480) * 0.45)
                     model: m_prop_delegate.optionLabels || []
                     onActivated: idx => {
                         const values = m_prop_delegate.optionValues || [];
