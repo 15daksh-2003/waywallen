@@ -309,11 +309,7 @@ mod handshake {
         let _ = std::fs::remove_file(&sock);
     }
 
-    /// A `hello` whose *shape* comes from another revision of the protocol
-    /// dies in the decoder, long before `protocol_version` is ever read, so
-    /// version negotiation never gets a turn. The daemon must still answer:
-    /// closing in silence reaches the consumer as a bare EOF and leaves it
-    /// nothing to show the user but an empty display list.
+    /// An undecodable hello still receives a protocol error.
     #[tokio::test]
     async fn undecodable_hello_is_answered_not_hung_up_on() {
         let (sock, server_task, _events_rx) = start_display_endpoint("display-foreign-hello").await;

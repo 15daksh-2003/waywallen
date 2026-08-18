@@ -183,15 +183,11 @@ async fn handle_client(
 // ---------------------------------------------------------------------------
 // Handshake
 
-/// Why a handshake stopped before the display was registered.
 enum HandshakeAbort {
-    /// The peer is still on the other end of the socket and is owed an
-    /// explanation before the connection goes away.
     Reject {
         code: wire::DisplayErrorCode,
         message: String,
     },
-    /// Nobody left to talk to: peer gone, local IO fault, daemon shutdown.
     Hangup(Error),
 }
 
@@ -205,18 +201,12 @@ fn reject(code: wire::DisplayErrorCode, message: String) -> HandshakeAbort {
     HandshakeAbort::Reject { code, message }
 }
 
-/// What the handshake has managed to learn about the peer so far. A refusal
-/// can land before any of it is known, so both fields start blank.
 #[derive(Default)]
 struct HandshakePeer {
     client_name: String,
     protocol_version: u32,
 }
 
-/// Every refusal leaves through this one place, so no handshake step can
-/// drop a client without first saying why — on the wire and in the UI event
-/// stream. A silent close arrives at the consumer as a bare EOF, and the
-/// only thing it can report from that is "no displays".
 async fn do_handshake(
     stream: &StdUnixStream,
     events_tx: &tokio::sync::broadcast::Sender<GlobalEvent>,
@@ -240,12 +230,7 @@ async fn do_handshake(
     }
 }
 
-/// Read one handshake frame. A frame the daemon cannot decode at all is
-/// refused like any other bad frame instead of ending the connection in
-/// silence. That is the only way a client built against another revision of
-/// this protocol can learn what happened: the decoder gives up on the frame
-/// long before `hello.protocol_version` is reachable, so version negotiation
-/// never gets its say.
+/// A foreign frame shape may fail before its protocol version can be decoded.
 async fn recv_handshake_frame(
     stream: &StdUnixStream,
     stage: &'static str,
@@ -1207,9 +1192,6 @@ mod tests {
             event => panic!("unexpected event: {event:?}"),
         }
 
-        // The peer must not be dropped in silence: a frame we could not
-        // decode still earns an `error` event naming the protocol range we
-        // do speak, so the client has something to print.
         match codec::recv_event(&client) {
             Ok((
                 Event::Error {
