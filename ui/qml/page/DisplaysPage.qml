@@ -281,6 +281,23 @@ MD.Page {
         }
     }
 
+    MD.Dialog {
+        id: resetDisplaySettingsDialog
+        parent: T.Overlay.overlay
+        modal: true
+        title: qsTr("Revert layout settings?")
+        standardButtons: T.Dialog.Cancel | T.Dialog.Reset
+        contentItem: MD.Text {
+            text: qsTr("The settings for this layout will be reverted to the global default. Your custom configuration will be lost.")
+            wrapMode: Text.Wrap
+            color: MD.Token.color.on_surface_variant
+        }
+        onReset: {
+            root.resetLayout()
+            resetDisplaySettingsDialog.close()
+        }
+    }
+
     function canvasRows(canvasObject) {
         return canvasEditor.rowsForCanvas(canvasObject);
     }
@@ -1368,7 +1385,7 @@ MD.Page {
                                     icon.name: MD.Token.icon.settings_backup_restore
                                     MD.ToolTip.visible: hovered
                                     MD.ToolTip.text: qsTr("Revert to global default")
-                                    onClicked: root.resetLayout()
+                                    onClicked: resetDisplaySettingsDialog.open()
                                 }
                             }
                         }
