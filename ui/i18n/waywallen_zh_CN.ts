@@ -412,6 +412,14 @@
         <translation>恢复全局默认值</translation>
     </message>
     <message>
+        <source>Revert layout settings?</source>
+        <translation>恢复布局设置？</translation>
+    </message>
+    <message>
+        <source>The settings for this layout will be reverted to the global default. Your custom configuration will be lost.</source>
+        <translation>当前布局将恢复为全局默认设置，自定义配置将会丢失。</translation>
+    </message>
+    <message>
         <source>Fill mode</source>
         <translation>填充模式</translation>
     </message>
@@ -1171,6 +1179,14 @@ Related display: #%1</source>
     <message>
         <source>Reset</source>
         <translation>重置</translation>
+    </message>
+    <message>
+        <source>Reset settings?</source>
+        <translation>重置设置？</translation>
+    </message>
+    <message>
+        <source>All settings will be reset to their defaults. Your custom configuration will be lost.</source>
+        <translation>所有设置将恢复为默认值，个性化配置将会丢失。</translation>
     </message>
     <message>
         <source>Failed to update login startup</source>
