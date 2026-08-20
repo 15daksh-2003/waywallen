@@ -1365,7 +1365,7 @@ MD.Page {
                                         const ovr = root.selected.layoutOverride || ({});
                                         return ovr.fillmodeSet === true || ovr.locationSet === true || ovr.alignSet === true || ovr.rotationSet === true;
                                     }
-                                    icon.name: MD.Token.icon.refresh
+                                    icon.name: MD.Token.icon.settings_backup_restore
                                     MD.ToolTip.visible: hovered
                                     MD.ToolTip.text: qsTr("Revert to global default")
                                     onClicked: root.resetLayout()

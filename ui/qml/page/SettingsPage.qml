@@ -17,7 +17,7 @@ MD.Page {
 
     actions: [
         MD.Action {
-            icon.name: MD.Token.icon.refresh
+            icon.name: MD.Token.icon.settings_backup_restore
             text: qsTr("Reset")
             enabled: Object.keys(getQ.global).length > 0
             onTriggered: root.resetSettings()
