@@ -17,12 +17,29 @@ MD.Page {
 
     actions: [
         MD.Action {
-            icon.name: MD.Token.icon.refresh
+            icon.name: MD.Token.icon.settings_backup_restore
             text: qsTr("Reset")
             enabled: Object.keys(getQ.global).length > 0
-            onTriggered: root.resetSettings()
+            onTriggered: resetSettingsDialog.open()
         }
     ]
+
+    MD.Dialog {
+        id: resetSettingsDialog
+        parent: T.Overlay.overlay
+        modal: true
+        title: qsTr("Reset settings?")
+        standardButtons: T.Dialog.Cancel | T.Dialog.Reset
+        contentItem: MD.Text {
+            text: qsTr("All settings will be reset to their defaults. Your custom configuration will be lost.")
+            wrapMode: Text.Wrap
+            color: MD.Token.color.on_surface_variant
+        }
+        onReset: {
+            root.resetSettings()
+            resetSettingsDialog.close()
+        }
+    }
 
     component FieldLabel: MD.Text {
         typescale: MD.Token.typescale.label_large
