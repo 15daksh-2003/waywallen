@@ -1,0 +1,3 @@
+[package]
+name = "waywallen-wallhaven-plugin"
+version.workspace = true

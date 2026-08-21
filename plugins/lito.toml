@@ -1,0 +1,21 @@
+[package]
+name = "waywallen-plugin-common"
+version.workspace = true
+
+[lib]
+name = "waywallen-plugin-common"
+module = "waywallen.bridge"
+archive = "waywallen-plugin-common"
+sources = ["Bridge.cppm"]
+
+[dependencies.waywallen-bridge]
+workspace = true
+visibility = "public"
+
+[dependencies.vvk]
+workspace = true
+visibility = "public"
+
+[dependencies.rstd-cppstd]
+workspace = true
+visibility = "private"

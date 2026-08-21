@@ -1,0 +1,42 @@
+[package]
+name = "waywallen-video-plugin"
+version.workspace = true
+
+[[bin]]
+name = "waywallen-video-renderer"
+module = "waywallen.video.entry"
+sources = [
+  "src/main.cpp",
+  "src/entry.cppm",
+  "src/entry.cpp",
+]
+
+[usage]
+threads = true
+
+[dependencies.waywallen-plugin-common]
+workspace = true
+visibility = "private"
+
+[dependencies.wavsen]
+workspace = true
+visibility = "private"
+
+[dependencies.rstd-cppstd]
+workspace = true
+visibility = "private"
+
+[dependencies.rstd-json]
+workspace = true
+visibility = "private"
+
+[dependencies.rstd-argparse]
+workspace = true
+visibility = "private"
+
+[dependencies.rstd-log]
+workspace = true
+visibility = "private"
+
+[runtime-dependencies.waywallen-bridge]
+workspace = true

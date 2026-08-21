@@ -1,0 +1,59 @@
+[package]
+name = "waywallen-image-plugin"
+version.workspace = true
+
+[[bin]]
+name = "waywallen-image-renderer"
+module = "waywallen.image.entry"
+sources = [
+  "src/main.cpp",
+  "src/entry.cppm",
+  "src/entry.cpp",
+  "src/av_image.cpp",
+]
+
+[usage]
+threads = true
+
+[dependencies.waywallen-plugin-common]
+workspace = true
+visibility = "private"
+
+[dependencies.wavsen]
+workspace = true
+visibility = "private"
+
+[dependencies.rstd-cppstd]
+workspace = true
+visibility = "private"
+
+[dependencies.rstd-json]
+workspace = true
+visibility = "private"
+
+[dependencies.rstd-argparse]
+workspace = true
+visibility = "private"
+
+[dependencies.rstd-log]
+workspace = true
+visibility = "private"
+
+[runtime-dependencies.waywallen-bridge]
+workspace = true
+
+[external-dependencies.pkg-config.libavformat]
+workspace = true
+visibility = "private"
+
+[external-dependencies.pkg-config.libavcodec]
+workspace = true
+visibility = "private"
+
+[external-dependencies.pkg-config.libavutil]
+workspace = true
+visibility = "private"
+
+[external-dependencies.pkg-config.libswscale]
+workspace = true
+visibility = "private"

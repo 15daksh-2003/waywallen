@@ -1,0 +1,159 @@
+[package]
+name = "waywallen-ui"
+version.workspace = true
+standard = "c++23"
+
+[[bin]]
+name = "waywallen-ui"
+module = "waywallen.entry"
+sources = [
+  "src/action.cpp",
+  "src/action.cppm",
+  "src/app.cpp",
+  "src/app.cppm",
+  "src/backend.cpp",
+  "src/backend.cppm",
+  "src/daemon_dbus.cpp",
+  "src/daemon_dbus.cppm",
+  "src/entry.cpp",
+  "src/entry.cppm",
+  "src/main.cpp",
+  "src/mod.cppm",
+  "src/model/filter_rule_model.cpp",
+  "src/model/filter_rule_model.cppm",
+  "src/model/list_models.cpp",
+  "src/model/list_models.cppm",
+  "src/model/remote_model.cpp",
+  "src/model/remote_model.cppm",
+  "src/model/share_store.cppm",
+  "src/model/store_item.cpp",
+  "src/model/store_item.cppm",
+  "src/model/user_property_model.cpp",
+  "src/model/user_property_model.cppm",
+  "src/model/wallpaper_select_storage.cpp",
+  "src/model/wallpaper_select_storage.cppm",
+  "src/msg/backend_msg.cppm",
+  "src/msg/store.cpp",
+  "src/msg/store.cppm",
+  "src/notify.cpp",
+  "src/notify.cppm",
+  "src/objmodel/display.cpp",
+  "src/objmodel/display.cppm",
+  "src/objmodel/gpu.cpp",
+  "src/objmodel/gpu.cppm",
+  "src/objmodel/library.cpp",
+  "src/objmodel/library.cppm",
+  "src/objmodel/renderer.cpp",
+  "src/objmodel/renderer.cppm",
+  "src/proto.cpp",
+  "src/proto.cppm",
+  "src/qml_register.cpp",
+  "src/query/autostart_query.cpp",
+  "src/query/autostart_query.cppm",
+  "src/query/display_query.cpp",
+  "src/query/display_query.cppm",
+  "src/query/global_pause_query.cpp",
+  "src/query/global_pause_query.cppm",
+  "src/query/gpu_query.cpp",
+  "src/query/gpu_query.cppm",
+  "src/query/health_query.cpp",
+  "src/query/health_query.cppm",
+  "src/query/library_query.cpp",
+  "src/query/library_query.cppm",
+  "src/query/mod.cppm",
+  "src/query/playlist_query.cpp",
+  "src/query/playlist_query.cppm",
+  "src/query/plugin_action_query.cpp",
+  "src/query/plugin_action_query.cppm",
+  "src/query/plugin_query.cpp",
+  "src/query/plugin_query.cppm",
+  "src/query/progress_query.cpp",
+  "src/query/progress_query.cppm",
+  "src/query/qr_login_query.cpp",
+  "src/query/qr_login_query.cppm",
+  "src/query/query.cppm",
+  "src/query/remote_query.cpp",
+  "src/query/remote_query.cppm",
+  "src/query/renderer_query.cpp",
+  "src/query/renderer_query.cppm",
+  "src/query/settings_query.cpp",
+  "src/query/settings_query.cppm",
+  "src/query/source_query.cpp",
+  "src/query/source_query.cppm",
+  "src/query/tag_query.cpp",
+  "src/query/tag_query.cppm",
+  "src/query/wallpaper_query.cpp",
+  "src/query/wallpaper_query.cppm",
+  "src/thumb/service.cpp",
+  "src/thumb/service.cppm",
+  "src/ui_language.cpp",
+  "src/ui_language.cppm",
+  "src/util.cpp",
+  "src/util.cppm",
+]
+
+[usage]
+private-include-directories = [
+  ".",
+  "include",
+  "include/waywallen/register",
+]
+private-definitions = [
+  "APP_ID=\"org.waywallen.waywallen\"",
+  "APP_VERSION=\"0.3.5\"",
+  "APP_AUTHOR=\"hypengw\"",
+  "APP_NAME=\"waywallen\"",
+  "APP_SUMMARY=\"Wallpaper Manager for Linux\"",
+]
+threads = true
+
+[dependencies.lito-qt]
+workspace = true
+
+[dependencies.rstd-std]
+workspace = true
+visibility = "private"
+
+[dependencies.rstd-cppstd]
+workspace = true
+visibility = "private"
+
+[dependencies.ncrequest]
+workspace = true
+visibility = "private"
+features = ["qt"]
+
+[dependencies.qextra]
+workspace = true
+visibility = "public"
+
+[dependencies.wavsen]
+workspace = true
+visibility = "private"
+
+[external-dependencies.cmake.qt6]
+workspace = true
+targets = [
+  { name = "Qt6::Core", visibility = "private" },
+  { name = "Qt6::DBus", visibility = "private" },
+  { name = "Qt6::Protobuf", visibility = "private" },
+  { name = "Qt6::ProtobufQuick", visibility = "private" },
+  { name = "Qt6::ProtobufWellKnownTypes", visibility = "private" },
+  { name = "Qt6::Quick", visibility = "private" },
+  { name = "Qt6::QuickControls2", visibility = "private" },
+  { name = "Qt6::QuickPrivate", visibility = "private" },
+  { name = "Qt6::WebSockets", visibility = "private" },
+]
+
+[external-dependencies.cmake.waywallen-control]
+workspace = true
+targets = [
+  { name = "waywallen-control", visibility = "private" },
+  { name = "waywallen-controlplugin", visibility = "private" },
+]
+
+[external-dependencies.cmake.qml-material]
+workspace = true
+targets = [
+  { name = "qml_material::qml_material", visibility = "private" },
+]

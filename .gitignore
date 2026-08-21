@@ -2,6 +2,7 @@ target
 /test*.sh
 /build.sh
 /Cargo.lock
+lito.lock
 /.env
 build
 /build*

@@ -1,0 +1,29 @@
+[package]
+name = "waywallen-bridge"
+version.workspace = true
+standard = "c99"
+
+[lib]
+name = "waywallen-bridge"
+kind = "shared"
+artifact = "waywallen-bridge"
+sources = [
+  "src/bridge.c",
+  "src/drm_fourcc.c",
+  "src/ipc_v3.c",
+  "src/probe_egl.c",
+  "src/probe_vk.c",
+  "src/sync_release.c",
+  "src/pool.c",
+  "src/pool_egl_gbm.c",
+  "src/pool_vulkan.c",
+]
+
+[usage]
+public-include-directories = ["include"]
+private-definitions = ["_GNU_SOURCE"]
+threads = true
+
+[external-dependencies.pkg-config.gbm]
+workspace = true
+visibility = "private"
