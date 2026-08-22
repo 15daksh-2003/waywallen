@@ -667,7 +667,7 @@ static int rd_bool(ww_rd_t *r, bool *out) {
     return WW_OK;
 }
 static int rd_i32(ww_rd_t *r, int32_t *out) {
-    uint32_t v; int rc = rd_u32(r, &v); *out = (int32_t)v; return rc;
+    uint32_t v; int rc = rd_u32(r, &v); if (rc) return rc; *out = (int32_t)v; return WW_OK;
 }
 static int rd_u64(ww_rd_t *r, uint64_t *out) {
     int rc = rd_need(r, 8);
@@ -681,7 +681,7 @@ static int rd_u64(ww_rd_t *r, uint64_t *out) {
     return WW_OK;
 }
 static int rd_i64(ww_rd_t *r, int64_t *out) {
-    uint64_t v; int rc = rd_u64(r, &v); *out = (int64_t)v; return rc;
+    uint64_t v; int rc = rd_u64(r, &v); if (rc) return rc; *out = (int64_t)v; return WW_OK;
 }
 static int rd_f32(ww_rd_t *r, float *out) {
     uint32_t bits; int rc = rd_u32(r, &bits); if (rc) return rc;

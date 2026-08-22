@@ -168,6 +168,7 @@ int ww_bridge_send_frame(int sock, uint16_t opcode, const uint8_t* body, size_t 
     msg.msg_iovlen = iov_count;
 
     if (n_fds > 0) {
+        memset(&cmsg_storage, 0, sizeof(cmsg_storage));
         msg.msg_control      = cmsg_storage.buf;
         msg.msg_controllen   = CMSG_SPACE(sizeof(int) * n_fds);
         struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
