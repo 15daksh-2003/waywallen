@@ -66,15 +66,39 @@ pub async fn serve_with_shutdown(
     sock_path: &Path,
     router: Arc<Router>,
     events_tx: tokio::sync::broadcast::Sender<GlobalEvent>,
-    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
-    let _ = std::fs::remove_file(sock_path);
+    let listener = bind_socket(sock_path).await?;
+    serve_bound(sock_path, listener, router, events_tx, shutdown_rx).await
+}
+
+pub async fn bind_socket(sock_path: &Path) -> Result<tokio::net::UnixListener> {
+    match std::fs::remove_file(sock_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            log::warn!(
+                "failed to remove stale display socket {}: {e}",
+                sock_path.display()
+            );
+        }
+    }
     if let Some(parent) = sock_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let listener = tokio::net::UnixListener::bind(sock_path)
         .with_context(|| format!("bind display socket at {}", sock_path.display()))?;
     log::info!("display endpoint listening on {}", sock_path.display());
+    Ok(listener)
+}
+
+pub async fn serve_bound(
+    sock_path: &Path,
+    listener: tokio::net::UnixListener,
+    router: Arc<Router>,
+    events_tx: tokio::sync::broadcast::Sender<GlobalEvent>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
     let mut clients = tokio::task::JoinSet::new();
 
     loop {
@@ -124,6 +148,17 @@ pub async fn serve_with_shutdown(
     while let Some(joined) = clients.join_next().await {
         if let Err(error) = joined {
             log::warn!("display client task join failed during shutdown: {error}");
+        }
+    }
+    drop(listener);
+    match std::fs::remove_file(sock_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            log::warn!(
+                "failed to remove display socket {}: {e}",
+                sock_path.display()
+            );
         }
     }
     Ok(())

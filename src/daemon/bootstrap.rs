@@ -86,6 +86,9 @@ pub async fn run(cli: DaemonConfig) -> anyhow::Result<()> {
     let dbus_conn = system::dbus::acquire_or_handoff(handoff_ui).await;
     log::info!("DBus name acquired: {}", system::dbus::BUS_NAME);
 
+    let display_sock_path = display::endpoint::default_socket_path();
+    let display_listener = display::endpoint::bind_socket(&display_sock_path).await?;
+
     let mut plugin_roots = plugin::renderer_registry::standard_plugin_roots("plugins");
     for plugin_dir in &cli.plugin_dirs {
         plugin_roots.push(plugin::renderer_registry::PluginRoot::system(
@@ -317,7 +320,6 @@ pub async fn run(cli: DaemonConfig) -> anyhow::Result<()> {
     // transient handshake failures.
     event_process::spawn(state.clone(), cli.restore_last);
 
-    let display_sock_path = display::endpoint::default_socket_path();
     {
         let router = router.clone();
         let sock_path = display_sock_path.clone();
@@ -326,9 +328,15 @@ pub async fn run(cli: DaemonConfig) -> anyhow::Result<()> {
         state
             .tasks
             .spawn_async(tasks::TaskKind::Service, "display/endpoint", async move {
-                display::endpoint::serve_with_shutdown(&sock_path, router, events_tx, shutdown_rx)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("display endpoint exited: {e}"))
+                display::endpoint::serve_bound(
+                    &sock_path,
+                    display_listener,
+                    router,
+                    events_tx,
+                    shutdown_rx,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("display endpoint exited: {e}"))
             });
     }
     if let Some(def) = display_backend {
