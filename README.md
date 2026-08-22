@@ -72,6 +72,9 @@ It started life as a Wallpaper Engine plugin for KDE.
 > To install a third-party plugin, manually download its ZIP archive and install it from the plugins page in the UI.<br>
 > After installation, Waywallen will notify you of plugin updates and install them.
 
+> [!WARNING]
+> **Third-party plugins are trusted code.** A plugin's Lua entry point runs inside the Waywallen daemon with your user account's privileges — just like any application you choose to install, it can read and write your files and access the network. **Only install plugins you trust**, preferably after reviewing their source.
+
 ## FAQ
 
 - How does hardware video decoding work?  
