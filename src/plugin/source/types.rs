@@ -4,6 +4,10 @@ use super::*;
 pub(super) const WAYWALLEN_HTTP_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) waywallen";
 pub(super) const LUA_CALLBACK_TIMEOUT: Duration = Duration::from_secs(25);
 pub(super) const LUA_HOOK_INSTRUCTION_INTERVAL: u32 = 10_000;
+/// Per-plugin Lua heap cap. Turns an accidental Lua-side runaway in one plugin into a
+/// catchable `MemoryError` instead of unbounded daemon growth; it does not bound
+/// Rust-side allocations (HTTP/JSON/HTML bodies).
+pub(super) const LUA_PLUGIN_MEMORY_LIMIT: usize = 128 * 1024 * 1024;
 pub(super) const RUNTIME_ACTIVE: u8 = 0;
 pub(super) const RUNTIME_DRAINING: u8 = 1;
 pub(super) const RUNTIME_INACTIVE: u8 = 2;

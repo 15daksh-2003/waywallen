@@ -150,6 +150,8 @@ impl LuaPluginRuntime {
 
     pub fn with_probe(probe: Arc<dyn MediaProbe>) -> Result<Self> {
         let lua = Lua::new();
+        lua.set_memory_limit(LUA_PLUGIN_MEMORY_LIMIT)
+            .map_err(|error| Error::Internal(anyhow!("set Lua memory limit: {error}")))?;
         let http_cookie_store = Arc::new(mlua_extra::http::SessionCookieStore::default());
         let http_client = reqwest::Client::builder()
             .user_agent(WAYWALLEN_HTTP_USER_AGENT)

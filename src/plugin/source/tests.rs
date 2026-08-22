@@ -1886,3 +1886,83 @@ return M
         Some("0.1 0.2 0.3")
     );
 }
+
+#[tokio::test]
+async fn plugin_oom_is_catchable_reusable_and_isolated() {
+    let dir = tempfile::tempdir().unwrap();
+    let heavy_path = dir.path().join("heavy.lua");
+    let light_path = dir.path().join("light.lua");
+    // `heavy` builds a large table only when the query is "overflow"; `light` is trivial.
+    std::fs::write(
+        &heavy_path,
+        r#"
+local M = {}
+function M.info()
+    return { name = "heavy", capabilities = { discover = { search = true } } }
+end
+M.discover = {}
+function M.discover.search(ctx, params)
+    if params.query == "overflow" then
+        local t = {}
+        local chunk = string.rep("x", 1024 * 1024)
+        for i = 1, 512 do t[i] = chunk .. tostring(i) end
+    end
+    return { items = {}, has_more = false }
+end
+return M
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &light_path,
+        r#"
+local M = {}
+function M.info()
+    return { name = "light", capabilities = { discover = { search = true } } }
+end
+M.discover = {}
+function M.discover.search(ctx, params)
+    return { items = {}, has_more = false }
+end
+return M
+"#,
+    )
+    .unwrap();
+
+    let mgr = SourceManager::new().unwrap();
+    mgr.load_plugin(&heavy_path, "org.heavy", "1", ENTRY_VERSION_V3)
+        .unwrap();
+    mgr.load_plugin(&light_path, "org.light", "1", ENTRY_VERSION_V3)
+        .unwrap();
+
+    // Tighten ONLY the heavy VM's cap just above its live usage so the over-allocation
+    // trips it deterministically (keyed off used_memory, not a fixed baseline).
+    {
+        let rt = mgr.test_runtime("heavy");
+        let guard = rt.lock().await;
+        let cap = guard.lua.used_memory() + 8 * 1024 * 1024;
+        guard.lua.set_memory_limit(cap).unwrap();
+    }
+
+    // The overrun surfaces as a typed Err (mlua MemoryError -> Error::DiscoverFailed),
+    // not a panic/abort; the redacted message carries "memory".
+    let err = mgr
+        .call_discover("heavy", "overflow", "", 1, &[])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::DiscoverFailed { .. }),
+        "unexpected error: {err:?}"
+    );
+    assert!(
+        err.to_string().to_lowercase().contains("memory"),
+        "message: {err}"
+    );
+
+    // The SAME plugin's VM is reusable afterwards (on-demand emergency GC reclaims the
+    // failed callback's now-unreachable table).
+    assert!(mgr.call_discover("heavy", "", "", 1, &[]).await.is_ok());
+
+    // The OTHER plugin's VM is provably unaffected.
+    assert!(mgr.call_discover("light", "", "", 1, &[]).await.is_ok());
+}
